@@ -10,7 +10,7 @@ const Employee = require('../models/Employee');
 router.get('/', async (req, res) => {
     try {
         const { area, role, isActive } = req.query;
-        const filter = {};
+        const filter = { isDeleted: { $ne: true } };
         if (area) filter.area = area;
         if (role) filter.role = role;
         if (typeof isActive !== 'undefined') filter.isActive = isActive === 'true';
@@ -282,18 +282,22 @@ router.post('/:loginId/deactivate', async (req, res) => {
 
 /**
  * DELETE /api/employees/:loginId
- * Delete an employee permanently
+ * Delete an employee (Soft Delete)
  */
 router.delete('/:loginId', async (req, res) => {
     try {
         const { loginId } = req.params;
-        const employee = await Employee.findOneAndDelete({ loginId });
+        const employee = await Employee.findOneAndUpdate(
+            { loginId },
+            { $set: { isDeleted: true, isActive: false, updatedAt: new Date() } },
+            { new: true }
+        );
 
         if (!employee) {
             return res.status(404).json({ error: 'Employee not found' });
         }
 
-        return res.status(200).json({ success: true, message: 'Employee permanently deleted', data: employee });
+        return res.status(200).json({ success: true, message: 'Employee soft deleted successfully', data: employee });
     } catch (err) {
         console.error('Delete employee error:', err);
         return res.status(500).json({ error: 'Failed to delete employee', details: err.message });

@@ -131,6 +131,7 @@ const TenantSchema = new mongoose.Schema({
         enum: ['pending', 'active', 'inactive', 'suspended'],
         default: 'pending'
     },
+    isDeleted: { type: Boolean, default: false },
     kycStatus: {
         type: String,
         enum: ['pending', 'submitted', 'verified', 'rejected'],

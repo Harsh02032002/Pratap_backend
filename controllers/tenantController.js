@@ -464,7 +464,7 @@ exports.assignTenant = async (req, res) => {
  */
 exports.getAllTenants = async (req, res) => {
     try {
-        const tenants = await Tenant.find()
+        const tenants = await Tenant.find({ isDeleted: { $ne: true } })
             .populate('property', 'title locationCode')
             .populate('user', 'name email phone')
             .sort({ createdAt: -1 })
@@ -485,11 +485,11 @@ exports.getTenantsByOwner = async (req, res) => {
     try {
         const { ownerId } = req.params;
 
-        let query = {};
+        let query = { isDeleted: { $ne: true } };
         if (require('mongoose').Types.ObjectId.isValid(ownerId)) {
-            query = { owner: ownerId };
+            query.owner = ownerId;
         } else {
-            query = { ownerLoginId: String(ownerId).toUpperCase() };
+            query.ownerLoginId = String(ownerId).toUpperCase();
         }
 
         // Get all properties owned by this owner
@@ -497,7 +497,7 @@ exports.getTenantsByOwner = async (req, res) => {
         const propertyIds = properties.map(p => p._id);
 
         // Get tenants assigned to these properties
-        const tenants = await Tenant.find({ property: { $in: propertyIds } })
+        const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
             .populate('property', 'title roomType locationCode owner ownerLoginId')
             .populate('user', 'name email phone')
             .sort({ createdAt: -1 })

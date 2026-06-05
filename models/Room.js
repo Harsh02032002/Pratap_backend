@@ -40,6 +40,7 @@ const RoomSchema = new mongoose.Schema({
 	createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 	status: { type: String, enum: ['inactive','active'], default: 'inactive' },
 	isPromoted: { type: Boolean, default: false },
+	isDeleted: { type: Boolean, default: false },
 	createdAt: { type: Date, default: Date.now }
 });
 

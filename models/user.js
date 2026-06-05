@@ -23,6 +23,7 @@ const userSchema = new mongoose.Schema({
     status: { type: String, enum: ['active', 'blocked'], default: 'active' },
     isActive: { type: Boolean, default: true },
     requirePasswordReset: { type: Boolean, default: false },
+    isDeleted: { type: Boolean, default: false },
 
     // Profile fields
     profilePic: { type: String },

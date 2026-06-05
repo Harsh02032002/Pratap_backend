@@ -26,7 +26,7 @@ router.get('/:id', async (req, res) => {
         const tenant = await Tenant.findById(req.params.id)
             .populate('property', 'title roomType locationCode owner ownerLoginId')
             .populate('room', 'number type rent');
-        if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+        if (!tenant || tenant.isDeleted) return res.status(404).json({ message: 'Tenant not found' });
         res.json(tenant);
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -206,17 +206,18 @@ router.delete('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), 
             await room.save();
         }
 
-        // Delete corresponding login credentials from User collection
+        // Soft delete corresponding login credentials from User collection
         const User = require('../models/user');
         if (tenant.user) {
-            await User.findByIdAndDelete(tenant.user);
+            await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
         }
         if (tenant.loginId) {
-            await User.deleteOne({ loginId: tenant.loginId, role: 'tenant' });
+            await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
         }
 
         // Instead of hard-deleting the tenant, soft-delete them to 'inactive' status (Ex-Tenant)
         tenant.status = 'inactive';
+        tenant.isDeleted = true;
         tenant.room = undefined; // clear Mongoose room ref
         await tenant.save();
         res.json({ message: 'Tenant deleted' });
@@ -228,7 +229,7 @@ router.delete('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), 
 // 6. Get tenants by property
 router.get('/property/:propertyId', async (req, res) => {
     try {
-        const tenants = await Tenant.find({ property: req.params.propertyId })
+        const tenants = await Tenant.find({ property: req.params.propertyId, isDeleted: { $ne: true } })
             .populate('property', 'title roomType locationCode owner ownerLoginId')
             .populate('room', 'number type rent');
         res.json(tenants);
@@ -240,7 +241,7 @@ router.get('/property/:propertyId', async (req, res) => {
 // 7. Get tenants by room
 router.get('/room/:roomId', async (req, res) => {
     try {
-        const tenants = await Tenant.find({ room: req.params.roomId })
+        const tenants = await Tenant.find({ room: req.params.roomId, isDeleted: { $ne: true } })
             .populate('property', 'title roomType locationCode owner ownerLoginId')
             .populate('room', 'number type rent');
         res.json(tenants);
@@ -565,6 +566,46 @@ router.get('/feedback/owner/:ownerLoginId', async (req, res) => {
         res.json({ success: true, feedbacks });
     } catch (err) {
         res.status(500).json({ message: err.message });
+    }
+});
+
+// Deactivate tenant
+router.post('/:id/deactivate', protect, authorize('superadmin', 'areamanager', 'owner'), auditTrail('tenants'), async (req, res) => {
+    try {
+        const tenant = await Tenant.findByIdAndUpdate(req.params.id, { $set: { status: 'suspended' } }, { new: true });
+        if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+
+        const User = require('../models/user');
+        if (tenant.user) {
+            await User.findByIdAndUpdate(tenant.user, { $set: { isActive: false } });
+        }
+        if (tenant.loginId) {
+            await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: false } });
+        }
+
+        return res.json({ success: true, message: 'Tenant account deactivated successfully', data: tenant });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Reactivate tenant
+router.post('/:id/reactivate', protect, authorize('superadmin', 'areamanager', 'owner'), auditTrail('tenants'), async (req, res) => {
+    try {
+        const tenant = await Tenant.findByIdAndUpdate(req.params.id, { $set: { status: 'active' } }, { new: true });
+        if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+
+        const User = require('../models/user');
+        if (tenant.user) {
+            await User.findByIdAndUpdate(tenant.user, { $set: { isActive: true } });
+        }
+        if (tenant.loginId) {
+            await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: true } });
+        }
+
+        return res.json({ success: true, message: 'Tenant account reactivated successfully', data: tenant });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
     }
 });
 

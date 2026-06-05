@@ -151,6 +151,7 @@ const PropertySchema = new mongoose.Schema({
   
   views: { type: Number, default: 0 },
   clicks: { type: Number, default: 0 },
+  isDeleted: { type: Boolean, default: false },
   
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }

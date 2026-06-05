@@ -2,7 +2,7 @@
 exports.getOwnerProperties = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        const properties = await Property.find({ ownerLoginId }).lean();
+        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
         res.json({ properties });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -13,9 +13,9 @@ exports.getOwnerProperties = async (req, res) => {
 exports.getOwnerRooms = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        const properties = await Property.find({ ownerLoginId }).lean();
+        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
         const propertyIds = properties.map(p => p._id);
-        const rooms = await require('../models/Room').find({ property: { $in: propertyIds } }).lean();
+        const rooms = await require('../models/Room').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
         res.json({ rooms });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -26,9 +26,9 @@ exports.getOwnerRooms = async (req, res) => {
 exports.getOwnerTenants = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        const properties = await Property.find({ ownerLoginId }).lean();
+        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
         const propertyIds = properties.map(p => p._id);
-        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds } }).lean();
+        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
         res.json({ tenants });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -56,7 +56,7 @@ const ApprovedProperty = require('../models/ApprovedProperty');
 exports.getAllOwners = async (req, res) => {
     try {
         const { locationCode, kycStatus, search } = req.query;
-        let query = {};
+        let query = { isDeleted: { $ne: true } };
 
         // Area Based Filtering
         if (locationCode) {

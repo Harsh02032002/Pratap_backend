@@ -20,6 +20,12 @@ router.put('/:managerId', propertyManagerController.updatePropertyManager);
 // Delete manager
 router.delete('/:managerId', propertyManagerController.deletePropertyManager);
 
+// Deactivate manager
+router.post('/:managerId/deactivate', propertyManagerController.deactivatePropertyManager);
+
+// Reactivate manager
+router.post('/:managerId/reactivate', propertyManagerController.reactivatePropertyManager);
+
 // Reset manager password
 router.post('/:managerId/reset-password', propertyManagerController.resetManagerPassword);
 

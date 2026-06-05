@@ -79,7 +79,7 @@ router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager')
 // 3. Get owner by loginId (Preserved)
 router.get('/:loginId', ownerController.getOwnerById);
 
-// 3b. Delete owner by loginId
+// 3b. Delete owner by loginId (Soft Delete)
 router.delete('/:loginId', auditTrail('owners'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').toUpperCase();
@@ -87,16 +87,33 @@ router.delete('/:loginId', auditTrail('owners'), async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid owner loginId' });
         }
 
-        const deletedOwner = await Owner.findOneAndDelete({ loginId });
-        await CheckinRecord.deleteOne({ loginId, role: 'owner' });
-        
-        // Delete corresponding login credentials from User collection
-        const User = require('../models/user');
-        await User.deleteOne({ loginId, role: 'owner' });
-
-        if (!deletedOwner) {
+        const owner = await Owner.findOne({ loginId });
+        if (!owner) {
             return res.status(404).json({ success: false, message: `Owner ${loginId} not found` });
         }
+
+        // 1. Soft delete owner profile
+        owner.isDeleted = true;
+        owner.isActive = false;
+        await owner.save();
+
+        // 2. Soft delete corresponding login credentials from User collection
+        const User = require('../models/user');
+        await User.updateOne({ loginId, role: 'owner' }, { $set: { isDeleted: true, isActive: false } });
+
+        // 3. Soft delete all properties owned by this owner
+        const Property = require('../models/Property');
+        const Room = require('../models/Room');
+        const ApprovedProperty = require('../models/ApprovedProperty');
+
+        const properties = await Property.find({ ownerLoginId: loginId });
+        const propertyIds = properties.map(p => p._id);
+
+        await Property.updateMany({ ownerLoginId: loginId }, { $set: { isDeleted: true, status: 'inactive', isPublished: false, isLiveOnWebsite: false } });
+        await Room.updateMany({ property: { $in: propertyIds } }, { $set: { isDeleted: true } });
+
+        // Remove from public website approved listings
+        await ApprovedProperty.deleteMany({ 'generatedCredentials.loginId': loginId });
 
         return res.json({ success: true, message: `Owner ${loginId} deleted successfully` });
     } catch (err) {
@@ -143,11 +160,11 @@ router.get('/:loginId/rooms', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Find properties owned by this owner
-        const properties = await Property.find({ ownerLoginId: loginId }).select('_id title');
+        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
         const propertyIds = properties.map(p => p._id);
 
         // Find rooms that belong to those properties
-        const rooms = await Room.find({ property: { $in: propertyIds } }).populate('property', 'title ownerLoginId');
+        const rooms = await Room.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).populate('property', 'title ownerLoginId');
 
         return res.json({ properties, rooms });
     } catch (err) {
@@ -160,7 +177,7 @@ router.get('/:loginId/rooms', async (req, res) => {
 router.get('/:loginId/properties', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        const properties = await Property.find({ ownerLoginId: loginId });
+        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } });
         return res.json({ properties });
     } catch (err) {
         console.error('❌ Error fetching owner properties:', err.message);
@@ -210,7 +227,7 @@ router.get('/:loginId/rent', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Find properties owned by this owner
-        const properties = await Property.find({ ownerLoginId: loginId }).select('_id');
+        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id');
         const propertyIds = properties.map(p => p._id);
 
         // Find enquiries for these properties that are accepted/approved
@@ -230,12 +247,12 @@ router.get('/:loginId/rent', async (req, res) => {
 router.get('/:loginId/tenants', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        const properties = await Property.find({ ownerLoginId: loginId }).select('_id');
+        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id');
         const propertyIds = properties.map((p) => p._id);
-        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds } });
+        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } });
         return res.json({ tenants });
     } catch (err) {
-        console.error('âŒ Error fetching owner tenants:', err.message);
+        console.error('❌ Error fetching owner tenants:', err.message);
         return res.status(500).json({ error: err.message });
     }
 });
@@ -276,5 +293,37 @@ router.post('/:ownerLoginId/properties/:propertyId/tenants', auditTrail('tenants
 
 // Get tenants for owner's property
 router.get('/:ownerLoginId/properties/:propertyId/tenants', ownerController.getPropertyTenants);
+
+// Deactivate owner
+router.post('/:loginId/deactivate', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {
+    try {
+        const loginId = String(req.params.loginId || '').toUpperCase();
+        const owner = await Owner.findOneAndUpdate({ loginId }, { $set: { isActive: false } }, { new: true });
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+        const User = require('../models/user');
+        await User.updateOne({ loginId, role: 'owner' }, { $set: { isActive: false } });
+
+        return res.json({ success: true, message: 'Owner account deactivated successfully', data: owner });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Reactivate owner
+router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {
+    try {
+        const loginId = String(req.params.loginId || '').toUpperCase();
+        const owner = await Owner.findOneAndUpdate({ loginId }, { $set: { isActive: true } }, { new: true });
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+        const User = require('../models/user');
+        await User.updateOne({ loginId, role: 'owner' }, { $set: { isActive: true } });
+
+        return res.json({ success: true, message: 'Owner account reactivated successfully', data: owner });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 module.exports = router;

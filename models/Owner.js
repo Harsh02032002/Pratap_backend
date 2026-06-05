@@ -143,6 +143,7 @@ const ownerSchema = new mongoose.Schema({
         dataUrl: String
     },
     isActive: { type: Boolean, default: false },
+    isDeleted: { type: Boolean, default: false },
     settings: {
         checkoutTime: { type: String, default: "10:00 AM" },
         checkinTime: { type: String, default: "11:00 AM" },

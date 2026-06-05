@@ -35,6 +35,10 @@ const employeeSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    isDeleted: {
+        type: Boolean,
+        default: false
+    },
     requirePasswordReset: {
         type: Boolean,
         default: false

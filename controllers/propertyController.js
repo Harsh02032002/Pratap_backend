@@ -157,15 +157,15 @@ exports.getAllProperties = async (req, res) => {
         
         // Run counts in parallel
         const [total, publishedCount, inactiveCount, rejectedCount] = await Promise.all([
-            Property.countDocuments(),
-            Property.countDocuments({ $or: [{ isLiveOnWebsite: true }, { status: 'active' }] }),
-            Property.countDocuments({ status: 'inactive' }),
-            Property.countDocuments({ status: 'blocked' })
+            Property.countDocuments({ isDeleted: { $ne: true } }),
+            Property.countDocuments({ isDeleted: { $ne: true }, $or: [{ isLiveOnWebsite: true }, { status: 'active' }] }),
+            Property.countDocuments({ isDeleted: { $ne: true }, status: 'inactive' }),
+            Property.countDocuments({ isDeleted: { $ne: true }, status: 'blocked' })
         ]);
         
         const pendingCount = total - (publishedCount + inactiveCount + rejectedCount);
  
-        const properties = await Property.find()
+        const properties = await Property.find({ isDeleted: { $ne: true } })
             .populate('owner', 'name phone email')
             .sort({ createdAt: -1 })
             .skip(skip)
@@ -400,31 +400,37 @@ exports.deleteProperty = async (req, res) => {
             ]
         });
 
-        // 1. Delete all rooms belonging to this property
+        // 1. Soft delete all rooms belonging to this property
         const Room = require('../models/Room');
-        await Room.deleteMany({ property: propId });
+        await Room.updateMany({ property: propId }, { $set: { isDeleted: true } });
 
-        // 2. Mark all active/pending tenants in this property as checked out / inactive (Ex-Tenants)
+        // 2. Mark all active/pending tenants in this property as checked out / inactive (Ex-Tenants) and soft-delete their credentials
         const Tenant = require('../models/Tenant');
         const User = require('../models/user');
         
         const propertyTenants = await Tenant.find({ property: propId });
         for (const tenant of propertyTenants) {
-            // Delete user login credentials
+            // Soft delete user login credentials
             if (tenant.user) {
-                await User.findByIdAndDelete(tenant.user);
+                await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
             }
             if (tenant.loginId) {
-                await User.deleteOne({ loginId: tenant.loginId, role: 'tenant' });
+                await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
             }
             
-            // Set status to inactive and clear active mongoose room ref
+            // Set status to inactive, set isDeleted, and clear active mongoose room ref
             tenant.status = 'inactive';
+            tenant.isDeleted = true;
             tenant.room = undefined;
             await tenant.save();
         }
 
-        await Property.findByIdAndDelete(propId);
+        // Soft delete the property itself
+        property.isDeleted = true;
+        property.status = 'inactive';
+        property.isPublished = false;
+        property.isLiveOnWebsite = false;
+        await property.save();
 
         // Clear API cache to reflect changes immediately
         clearCache('/api/approved-properties');

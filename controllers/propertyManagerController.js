@@ -237,7 +237,7 @@ exports.getManagersByOwner = async (req, res) => {
   try {
     const { ownerLoginId } = req.params;
 
-    const managers = await PropertyManager.find({ ownerLoginId })
+    const managers = await PropertyManager.find({ ownerLoginId, isDeleted: { $ne: true } })
       .populate('assignedProperty', 'title address city')
       .sort({ createdAt: -1 });
 
@@ -259,7 +259,7 @@ exports.getManagerById = async (req, res) => {
   try {
     const { managerId } = req.params;
 
-    const manager = await PropertyManager.findById(managerId)
+    const manager = await PropertyManager.findOne({ _id: managerId, isDeleted: { $ne: true } })
       .populate('assignedProperty', 'title address city ownerLoginId');
 
     if (!manager) {
@@ -324,7 +324,7 @@ exports.deletePropertyManager = async (req, res) => {
   try {
     const { managerId } = req.params;
 
-    const manager = await PropertyManager.findByIdAndDelete(managerId);
+    const manager = await PropertyManager.findByIdAndUpdate(managerId, { $set: { isDeleted: true, status: 'inactive' } }, { new: true });
     if (!manager) {
       return res.status(404).json({ 
         success: false, 
@@ -600,7 +600,7 @@ exports.getPropertyManagerTenants = async (req, res) => {
 
     // Get tenants for the assigned property
     const Tenant = require('../models/Tenant');
-    const tenants = await Tenant.find({ property: manager.assignedProperty._id })
+    const tenants = await Tenant.find({ property: manager.assignedProperty._id, isDeleted: { $ne: true } })
       .populate('property', 'title roomType locationCode ownerLoginId')
       .sort({ createdAt: -1 });
 
@@ -619,5 +619,33 @@ exports.getPropertyManagerTenants = async (req, res) => {
       message: 'Failed to fetch tenants',
       error: err.message
     });
+  }
+};
+
+// Deactivate property manager
+exports.deactivatePropertyManager = async (req, res) => {
+  try {
+    const { managerId } = req.params;
+    const manager = await PropertyManager.findByIdAndUpdate(managerId, { $set: { status: 'inactive' } }, { new: true });
+    if (!manager) {
+      return res.status(404).json({ success: false, message: 'Manager not found' });
+    }
+    return res.json({ success: true, message: 'Manager account deactivated successfully', manager });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Reactivate property manager
+exports.reactivatePropertyManager = async (req, res) => {
+  try {
+    const { managerId } = req.params;
+    const manager = await PropertyManager.findByIdAndUpdate(managerId, { $set: { status: 'active' } }, { new: true });
+    if (!manager) {
+      return res.status(404).json({ success: false, message: 'Manager not found' });
+    }
+    return res.json({ success: true, message: 'Manager account reactivated successfully', manager });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
