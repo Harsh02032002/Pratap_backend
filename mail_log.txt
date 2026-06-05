@@ -1,0 +1,12 @@
+[2026-06-05T10:20:33.321Z] FAILED: Mailjet API rejected the request (Check keys)
+[2026-06-05T10:20:39.288Z] SUCCESS: Email to harshdeepbca503@gmail.com via SMTP
+[2026-06-05T10:20:40.904Z] WHATSAPP: Delivered to 1 recipients
+[2026-06-05T10:24:39.343Z] FAILED: Mailjet API rejected the request (Check keys)
+[2026-06-05T10:24:44.517Z] SUCCESS: Email to harshdeepbca503@gmail.com via SMTP
+[2026-06-05T10:24:45.629Z] WHATSAPP: Delivered to 1 recipients
+[2026-06-05T10:24:56.862Z] FAILED: Mailjet API rejected the request (Check keys)
+[2026-06-05T10:25:01.397Z] SUCCESS: Email to harshdeepbca503@gmail.com via SMTP
+[2026-06-05T10:25:01.506Z] FAILED: Mailjet API rejected the request (Check keys)
+[2026-06-05T10:25:02.545Z] WHATSAPP: Delivered to 1 recipients
+[2026-06-05T10:25:08.148Z] SUCCESS: Email to harshdeepbca503@gmail.com via SMTP
+[2026-06-05T10:25:09.242Z] WHATSAPP: Delivered to 1 recipients

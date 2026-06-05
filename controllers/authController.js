@@ -811,11 +811,14 @@ exports.verifyOwnerTemp = async (req, res) => {
         const normalizedLoginId = String(loginId || '').trim().toUpperCase();
         let user = await User.findOne({ loginId: normalizedLoginId, role: 'owner' });
 
+        // Check if Owner record exists and is active
+        const owner = await Owner.findOne({ loginId: normalizedLoginId });
+        if (!owner || owner.status === 'inactive') {
+            return res.status(403).json({ message: 'Account disabled/inactive' });
+        }
+
         // Backward-compat: owner record exists but auth user row missing.
         if (!user) {
-            const owner = await Owner.findOne({ loginId: normalizedLoginId });
-            if (!owner) return res.status(404).json({ message: 'Owner not found' });
-
             const ownerTempPassword = owner?.credentials?.password || owner?.checkinPassword || '';
             if (!ownerTempPassword) {
                 return res.status(404).json({ message: 'Owner credentials not initialized' });
@@ -866,11 +869,14 @@ exports.setOwnerPassword = async (req, res) => {
         const normalizedLoginId = String(loginId || '').trim().toUpperCase();
         let user = await User.findOne({ loginId: normalizedLoginId, role: 'owner' });
 
+        // Check if Owner record exists and is active
+        const owner = await Owner.findOne({ loginId: normalizedLoginId });
+        if (!owner || owner.status === 'inactive') {
+            return res.status(403).json({ message: 'Account disabled/inactive' });
+        }
+
         // Backward-compat: create missing auth user from Owner record.
         if (!user) {
-            const owner = await Owner.findOne({ loginId: normalizedLoginId });
-            if (!owner) return res.status(404).json({ message: 'Owner not found' });
-
             const ownerTempPassword = owner?.credentials?.password || owner?.checkinPassword || '';
             if (!ownerTempPassword) {
                 return res.status(404).json({ message: 'Owner credentials not initialized' });
@@ -902,10 +908,10 @@ exports.setOwnerPassword = async (req, res) => {
         if (!ok) return res.status(401).json({ message: 'Invalid temporary password' });
 
         user.password = newPassword; // will be hashed by pre-save hook
+        user.requirePasswordReset = false;
         await user.save();
 
         // Clear firstTime flag so next login works normally
-        const Owner = require('../models/Owner');
         await Owner.findOneAndUpdate(
             { loginId: normalizedLoginId },
             { $set: { 'credentials.firstTime': false } }
