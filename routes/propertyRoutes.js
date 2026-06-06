@@ -13,7 +13,7 @@ const { formLimiter } = require('../middleware/security');
 router.get('/', propertyController.getAllProperties);
 
 // Add/Create new property with auto-geocoding
-router.post('/add', formLimiter, auditTrail('properties'), propertyController.addProperty);
+router.post('/add', protect, formLimiter, auditTrail('properties'), propertyController.addProperty);
 
 // Get single property by ID
 router.get('/:id', propertyController.getPropertyById);

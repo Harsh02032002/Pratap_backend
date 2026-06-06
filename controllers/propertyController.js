@@ -108,15 +108,15 @@ exports.addProperty = async (req, res) => {
       }
     }
 
-    // If added by owner, it should be pending approval. Otherwise, auto-active for superadmin.
-    if (propertyData.ownerLoginId && propertyData.status !== 'active') {
-        propertyData.status = 'pending_approval';
-        propertyData.isPublished = false;
-        propertyData.isLiveOnWebsite = false;
-    } else {
+    // Only superadmin can add directly as active. Everyone else (owner, manager) goes to pending_approval.
+    if (req.user && req.user.role === 'superadmin') {
         propertyData.status = 'active'; // Auto active for superadmin
         propertyData.isPublished = true;
         propertyData.isLiveOnWebsite = true;
+    } else {
+        propertyData.status = 'pending_approval';
+        propertyData.isPublished = false;
+        propertyData.isLiveOnWebsite = false;
     }
 
     const property = new Property(propertyData);
