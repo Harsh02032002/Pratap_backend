@@ -58,7 +58,7 @@ const PropertySchema = new mongoose.Schema({
   featuredImage: { type: String },
   
   // Property details
-  propertyType: { type: String, enum: ['pg', 'hostel', 'co-living', 'apartment'], default: 'pg' },
+  propertyType: { type: String, enum: ['pg', 'hostel', 'co-living', 'coliving', 'apartment', 'room'], default: 'pg' },
   gender: { type: String, enum: ['male', 'female', 'any'], default: 'any' },
   monthlyRent: { type: Number, default: 0 },
   
