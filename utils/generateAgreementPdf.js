@@ -11,9 +11,9 @@ const path = require('path');
 // replace the image file or update LOGO_PATHS below.
 // ======================================================
 const LOGO_PATHS = [
-    path.join(__dirname, '../../Roohmy-Frontend/public/website/images/roomhy.png'),
-    path.join(__dirname, '../../Roohmy-Frontend/public/website/images/logoroomhy.jpg'),
-    path.join(__dirname, '../public/website/images/roomhy.png')
+    path.join(__dirname, '../../Roohmy-Frontend/public/website/images/seal1.png'),
+    path.join(__dirname, '../../Roohmy-Frontend/public/website/images/seal1.png'),
+    path.join(__dirname, '../public/website/images/seal1.png')
 ];
 
 // ======================================================
@@ -414,22 +414,31 @@ function generateAgreementPdfBuffer({
             // To change the RoomHy seal/sign in future,
             // update the LOGO_PATHS array at the top of this file.
             // ======================================================
+            const logoWidth = 90;
+            const logoHeight = 60;
+            const logoX = rightX + Math.max(0, ((halfPW - 10) - logoWidth) / 2);
+            const logoY = sigY + 18;
+
             let logoDrawn = false;
             for (const lp of LOGO_PATHS) {
                 try {
-                    doc.image(lp, rightX, sigY + 18, { fit: [100, 50] });
+                    doc.image(lp, logoX, logoY, {
+                        fit: [logoWidth, logoHeight],
+                        align: 'center',
+                        valign: 'center'
+                    });
                     logoDrawn = true;
                     break;
                 } catch (_) {}
             }
             if (!logoDrawn) {
                 doc.font('Helvetica-Bold').fontSize(16).fillColor('#1d4ed8')
-                   .text('ROOMHY', rightX, sigY + 30, { width: 100, align: 'center' });
+                   .text('ROOMHY', logoX, sigY + 30, { width: logoWidth, align: 'center' });
             }
-            doc.moveTo(rightX, sigY + 72).lineTo(rightX + halfPW - 10, sigY + 72)
+            doc.moveTo(rightX, sigY + 76).lineTo(rightX + halfPW - 10, sigY + 76)
                .lineWidth(0.5).strokeColor('#000000').stroke();
 
-            const dateLineY = sigY + 86;
+            const dateLineY = sigY + 90;
             doc.font('Helvetica-Bold').fontSize(10).fillColor('#000000')
                .text('Date:', M, dateLineY);
             doc.moveTo(M + 40, dateLineY + 14).lineTo(M + halfPW - 20, dateLineY + 14)
