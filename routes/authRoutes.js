@@ -4,9 +4,9 @@ const authController = require('../controllers/authController');
 const { protect } = require('../middleware/authMiddleware');
 const { authLimiter, otpLimiter, captchaProtection } = require('../middleware/security');
 
-router.use(authLimiter);
+// router.use(authLimiter); // Removed global auth limiter as it affects /me and other routes
 
-router.post('/login', authController.login);
+router.post('/login', authLimiter, authController.login);
 
 router.get('/debug-emp', async (req, res) => {
     try {
@@ -18,7 +18,7 @@ router.get('/debug-emp', async (req, res) => {
     }
 });
 
-router.post('/register', authController.register);
+router.post('/register', authLimiter, authController.register);
 router.get('/me', protect, authController.me);
 
 // Owner specific flows (temp password verification and set new password)

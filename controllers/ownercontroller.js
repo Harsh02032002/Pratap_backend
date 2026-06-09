@@ -1,8 +1,16 @@
+// Cache to prevent running the unindexed RegExp auto-healer query on every API request
+const healedOwners = new Set();
+
 // Auto-healer function to match and link previously unlinked properties to owners on-the-fly
 exports.healOwnerProperties = async (loginId) => {
     try {
         const normalizedLoginId = String(loginId || '').trim().toUpperCase();
         if (!normalizedLoginId) return;
+
+        if (healedOwners.has(normalizedLoginId)) {
+            return;
+        }
+        healedOwners.add(normalizedLoginId);
 
         const mongoose = require('mongoose');
         const Owner = mongoose.models.Owner || require('../models/Owner');
@@ -236,19 +244,17 @@ exports.getOwnerProperties = async (req, res) => {
         
         const syncedProperties = [];
         for (const prop of properties) {
-            const occupancy = await exports.syncPropertyOccupancyData(prop._id);
-            if (occupancy) {
-                const propObj = prop.toObject ? prop.toObject() : prop;
-                propObj.roomCount = occupancy.totalRooms;
-                propObj.bedCount = occupancy.totalBeds;
-                propObj.occupiedBeds = occupancy.occupiedBeds;
-                propObj.occupiedRooms = occupancy.occupiedRooms;
-                propObj.vacantRooms = occupancy.vacantRooms;
-                propObj.vacantBeds = occupancy.vacantBeds;
-                syncedProperties.push(propObj);
-            } else {
-                syncedProperties.push(prop);
-            }
+            // Use existing stored occupancy fields; avoid blocking sync on each request.
+            // Trigger async sync in background to keep data fresh without delaying response.
+            exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
+            const propObj = prop.toObject ? prop.toObject() : prop;
+            propObj.roomCount = prop.roomCount ?? propObj.roomCount;
+            propObj.bedCount = prop.bedCount ?? propObj.bedCount;
+            propObj.occupiedBeds = prop.occupiedBeds ?? propObj.occupiedBeds;
+            propObj.occupiedRooms = prop.occupiedRooms ?? propObj.occupiedRooms;
+            propObj.vacantRooms = prop.vacantRooms ?? propObj.vacantRooms;
+            propObj.vacantBeds = prop.vacantBeds ?? propObj.vacantBeds;
+            syncedProperties.push(propObj);
         }
         res.json({ properties: syncedProperties });
     } catch (err) {
@@ -260,21 +266,38 @@ exports.getOwnerProperties = async (req, res) => {
 exports.getOwnerRooms = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        await exports.healOwnerProperties(ownerLoginId);
-        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
-        
-        // Sync property occupancy (this auto-generates rooms from roomTypes if they don't exist yet)
-        for (const prop of properties) {
-            try {
-                await exports.syncPropertyOccupancyData(prop._id);
-            } catch (syncErr) {
-                console.error(`❌ Error syncing occupancy during getOwnerRooms for property ${prop._id}:`, syncErr.message);
-            }
-        }
-
-        const propertyIds = properties.map(p => p._id);
-        const rooms = await require('../models/Room').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
-        res.json({ rooms });
+        // Fire-and-forget heal properties (do not block)
+        exports.healOwnerProperties(ownerLoginId).catch(err => console.error('Heal error:', err));
+        // pagination (default page 1, 3 per page)
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.max(parseInt(req.query.limit) || 3, 1);
+        const skip = (page - 1) * limit;
+        // Use aggregation to fetch rooms belonging to this owner's properties
+        const Room = require('../models/Room');
+        const pipeline = [
+            { $lookup: { from: 'properties', localField: 'property', foreignField: '_id', as: 'prop' } },
+            { $unwind: '$prop' },
+            { $match: { 'prop.ownerLoginId': ownerLoginId, isDeleted: { $ne: true } } },
+            { $skip: skip },
+            { $limit: limit },
+            { $project: { prop: 0 } }
+        ];
+        const rooms = await Room.aggregate(pipeline);
+        // Total count (separate aggregation)
+        const totalAgg = await Room.aggregate([
+            { $lookup: { from: 'properties', localField: 'property', foreignField: '_id', as: 'prop' } },
+            { $unwind: '$prop' },
+            { $match: { 'prop.ownerLoginId': ownerLoginId, isDeleted: { $ne: true } } },
+            { $count: 'count' }
+        ]);
+        const totalCount = (totalAgg[0] && totalAgg[0].count) || 0;
+        // Async sync occupancy for each property (fire-and-forget)
+        const syncPromises = [];
+        const propertyIds = rooms.map(r => r.property);
+        const Property = require('../models/Property');
+        const props = await Property.find({ _id: { $in: propertyIds } }).lean();
+        props.forEach(p => syncPromises.push(exports.syncPropertyOccupancyData(p._id).catch(err => console.error('Async sync error:', err))));
+        res.json({ rooms, totalCount, page, limit });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

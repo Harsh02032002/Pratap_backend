@@ -44,6 +44,6 @@ const RoomSchema = new mongoose.Schema({
 	createdAt: { type: Date, default: Date.now }
 });
 
-RoomSchema.index({ property: 1 });
+RoomSchema.index({ property: 1, isDeleted: 1 });
 
 module.exports = mongoose.model('Room', RoomSchema);
