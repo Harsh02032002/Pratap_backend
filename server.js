@@ -169,66 +169,12 @@ if (!mongoUri) {
     console.log('🔍 URI preview:', mongoUri.substring(0, 50) + '...');
 }
 
-// Database Self-Healing Routine to clean up stale room/property assignments
-async function runDatabaseSelfHealing() {
-    try {
-        console.log('🧹 Running database self-healing checks...');
-        const Tenant = require('./models/Tenant');
-        const Room = require('./models/Room');
-        const Property = require('./models/Property');
-        const User = require('./models/user');
 
-        // 1. Clean up tenants with non-existent rooms
-        const tenantsWithRooms = await Tenant.find({ room: { $ne: null } });
-        let cleanedRoomsCount = 0;
-        for (const tenant of tenantsWithRooms) {
-            const roomExists = await Room.findById(tenant.room).lean();
-            if (!roomExists) {
-                tenant.room = undefined;
-                tenant.roomNo = '';
-                tenant.bedNo = '';
-                await tenant.save();
-                cleanedRoomsCount++;
-                console.log(`  ✓ Cleaned deleted room reference for tenant: ${tenant.name}`);
-            }
-        }
-        if (cleanedRoomsCount > 0) {
-            console.log(`  ✓ Total room references cleaned: ${cleanedRoomsCount}`);
-        }
-
-        // 2. Clean up tenants with non-existent properties
-        const tenantsWithProperties = await Tenant.find({ property: { $ne: null } });
-        let cleanedPropsCount = 0;
-        for (const tenant of tenantsWithProperties) {
-            const propExists = await Property.findById(tenant.property).lean();
-            if (!propExists) {
-                if (tenant.user) {
-                    await User.findByIdAndDelete(tenant.user);
-                }
-                if (tenant.loginId) {
-                    await User.deleteOne({ loginId: tenant.loginId, role: 'tenant' });
-                }
-                tenant.status = 'inactive';
-                tenant.room = undefined;
-                await tenant.save();
-                cleanedPropsCount++;
-                console.log(`  ✓ Cleaned deleted property reference and marked inactive for tenant: ${tenant.name}`);
-            }
-        }
-        if (cleanedPropsCount > 0) {
-            console.log(`  ✓ Total property references cleaned: ${cleanedPropsCount}`);
-        }
-        console.log('🧹 Database self-healing complete!');
-    } catch (err) {
-        console.error('❌ Error during database self-healing:', err.message);
-    }
-}
 
 // Connect to MongoDB
 mongoose.connect(mongoUri, mongoOptions)
     .then(() => {
         console.log('✅ MongoDB Connected');
-        runDatabaseSelfHealing();
         startServer();
     })
     .catch(err => {
@@ -378,6 +324,8 @@ try {
     console.log('  ✓ marketingAssetRoutes');
     app.use('/api/reports', require('./routes/reportRoutes'));
     console.log('  ✓ reportRoutes');
+    app.use('/api/tasks', require('./routes/taskRoutes'));
+    console.log('  ✓ taskRoutes');
     app.use('/api/tenant-gate', require('./routes/tenantGateRoutes'));
     console.log('  ✓ tenantGateRoutes');
     app.use('/api/user', require('./routes/userRoutes'));

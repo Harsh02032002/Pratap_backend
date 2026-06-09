@@ -452,8 +452,8 @@ function getLoginUrlForRole(role, originUrl = '') {
     if (r.includes('tenant')) {
         return `${frontendUrl}/tenant/tenantlogin`;
     }
-    if (r.includes('manager') || r.includes('employee') || r.includes('staff') || r.includes('warden') || r.includes('electrician') || r.includes('plumber') || r.includes('security') || r.includes('housekeeping')) {
-        return `${frontendUrl}/employee/index`;
+    if (r.includes('manager') || r.includes('employee') || r.includes('staff') || r.includes('warden') || r.includes('reception') || r.includes('accountant') || r.includes('electrician') || r.includes('plumber') || r.includes('security') || r.includes('housekeeping') || r.includes('maintenance') || r.includes('custom')) {
+        return `${frontendUrl}/staff`;
     }
     return `${frontendUrl}/superadmin/index`;
 }

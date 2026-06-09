@@ -17,27 +17,48 @@ exports.getAttendance = async (req, res) => {
 
 exports.markAttendance = async (req, res) => {
     try {
-        const { employeeId, ownerLoginId, date, status, checkIn, checkOut } = req.body;
+        const { employeeId, employeeLoginId, ownerLoginId, date, status, checkIn, checkOut, notes, leaveType, leaveReason } = req.body;
+
+        // If employeeLoginId provided but no employeeId, look up the employee
+        let resolvedEmployeeId = employeeId;
+        if (!resolvedEmployeeId && employeeLoginId) {
+            const Employee = require('../models/Employee');
+            const emp = await Employee.findOne({ loginId: employeeLoginId });
+            if (emp) resolvedEmployeeId = emp._id;
+        }
+
+        if (!resolvedEmployeeId) {
+            return res.status(400).json({ success: false, error: 'employeeId or employeeLoginId required' });
+        }
+
         const parsedDate = new Date(date);
         parsedDate.setHours(0, 0, 0, 0);
 
-        const existing = await StaffAttendance.findOne({ employeeId, date: parsedDate });
+        const existing = await StaffAttendance.findOne({ employeeId: resolvedEmployeeId, date: parsedDate });
         if (existing) {
-            existing.status = status || existing.status;
-            existing.checkIn = checkIn || existing.checkIn;
-            existing.checkOut = checkOut || existing.checkOut;
+            if (status) existing.status = status;
+            if (checkIn) existing.checkIn = checkIn;
+            if (checkOut) existing.checkOut = checkOut;
+            if (notes !== undefined) existing.notes = notes;
+            if (leaveType) existing.leaveType = leaveType;
+            if (leaveReason) existing.leaveReason = leaveReason;
+            if (employeeLoginId) existing.employeeLoginId = employeeLoginId;
             existing.updatedAt = new Date();
             await existing.save();
             return res.json({ success: true, data: existing });
         }
 
         const record = new StaffAttendance({
-            employeeId,
+            employeeId: resolvedEmployeeId,
+            employeeLoginId: employeeLoginId || '',
             ownerLoginId,
             date: parsedDate,
             status,
             checkIn,
-            checkOut
+            checkOut,
+            notes: notes || '',
+            leaveType: leaveType || '',
+            leaveReason: leaveReason || '',
         });
         await record.save();
         res.json({ success: true, data: record });

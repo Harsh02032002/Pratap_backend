@@ -499,24 +499,42 @@ exports.getAllTenants = async (req, res) => {
 exports.getTenantsByOwner = async (req, res) => {
     try {
         const { ownerId } = req.params;
+        const normalizedId = String(ownerId).toUpperCase();
 
-        let query = { isDeleted: { $ne: true } };
+        // Query 1: Direct ownerLoginId on Tenant model
+        const directTenants = await Tenant.find({
+            ownerLoginId: normalizedId,
+            isDeleted: { $ne: true }
+        })
+        .populate('property', 'title roomType locationCode owner ownerLoginId')
+        .populate('user', 'name email phone')
+        .sort({ createdAt: -1 })
+        .lean();
+
+        // Query 2: Via Property model (for older records)
+        let propQuery = {};
         if (require('mongoose').Types.ObjectId.isValid(ownerId)) {
-            query.owner = ownerId;
+            propQuery.owner = ownerId;
         } else {
-            query.ownerLoginId = String(ownerId).toUpperCase();
+            propQuery.ownerLoginId = normalizedId;
         }
-
-        // Get all properties owned by this owner
-        const properties = await Property.find(query).lean();
+        const properties = await Property.find(propQuery).lean();
         const propertyIds = properties.map(p => p._id);
+        const propTenants = propertyIds.length > 0
+            ? await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
+                .populate('property', 'title roomType locationCode owner ownerLoginId')
+                .populate('user', 'name email phone')
+                .sort({ createdAt: -1 })
+                .lean()
+            : [];
 
-        // Get tenants assigned to these properties
-        const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
-            .populate('property', 'title roomType locationCode owner ownerLoginId')
-            .populate('user', 'name email phone')
-            .sort({ createdAt: -1 })
-            .lean();
+        // Merge + deduplicate by _id
+        const seen = new Set();
+        const tenants = [];
+        for (const t of [...directTenants, ...propTenants]) {
+            const id = String(t._id);
+            if (!seen.has(id)) { seen.add(id); tenants.push(t); }
+        }
 
         res.json({ success: true, tenants });
     } catch (error) {
