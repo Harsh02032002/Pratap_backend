@@ -2,15 +2,111 @@ const cron = require('node-cron');
 let Rent = null;
 let Tenant = null;
 let Notification = null;
+let Owner = null;
+let Property = null;
+let Room = null;
+let Complaint = null;
+let TaskBoard = null;
+let VisitorLog = null;
+let ElectricityMeter = null;
+let OwnerChangeRequest = null;
 const { sendMail } = require('../utils/mailer');
 
 try {
     Rent = require('../models/Rent');
     Tenant = require('../models/Tenant');
     Notification = require('../models/Notification');
+    Owner = require('../models/Owner');
+    Property = require('../models/Property');
+    Room = require('../models/Room');
+    Complaint = require('../models/Complaint');
+    TaskBoard = require('../models/TaskBoard');
+    VisitorLog = require('../models/VisitorLog');
+    ElectricityMeter = require('../models/ElectricityMeter');
+    OwnerChangeRequest = require('../models/OwnerChangeRequest');
 } catch (err) {
     console.warn('⚠️ Models not found:', err.message);
 }
+
+// Ensure DEMO owner exists
+async function initDemoOwner() {
+    if (!Owner) return;
+    try {
+        const demo = await Owner.findOne({ loginId: 'DEMOOWNER' });
+        if (!demo) {
+            await Owner.create({
+                loginId: 'DEMOOWNER',
+                name: 'Demo Owner',
+                email: 'demo@roomhy.com',
+                password: 'demo123', // In production it should be hashed, assuming pre-save hook handles it
+                isActive: true
+            });
+            console.log('✅ Demo owner created: DEMOOWNER / demo123');
+        }
+    } catch (err) {
+        console.error('❌ Failed to init demo owner:', err.message);
+    }
+}
+
+// Reset DEMO account data every night at midnight
+const demoResetSchedule = cron.schedule('0 0 * * *', async () => {
+    if (!Owner || !Property) return;
+    console.log('🔄 Running daily reset for DEMOOWNER account...');
+    try {
+        const demoLoginId = 'DEMOOWNER';
+        
+        // 1. Get properties
+        const properties = await Property.find({ ownerLoginId: demoLoginId });
+        const propIds = properties.map(p => p._id);
+        
+        // 2. Delete Relational Data
+        if (Room) await Room.deleteMany({ property: { $in: propIds } });
+        if (ElectricityMeter) await ElectricityMeter.deleteMany({ property: { $in: propIds } });
+        
+        if (Tenant) {
+            const tenants = await Tenant.find({ ownerLoginId: demoLoginId });
+            const tenantIds = tenants.map(t => t._id);
+            if (Rent) await Rent.deleteMany({ tenant: { $in: tenantIds } });
+            await Tenant.deleteMany({ ownerLoginId: demoLoginId });
+        }
+        
+        if (Complaint) await Complaint.deleteMany({ ownerLoginId: demoLoginId });
+        
+        // TaskBoard belongs to owner by object id, fetch owner first
+        const demoOwner = await Owner.findOne({ loginId: demoLoginId });
+        if (demoOwner && TaskBoard) {
+            await TaskBoard.deleteMany({ ownerId: demoOwner._id });
+        }
+        
+        if (VisitorLog) await VisitorLog.deleteMany({ ownerLoginId: demoLoginId });
+        if (OwnerChangeRequest) await OwnerChangeRequest.deleteMany({ ownerLoginId: demoLoginId });
+        
+        // 3. Delete Properties
+        await Property.deleteMany({ ownerLoginId: demoLoginId });
+
+        // 4. Reset Owner profile (keep login active but clear PII/Bank details)
+        if (demoOwner) {
+            demoOwner.checkinAccountHolderName = '';
+            demoOwner.checkinBankName = '';
+            demoOwner.checkinBranchName = '';
+            demoOwner.checkinBankAccountNumber = '';
+            demoOwner.checkinIfscCode = '';
+            demoOwner.checkinUpiId = '';
+            demoOwner.roomCount = 0;
+            demoOwner.bedCount = 0;
+            demoOwner.vacantRooms = 0;
+            demoOwner.vacantBeds = 0;
+            demoOwner.occupiedRooms = 0;
+            demoOwner.occupiedBeds = 0;
+            demoOwner.roomInventory = [];
+            await demoOwner.save();
+        }
+
+        console.log('✅ Successfully wiped and reset DEMOOWNER account data.');
+    } catch (err) {
+        console.error('❌ Failed to reset demo account:', err.message);
+    }
+});
 
 // Send rent reminders: Every day at 10 AM during collection period (10-15th)
 const rentReminderSchedule = cron.schedule('0 10 10-15 * *', async () => {
@@ -512,13 +608,16 @@ async function sendDelayedReminderEmail(rent, reminderNumber = 1) {
 // Export functions
 module.exports = {
     startCronJobs: () => {
+        initDemoOwner(); // Ensure DEMO owner is ready
         console.log('🕐 Cron jobs initialized');
+        console.log('   - Demo account reset: Daily midnight');
         console.log('   - Rent reminders: Daily 10 AM (10-15th)');
         console.log('   - Delayed payment reminders: 9 AM, 2 PM, 6 PM (after 15th)');
         console.log('   - Auto reminders: Daily 10:30 AM (enabled manually per unpaid rent)');
         console.log('   - Agreement renewals: Daily 9 AM (10 and 11 month checks)');
     },
     stopCronJobs: () => {
+        demoResetSchedule.stop();
         rentReminderSchedule.stop();
         delayedReminderSchedule.stop();
         autoReminderSchedule.stop();
