@@ -232,6 +232,8 @@ try {
     console.log('  ✓ notificationRoutes');
     app.use('/api/owners', require('./routes/ownerRoutes'));
     console.log('  ✓ ownerRoutes');
+    app.use('/api/owner-change-requests', require('./routes/ownerChangeRequestRoutes'));
+    console.log('  ✓ ownerChangeRequestRoutes');
     app.use('/api/employees', require('./routes/employeeRoutes'));
     console.log('  ✓ employeeRoutes');
     app.use('/api/complaints', require('./routes/complaintRoutes'));
