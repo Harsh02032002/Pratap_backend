@@ -52,20 +52,24 @@ exports.updateMeterReading = async (req, res) => {
         
         await currentRecord.save();
 
-        // Sync electricity bill to tenant's rent invoice (create invoice if missing)
+        let invoiceSync = { synced: false };
         try {
-            const syncResult = await syncElectricityToInvoice(propertyId, roomNo, billingMonth, currentRecord);
-            if (!syncResult.synced) {
-                console.warn('[electricityController] invoice sync skipped:', syncResult.reason, { propertyId, roomNo, billingMonth });
+            invoiceSync = await syncElectricityToInvoice(propertyId, roomNo, billingMonth, currentRecord);
+            if (!invoiceSync.synced) {
+                console.warn('[electricityController] invoice sync skipped:', invoiceSync.reason, { propertyId, roomNo, billingMonth });
             }
         } catch (linkErr) {
             console.error('[electricityController] invoice link error:', linkErr.message);
+            invoiceSync = { synced: false, reason: linkErr.message };
         }
 
         res.json({
             success: true,
-            message: 'Reading updated successfully',
-            reading: currentRecord
+            message: invoiceSync.synced
+                ? 'Reading saved and added to tenant dues'
+                : 'Reading saved (tenant invoice not linked — check room has an active tenant)',
+            reading: currentRecord,
+            invoiceSync,
         });
     } catch (error) {
         console.error('updateMeterReading error:', error);

@@ -59,13 +59,19 @@ function escapeRegex(str) {
 }
 
 async function attachPendingElectricity(invoice, tenantId) {
-  const tenant = await Tenant.findById(tenantId).select('property roomNo').lean();
-  if (!tenant?.roomNo || !tenant.property) return;
+  const tenant = await Tenant.findById(tenantId).select('property roomNo room').lean();
+  if (!tenant?.property) return;
+
+  const orClause = [];
+  if (tenant.roomNo) orClause.push({ roomNo: { $regex: new RegExp(`^${escapeRegex(tenant.roomNo)}$`, 'i') } });
+  if (tenant.room) orClause.push({ room: tenant.room });
+  if (!orClause.length) return;
 
   const meter = await ElectricityMeter.findOne({
     property: tenant.property,
-    roomNo: { $regex: new RegExp(`^${escapeRegex(tenant.roomNo)}$`, 'i') },
     billingMonth: invoice.billingMonth,
+    totalBill: { $gt: 0 },
+    $or: orClause,
   }).lean();
 
   if (!meter?.totalBill) return;

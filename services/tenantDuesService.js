@@ -1,5 +1,7 @@
 'use strict';
 const RentInvoice = require('../models/RentInvoice');
+const ElectricityMeter = require('../models/ElectricityMeter');
+const Room = require('../models/Room');
 const Tenant = require('../models/Tenant');
 const Property = require('../models/Property');
 const User = require('../models/user');
@@ -15,9 +17,64 @@ function calcInvoiceOutstanding(inv) {
   const rentDue  = Math.max(0, (inv.rentAmount || 0) - rentPaid);
   const penalty  = inv.totalPenalty || 0;
   const elec     = inv.electricityBill || 0;
-  const totalDue = rentDue + penalty + elec;
-  const paid     = inv.paidAmount || 0;
-  return Math.max(0, totalDue - paid);
+  const computed = Math.max(0, rentDue + penalty + elec - Math.max(0, (inv.paidAmount || 0) - rentPaid));
+  // outstandingAmount is updated by evaluateInvoice and includes electricity even when
+  // electricityBill field was not persisted (legacy sync bug).
+  if (typeof inv.outstandingAmount === 'number') {
+    return Math.max(computed, Math.max(0, inv.outstandingAmount));
+  }
+  return computed;
+}
+
+/**
+ * Link saved meter readings to invoices that are missing electricityBill.
+ */
+async function backfillMissingElectricity(tenants, invoices) {
+  const tenantById = new Map(tenants.map(t => [String(t._id), t]));
+  const invoicedTenantMonths = new Set(invoices.map(inv => `${inv.tenantId}:${inv.billingMonth}`));
+
+  // Fix invoices that exist but have no electricity amount saved
+  for (const inv of invoices) {
+    if ((inv.electricityBill || 0) > 0) continue;
+    const tenant = tenantById.get(String(inv.tenantId));
+    if (!tenant) continue;
+    const propId = tenant.property?._id || tenant.property;
+    if (!propId) continue;
+
+    const meter = await findMeterForTenant(tenant, inv.billingMonth);
+    if (meter) {
+      await syncElectricityToInvoice(propId, meter.roomNo, inv.billingMonth, meter);
+    }
+  }
+
+  // Create invoices for tenants who have a meter reading but no invoice yet
+  for (const tenant of tenants) {
+    const propId = tenant.property?._id || tenant.property;
+    if (!propId) continue;
+
+    const roomNos = new Set();
+    if (tenant.roomNo) roomNos.add(String(tenant.roomNo).trim());
+    if (tenant.room) {
+      const roomDoc = await Room.findById(tenant.room).select('title').lean();
+      if (roomDoc?.title) roomNos.add(String(roomDoc.title).trim());
+    }
+    const orClause = [...roomNos].map(rn => ({ roomNo: roomNoQuery(rn) }));
+    if (tenant.room) orClause.push({ room: tenant.room });
+    if (!orClause.length) continue;
+
+    const meters = await ElectricityMeter.find({
+      property: propId,
+      totalBill: { $gt: 0 },
+      $or: orClause,
+    }).sort({ billingMonth: -1 }).limit(3).lean();
+
+    for (const meter of meters) {
+      const key = `${tenant._id}:${meter.billingMonth}`;
+      if (invoicedTenantMonths.has(key)) continue;
+      const result = await syncElectricityToInvoice(propId, meter.roomNo, meter.billingMonth, meter);
+      if (result.synced) invoicedTenantMonths.add(key);
+    }
+  }
 }
 
 /**
@@ -27,7 +84,14 @@ async function enrichTenantsWithDues(tenants) {
   if (!tenants?.length) return tenants;
 
   const tenantIds = tenants.map(t => t._id);
-  const invoices = await RentInvoice.find({
+  let invoices = await RentInvoice.find({
+    tenantId: { $in: tenantIds },
+    status: { $in: ['PENDING', 'PARTIAL'] },
+  }).lean();
+
+  await backfillMissingElectricity(tenants, invoices);
+
+  invoices = await RentInvoice.find({
     tenantId: { $in: tenantIds },
     status: { $in: ['PENDING', 'PARTIAL'] },
   }).lean();
@@ -45,16 +109,21 @@ async function enrichTenantsWithDues(tenants) {
 }
 
 async function resolveOwnerUserId(tenant) {
+  const tryLoginId = async (loginId) => {
+    if (!loginId) return null;
+    const normalized = String(loginId).toUpperCase();
+    const user = await User.findOne({ loginId: normalized }).select('_id role').lean();
+    return user?._id || null;
+  };
+
   if (tenant.ownerLoginId) {
-    const user = await User.findOne({ loginId: tenant.ownerLoginId, role: 'owner' }).select('_id').lean();
-    if (user) return user._id;
+    const id = await tryLoginId(tenant.ownerLoginId);
+    if (id) return id;
   }
   if (tenant.property) {
     const prop = await Property.findById(tenant.property).select('ownerLoginId').lean();
-    if (prop?.ownerLoginId) {
-      const user = await User.findOne({ loginId: prop.ownerLoginId, role: 'owner' }).select('_id').lean();
-      if (user) return user._id;
-    }
+    const id = await tryLoginId(prop?.ownerLoginId);
+    if (id) return id;
   }
   return null;
 }
@@ -62,14 +131,62 @@ async function resolveOwnerUserId(tenant) {
 /**
  * Find active tenant in a room (case-insensitive roomNo match).
  */
+function roomNoQuery(roomNo) {
+  return { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') };
+}
+
+async function findMeterForTenant(tenant, billingMonth) {
+  const propId = tenant.property?._id || tenant.property;
+  if (!propId) return null;
+
+  const roomNos = new Set();
+  if (tenant.roomNo) roomNos.add(String(tenant.roomNo).trim());
+  if (tenant.room) {
+    const roomDoc = await Room.findById(tenant.room).select('title').lean();
+    if (roomDoc?.title) roomNos.add(String(roomDoc.title).trim());
+  }
+
+  const orClause = [];
+  for (const rn of roomNos) {
+    orClause.push({ roomNo: roomNoQuery(rn) });
+  }
+  if (tenant.room) orClause.push({ room: tenant.room });
+  if (!orClause.length) return null;
+
+  return ElectricityMeter.findOne({
+    property: propId,
+    billingMonth,
+    totalBill: { $gt: 0 },
+    $or: orClause,
+  }).lean();
+}
+
 async function findTenantByRoom(propertyId, roomNo) {
   if (!propertyId || !roomNo) return null;
+
+  const baseSelect = '_id property room roomNo agreedRent ownerLoginId';
+  const notDeleted = { isDeleted: { $ne: true } };
+
+  // Match via Room document (room.title may differ from tenant.roomNo)
+  const room = await Room.findOne({
+    property: propertyId,
+    title: { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') },
+  }).select('_id title').lean();
+
+  if (room) {
+    const byRoomRef = await Tenant.findOne({
+      property: propertyId,
+      room: room._id,
+      ...notDeleted,
+    }).select(baseSelect).sort({ createdAt: -1 }).lean();
+    if (byRoomRef) return byRoomRef;
+  }
+
   return Tenant.findOne({
     property: propertyId,
     roomNo: { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') },
-    status: { $in: ['active', 'pending'] },
-    isDeleted: { $ne: true },
-  }).select('_id property room roomNo agreedRent ownerLoginId').lean();
+    ...notDeleted,
+  }).select(baseSelect).sort({ createdAt: -1 }).lean();
 }
 
 /**
@@ -104,14 +221,20 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
     if (!invoice) return { synced: false, reason: 'invoice_create_failed' };
   }
 
-  invoice.electricityBill          = meterRecord.totalBill || 0;
-  invoice.electricityUnitsConsumed = meterRecord.unitsConsumed || 0;
-  invoice.electricityPrevReading   = meterRecord.previousReading || 0;
-  invoice.electricityCurrReading   = meterRecord.currentReading || 0;
-  invoice.electricityReadingAdded  = true;
+  const electricityFields = {
+    electricityBill:          meterRecord.totalBill || 0,
+    electricityUnitsConsumed: meterRecord.unitsConsumed || 0,
+    electricityPrevReading:   meterRecord.previousReading || 0,
+    electricityCurrReading:   meterRecord.currentReading || 0,
+    electricityReadingAdded:  true,
+  };
+
+  Object.assign(invoice, electricityFields);
 
   const { updates } = await evaluateInvoice(invoice);
-  await RentInvoice.findByIdAndUpdate(invoice._id, { $set: updates });
+  await RentInvoice.findByIdAndUpdate(invoice._id, {
+    $set: { ...updates, ...electricityFields },
+  });
 
   return { synced: true, invoiceId: invoice._id, tenantId: tenant._id };
 }
