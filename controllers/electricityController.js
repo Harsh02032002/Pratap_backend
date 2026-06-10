@@ -14,6 +14,24 @@ exports.updateMeterReading = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
 
+        // --- Prevent billing for the move-in month ---
+        const { findTenantByRoom } = require('../services/tenantDuesService');
+        const activeTenant = await findTenantByRoom(propertyId, roomNo);
+        if (activeTenant) {
+            const moveInDateStr = activeTenant.moveInDate || activeTenant.createdAt;
+            if (moveInDateStr) {
+                // Get 'YYYY-MM' from the move-in date
+                const moveInMonth = new Date(moveInDateStr).toISOString().slice(0, 7);
+                if (moveInMonth === billingMonth) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        message: 'Tenant is hi month aaya hai, aap is mahine ka electricity bill add nahi kar sakte. Next month se bill add karein.' 
+                    });
+                }
+            }
+        }
+        // ---------------------------------------------
+
         // Find the record for the current month
         let currentRecord = await ElectricityMeter.findOne({ property: propertyId, roomNo, billingMonth });
 

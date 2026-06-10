@@ -164,7 +164,7 @@ async function findMeterForTenant(tenant, billingMonth) {
 async function findTenantByRoom(propertyId, roomNo) {
   if (!propertyId || !roomNo) return null;
 
-  const baseSelect = '_id property room roomNo agreedRent ownerLoginId';
+  const baseSelect = '_id property room roomNo agreedRent ownerLoginId moveInDate createdAt';
   const notDeleted = { isDeleted: { $ne: true } };
 
   // Match via Room document (room.title may differ from tenant.roomNo)
