@@ -14,6 +14,7 @@ yarn-error.log*
 # Logs
 logs
 *.log
+mail_log.txt
 
 # Runtime data
 pids
