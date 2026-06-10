@@ -32,7 +32,7 @@ try {
 async function initDemoOwner() {
     if (!Owner) return;
     try {
-        const demoLoginId = 'DEMOOWNER';
+        const demoLoginId = 'ROOMHY0000';
         let demo = await Owner.findOne({ loginId: demoLoginId });
         
         if (!demo) {
@@ -47,7 +47,7 @@ async function initDemoOwner() {
                     firstTime: false
                 }
             });
-            console.log('✅ Demo owner profile created: DEMOOWNER');
+            console.log(`✅ Demo owner profile created: ${demoLoginId}`);
         } else if (!demo.credentials || !demo.credentials.password) {
             // Patch existing broken demo account
             demo.credentials = { password: 'demo123', firstTime: false };
@@ -69,7 +69,7 @@ async function initDemoOwner() {
                     isActive: true,
                     requirePasswordReset: false
                 });
-                console.log('✅ Demo owner auth record created: DEMOOWNER / demo123');
+                console.log(`✅ Demo owner auth record created: ${demoLoginId} / demo123`);
             } else if (demoUser.requirePasswordReset !== false) {
                 demoUser.requirePasswordReset = false;
                 await demoUser.save();
@@ -83,9 +83,9 @@ async function initDemoOwner() {
 // Reset DEMO account data every night at midnight
 const demoResetSchedule = cron.schedule('0 0 * * *', async () => {
     if (!Owner || !Property) return;
-    console.log('🔄 Running daily reset for DEMOOWNER account...');
+    console.log('🔄 Running daily reset for ROOMHY0000 account...');
     try {
-        const demoLoginId = 'DEMOOWNER';
+        const demoLoginId = 'ROOMHY0000';
         
         // 1. Get properties
         const properties = await Property.find({ ownerLoginId: demoLoginId });
@@ -134,7 +134,7 @@ const demoResetSchedule = cron.schedule('0 0 * * *', async () => {
             await demoOwner.save();
         }
 
-        console.log('✅ Successfully wiped and reset DEMOOWNER account data.');
+        console.log('✅ Successfully wiped and reset ROOMHY0000 account data.');
     } catch (err) {
         console.error('❌ Failed to reset demo account:', err.message);
     }
