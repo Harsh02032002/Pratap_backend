@@ -1784,6 +1784,7 @@ router.post('/owner/documents', async (req, res) => {
             const url = await uploadDoc(aadhaarImage.dataUrl, 'owner_documents/aadhaar');
             update.checkinAadhaarImage = url;
             update.checkinAadhaarImageName = aadhaarImage.name || '';
+            update['kyc.documentImage'] = url;
             result.aadhaarImageUrl = url;
 
             try {
