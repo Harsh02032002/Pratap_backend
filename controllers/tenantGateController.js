@@ -11,14 +11,15 @@ exports.createVisitorPass = async (req, res) => {
     const ownerId = tenant.ownerLoginId || (tenant.property && tenant.property.ownerLoginId) || 'SYSTEM';
 
     const visitor = new VisitorLog({
-      ownerLoginId: ownerId,
-      name: guestName,
-      phone: guestPhone,
-      hostName: tenant.name,
-      hostRoom: tenant.roomNo || '-',
-      purpose: 'Guest Visitor',
-      status: 'Pre-approved',
-      entryTime: null
+      ownerLoginId:  ownerId,
+      tenantLoginId: tenant.loginId || '',
+      name:          guestName,
+      phone:         guestPhone,
+      hostName:      tenant.name,
+      hostRoom:      tenant.roomNo || '-',
+      purpose:       'Guest Visitor',
+      status:        'Pre-approved',
+      entryTime:     null
     });
     
     await visitor.save();
@@ -53,14 +54,15 @@ exports.createLeaveRequest = async (req, res) => {
     const ownerId = tenant.ownerLoginId || (tenant.property && tenant.property.ownerLoginId) || 'SYSTEM';
 
     const request = new TenantLeaveRequest({
-      ownerLoginId: ownerId,
-      tenantId: tenant._id,
-      tenantName: tenant.name,
-      roomNo: tenant.roomNo || '-',
-      fromDate: departureDate,
-      toDate: returnDate,
-      reason: reason,
-      status: 'Pending'
+      ownerLoginId:  ownerId,
+      tenantId:      tenant._id,
+      tenantLoginId: tenant.loginId || '',
+      tenantName:    tenant.name,
+      roomNo:        tenant.roomNo || '-',
+      fromDate:      departureDate,
+      toDate:        returnDate,
+      reason:        reason,
+      status:        'Pending'
     });
     
     await request.save();

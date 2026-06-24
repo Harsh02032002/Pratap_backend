@@ -1,6 +1,17 @@
 // Cache to prevent running the unindexed RegExp auto-healer query on every API request
 const healedOwners = new Set();
 
+/**
+ * fireHeal — fire-and-forget wrapper for healOwnerProperties.
+ * Call this in routes instead of await healOwnerProperties(...) so the route
+ * never blocks waiting for the property linker to finish.
+ */
+exports.fireHeal = (loginId) => {
+    exports.healOwnerProperties(loginId).catch(err =>
+        console.error(`[fireHeal] healOwnerProperties error for ${loginId}:`, err.message)
+    );
+};
+
 // Auto-healer function to match and link previously unlinked properties to owners on-the-fly
 exports.healOwnerProperties = async (loginId) => {
     try {

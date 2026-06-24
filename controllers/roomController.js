@@ -206,7 +206,9 @@ if (rooms.length === 0) {
                 const countById = tenantCountByRoomId[room._id.toString()] || 0;
                 const countByNo = tenantCountByRoomNo[String(room.title).trim().toLowerCase()] || 0;
                 const activeCount = Math.max(countById, countByNo);
-                const capacity = Number(room.beds) || 1;
+                const capacity = Array.isArray(room.beds)
+                    ? (room.beds.length || Number(room.capacity || room.totalBeds) || 1)
+                    : (Number(room.beds || room.capacity || room.totalBeds) || 1);
                 return activeCount < capacity;
             });
         }

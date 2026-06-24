@@ -1,5 +1,4 @@
 const Rent = require('../models/Rent');
-const { runInTransaction } = require('../utils/dbHelper');
 const Tenant = require('../models/Tenant');
 const Property = require('../models/Property');
 const { sendMail } = require('../utils/mailer');
@@ -133,157 +132,138 @@ exports.recordPayment = async (req, res) => {
     try {
         const { rentId, razorpayPaymentId, paidAmount, paymentMethod } = req.body;
 
-        const result = await runInTransaction(async (session) => {
-            const rent = await Rent.findById(rentId).session(session);
-            if (!rent) return { status: 404, error: 'Rent not found' };
+        const rent = await Rent.findById(rentId);
+        if (!rent) return res.status(404).json({ error: 'Rent not found' });
 
-            rent.paidAmount = (rent.paidAmount || 0) + paidAmount;
-            rent.razorpayPaymentId = razorpayPaymentId;
-            rent.paymentMethod = paymentMethod || 'razorpay';
-            rent.paymentDate = new Date();
+        rent.paidAmount = (rent.paidAmount || 0) + paidAmount;
+        rent.razorpayPaymentId = razorpayPaymentId;
+        rent.paymentMethod = paymentMethod || 'razorpay';
+        rent.paymentDate = new Date();
 
-            if (rent.paidAmount >= rent.totalDue) {
-                rent.paymentStatus = 'paid';
-                rent.autoReminderEnabled = false;
-                rent.autoReminderLastSentAt = undefined;
-            } else if (rent.paidAmount > 0) {
-                rent.paymentStatus = 'partially_paid';
-            }
-
-            await rent.save({ session });
-            return { success: true, rent };
-        });
-
-        if (result.error) {
-            return res.status(result.status).json({ error: result.error });
+        if (rent.paidAmount >= rent.totalDue) {
+            rent.paymentStatus = 'paid';
+            rent.autoReminderEnabled = false;
+            rent.autoReminderLastSentAt = undefined;
+        } else if (rent.paidAmount > 0) {
+            rent.paymentStatus = 'partially_paid';
         }
 
-        // Send payment confirmation email
-        await sendPaymentConfirmationEmail(result.rent);
+        await rent.save();
 
-        res.json({ success: true, rent: result.rent, message: 'Payment recorded successfully' });
+        // Send payment confirmation email
+        await sendPaymentConfirmationEmail(rent);
+
+        res.json({ success: true, rent, message: 'Payment recorded successfully' });
     } catch (err) {
         console.error('Record payment error:', err);
         res.status(500).json({ error: err.message });
     }
 };
 
-// Internal helper for recordPaymentByTenant wrapped in transactions
-async function recordPaymentByTenantInternal(body, session) {
-    const { tenantId, razorpayPaymentId, paidAmount, paymentMethod, razorpay_order_id, razorpay_signature } = body;
-    console.log(`🔍 [recordPaymentByTenantInternal] Searching for rent - tenantId: ${tenantId}, amount: ${paidAmount}`);
-
-    if (!tenantId || !paidAmount) {
-        throw new Error('tenantId and paidAmount required');
-    }
-
-    const tenantProfile = await getTenantProfileByLoginId(tenantId);
-
-    // Find the most recent unpaid or partially paid rent for this tenant
-    // Search by tenantLoginId (string field) instead of tenantId (ObjectId)
-    let rent = await Rent.findOne({
-        $and: [
-            {
-                $or: [
-                    { tenantLoginId: tenantId }, // Primary search by login ID
-                    { tenantEmail: tenantId } // Try email as fallback
-                ]
-            },
-            {
-                $or: [
-                    { paymentStatus: { $in: ['pending', 'partially_paid'] } },
-                    { paymentStatus: { $exists: false } }
-                ]
-            }
-        ]
-    }).session(session).sort({ dueDate: -1 });
-
-    console.log(`📊 [recordPaymentByTenantInternal] Rent found:`, rent ? 'YES' : 'NO');
-
-    if (!rent) {
-        // If not found, try to create a minimal rent record for this first payment
-        console.log(`⚠️ [recordPaymentByTenantInternal] No rent found. Attempting to create one...`);
-        
-        rent = new Rent({
-            tenantLoginId: tenantId,
-            tenantId: tenantProfile?._id,
-            ownerLoginId: tenantProfile?.ownerLoginId || '',
-            tenantName: tenantProfile?.name || `Tenant ${tenantId}`,
-            tenantEmail: tenantProfile?.email || '',
-            tenantPhone: tenantProfile?.phone || '',
-            propertyName: tenantProfile?.propertyTitle || '',
-            roomNumber: tenantProfile?.roomNo || '',
-            rentAmount: Number(tenantProfile?.agreedRent || paidAmount),
-            totalDue: Number(tenantProfile?.agreedRent || paidAmount),
-            paidAmount: paidAmount,
-            paymentStatus: paidAmount > 0 ? 'paid' : 'pending',
-            paymentMethod: paymentMethod || 'razorpay',
-            razorpayPaymentId: razorpayPaymentId,
-            razorpayOrderId: razorpay_order_id || undefined,
-            razorpaySignature: razorpay_signature || undefined,
-            paymentDate: new Date(),
-            collectionMonth: new Date().toISOString().slice(0, 7)
-        });
-        applyTenantProfileToRent(rent, tenantProfile);
-        
-        await rent.save({ session });
-        return { rent, isNewRecord: true };
-    }
-    
-    console.log(`✅ [recordPaymentByTenantInternal] Found rent: ${rent._id}`);
-    applyTenantProfileToRent(rent, tenantProfile);
-
-    rent.paidAmount = (rent.paidAmount || 0) + paidAmount;
-    rent.razorpayPaymentId = razorpayPaymentId;
-    if (razorpay_order_id) rent.razorpayOrderId = razorpay_order_id;
-    if (razorpay_signature) rent.razorpaySignature = razorpay_signature;
-    rent.paymentMethod = paymentMethod || 'razorpay';
-    rent.paymentDate = new Date();
-
-    // Update payment status
-    if (rent.paidAmount >= rent.totalDue) {
-        rent.paymentStatus = 'paid';
-        rent.autoReminderEnabled = false;
-        rent.autoReminderLastSentAt = undefined;
-        console.log(`💳 [recordPaymentByTenantInternal] Payment complete: ₹${rent.paidAmount} >= ₹${rent.totalDue}`);
-    } else if (rent.paidAmount > 0) {
-        rent.paymentStatus = 'partially_paid';
-        console.log(`💳 [recordPaymentByTenantInternal] Partial payment: ₹${rent.paidAmount} of ₹${rent.totalDue}`);
-    }
-
-    await rent.save({ session });
-    return { rent, isNewRecord: false };
-}
-
 // Record payment by tenant (for Razorpay callback)
 exports.recordPaymentByTenant = async (req, res) => {
     try {
-        const { tenantId, razorpayPaymentId, paidAmount } = req.body;
+        const { tenantId, razorpayPaymentId, paidAmount, paymentMethod } = req.body;
 
-        const result = await runInTransaction(async (session) => {
-            return await recordPaymentByTenantInternal(req.body, session);
-        });
+        console.log(`🔍 [recordPaymentByTenant] Searching for rent - tenantId: ${tenantId}, amount: ${paidAmount}`);
 
-        // Send payment confirmation email
-        await sendPaymentConfirmationEmail(result.rent);
+        if (!tenantId || !paidAmount) {
+            return res.status(400).json({ error: 'tenantId and paidAmount required' });
+        }
 
-        if (result.isNewRecord) {
-            console.log(`✅ [recordPaymentByTenant] Created new rent record: ${result.rent._id}`);
+        const tenantProfile = await getTenantProfileByLoginId(tenantId);
+
+        // Find the most recent unpaid or partially paid rent for this tenant
+        // Search by tenantLoginId (string field) instead of tenantId (ObjectId)
+        let rent = await Rent.findOne({
+            $and: [
+                {
+                    $or: [
+                        { tenantLoginId: tenantId }, // Primary search by login ID
+                        { tenantEmail: tenantId } // Try email as fallback
+                    ]
+                },
+                {
+                    $or: [
+                        { paymentStatus: { $in: ['pending', 'partially_paid'] } },
+                        { paymentStatus: { $exists: false } }
+                    ]
+                }
+            ]
+        }).sort({ dueDate: -1 });
+
+        console.log(`📊 [recordPaymentByTenant] Rent found:`, rent ? 'YES' : 'NO');
+
+        if (!rent) {
+            // If not found, try to create a minimal rent record for this first payment
+            console.log(`⚠️ [recordPaymentByTenant] No rent found. Attempting to create one...`);
+            
+            rent = new Rent({
+                tenantLoginId: tenantId,
+                tenantId: tenantProfile?._id,
+                ownerLoginId: tenantProfile?.ownerLoginId || '',
+                tenantName: tenantProfile?.name || `Tenant ${tenantId}`,
+                tenantEmail: tenantProfile?.email || '',
+                tenantPhone: tenantProfile?.phone || '',
+                propertyName: tenantProfile?.propertyTitle || '',
+                roomNumber: tenantProfile?.roomNo || '',
+                rentAmount: Number(tenantProfile?.agreedRent || paidAmount),
+                totalDue: Number(tenantProfile?.agreedRent || paidAmount),
+                paidAmount: paidAmount,
+                paymentStatus: paidAmount > 0 ? 'paid' : 'pending',
+                paymentMethod: paymentMethod || 'razorpay',
+                razorpayPaymentId: razorpayPaymentId,
+                paymentDate: new Date(),
+                collectionMonth: new Date().toISOString().slice(0, 7)
+            });
+            applyTenantProfileToRent(rent, tenantProfile);
+            
+            await rent.save();
+            console.log(`✅ [recordPaymentByTenant] Created new rent record: ${rent._id}`);
+            
+            // Send confirmation
+            await sendPaymentConfirmationEmail(rent);
+            
             return res.json({ 
                 success: true, 
-                rent: result.rent, 
+                rent, 
                 message: 'Payment recorded and rent record created',
-                paymentStatus: result.rent.paymentStatus,
+                paymentStatus: rent.paymentStatus,
                 isNewRecord: true
             });
         }
         
+        console.log(`✅ [recordPaymentByTenant] Found rent: ${rent._id}`);
+        applyTenantProfileToRent(rent, tenantProfile);
+
+        rent.paidAmount = (rent.paidAmount || 0) + paidAmount;
+        rent.razorpayPaymentId = razorpayPaymentId;
+        rent.paymentMethod = paymentMethod || 'razorpay';
+        rent.paymentDate = new Date();
+
+        // Update payment status
+        if (rent.paidAmount >= rent.totalDue) {
+            rent.paymentStatus = 'paid';
+            rent.autoReminderEnabled = false;
+            rent.autoReminderLastSentAt = undefined;
+            console.log(`💳 [recordPaymentByTenant] Payment complete: ₹${rent.paidAmount} >= ₹${rent.totalDue}`);
+        } else if (rent.paidAmount > 0) {
+            rent.paymentStatus = 'partially_paid';
+            console.log(`💳 [recordPaymentByTenant] Partial payment: ₹${rent.paidAmount} of ₹${rent.totalDue}`);
+        }
+
+        await rent.save();
+
+        // Send payment confirmation email
+        await sendPaymentConfirmationEmail(rent);
+
         console.log(`✅ Payment recorded for tenant ${tenantId}: ₹${paidAmount}`);
+
         res.json({ 
             success: true, 
-            rent: result.rent, 
+            rent, 
             message: 'Payment recorded successfully',
-            paymentStatus: result.rent.paymentStatus
+            paymentStatus: rent.paymentStatus
         });
     } catch (err) {
         console.error('❌ Record payment by tenant error:', err.message);
@@ -323,45 +303,27 @@ exports.verifyRazorpayPayment = async (req, res) => {
         req.body.razorpayPaymentId = razorpay_payment_id;
         req.body.paymentMethod = 'razorpay';
 
-        const result = await runInTransaction(async (session) => {
-            const innerResult = await recordPaymentByTenantInternal(req.body, session);
-            
-            // Persist Razorpay verification metadata inside the transaction
-            const resolvedRentId = innerResult.rent?._id || rentId;
-            if (resolvedRentId) {
-                innerResult.rent = await Rent.findByIdAndUpdate(resolvedRentId, {
-                    $set: {
-                        razorpayOrderId: razorpay_order_id,
-                        razorpayPaymentId: razorpay_payment_id,
-                        razorpaySignature: razorpay_signature,
-                        paymentMethod: 'razorpay'
-                    }
-                }, { session, new: true });
+        const originalJson = res.json.bind(res);
+        res.json = async (payload) => {
+            try {
+                const resolvedRentId = payload?.rent?._id || rentId;
+                if (resolvedRentId) {
+                    await Rent.findByIdAndUpdate(resolvedRentId, {
+                        $set: {
+                            razorpayOrderId: razorpay_order_id,
+                            razorpayPaymentId: razorpay_payment_id,
+                            razorpaySignature: razorpay_signature,
+                            paymentMethod: 'razorpay'
+                        }
+                    });
+                }
+            } catch (e) {
+                console.warn('Failed to persist Razorpay verification metadata:', e.message);
             }
-            return innerResult;
-        });
+            return originalJson({ ...payload, verified: true });
+        };
 
-        // Send payment confirmation email
-        await sendPaymentConfirmationEmail(result.rent);
-
-        if (result.isNewRecord) {
-            return res.json({ 
-                success: true, 
-                rent: result.rent, 
-                message: 'Payment recorded and rent record created',
-                paymentStatus: result.rent.paymentStatus,
-                isNewRecord: true,
-                verified: true
-            });
-        }
-
-        res.json({ 
-            success: true, 
-            rent: result.rent, 
-            message: 'Payment recorded successfully',
-            paymentStatus: result.rent.paymentStatus,
-            verified: true
-        });
+        return exports.recordPaymentByTenant(req, res);
     } catch (err) {
         console.error('verifyRazorpayPayment error:', err);
         return res.status(500).json({ success: false, error: err.message || 'Failed to verify Razorpay payment' });
@@ -515,220 +477,6 @@ exports.sendDelayedPaymentReminder = async (req, res) => {
     }
 };
 
-// Helper to generate the premium HTML template for rent reminders
-function buildRentReminderEmailHtml(rent, phase, daysOverdue, ownerInfo) {
-    const isPhase1 = phase === 1;
-    const isPhase2 = phase === 2;
-    const isPhase3 = phase === 3;
-
-    const headerColor  = isPhase1 ? '#2563eb' : isPhase2 ? '#d97706' : '#dc2626';
-    const badgeColor   = isPhase1 ? '#dbeafe' : isPhase2 ? '#fef3c7' : '#fee2e2';
-    const badgeText    = isPhase1 ? '#1d4ed8' : isPhase2 ? '#92400e' : '#991b1b';
-    const badgeLabel   = isPhase1 ? 'Phase 1 — Friendly Reminder' : isPhase2 ? 'Phase 2 — Penalty Applied' : 'Phase 3 — Final Notice';
-
-    const greeting     = isPhase1
-      ? `Your rent for <strong>${rent.collectionMonth || 'this month'}</strong> is due. Please pay at the earliest to avoid late penalties.`
-      : isPhase2
-      ? `Your rent for <strong>${rent.collectionMonth || 'this month'}</strong> is overdue. A late penalty has been added to your balance.`
-      : `Your rent for <strong>${rent.collectionMonth || 'this month'}</strong> remains unpaid. This is a <strong>final notice</strong>. Continued non-payment may result in further action.`;
-
-    const penaltyAmount = Math.max(0, (rent.totalDue || 0) - (rent.rentAmount || 0));
-    const penaltyRow = isPhase1 ? '' : `
-        <tr>
-          <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#555;font-size:14px">Late Penalty</td>
-          <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#dc2626;font-weight:600;font-size:14px;text-align:right">₹${penaltyAmount || 0}</td>
-        </tr>`;
-
-    // Static warning for electricity as Rent model does not separate it
-    const electricityRow = `<tr>
-          <td colspan="2" style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#b45309;font-size:12px;font-weight:500;text-align:left">⚡ Electricity reading not yet submitted - bill will be updated once entered</td>
-        </tr>`;
-
-    const footerMessage = isPhase1
-      ? 'Kindly clear your dues to avoid penalties.'
-      : isPhase2
-      ? 'Please pay immediately to prevent further penalties.'
-      : 'Settle your outstanding balance now to avoid legal escalation.';
-
-    const appBaseUrl = (process.env.APP_BASE_URL || 'https://app.roomhy.com').replace(/\/$/, '');
-    const dashboardUrl = `${appBaseUrl}/tenant/tenantdashboard`;
-    const onlinePayUrl = `${dashboardUrl}?pay=online`;
-    const cashPayUrl = `${dashboardUrl}?pay=cash`;
-
-    const { ownerUpiId, ownerBankName, ownerAccountHolder, ownerAccountNumber, ownerIfscCode } = ownerInfo;
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    .button {
-      background-color: ${headerColor};
-      color: white !important;
-      padding: 10px 20px;
-      text-decoration: none;
-      border-radius: 4px;
-      display: inline-block;
-      font-weight: bold;
-      font-size: 13px;
-    }
-  </style>
-</head>
-<body style="margin:0;padding:0;background:#f4f4f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px">
-    <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)">
-
-        <!-- Header -->
-        <tr>
-          <td style="background:${headerColor};padding:28px 32px">
-            <p style="margin:0;color:rgba(255,255,255,0.85);font-size:12px;letter-spacing:1px;text-transform:uppercase">ROOMHY PROPERTY MANAGEMENT</p>
-            <h1 style="margin:8px 0 0;color:#ffffff;font-size:22px;font-weight:700">Rent Payment Notice</h1>
-          </td>
-        </tr>
-
-        <!-- Phase Badge -->
-        <tr>
-          <td style="padding:20px 32px 0">
-            <span style="display:inline-block;background:${badgeColor};color:${badgeText};font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px;letter-spacing:0.5px">${badgeLabel}</span>
-          </td>
-        </tr>
-
-        <!-- Greeting -->
-        <tr>
-          <td style="padding:16px 32px 24px">
-            <p style="margin:0 0 10px;color:#111;font-size:15px">Dear <strong>${rent.tenantName || 'Tenant'}</strong>,</p>
-            <p style="margin:0;color:#444;font-size:14px;line-height:1.6">${greeting}</p>
-          </td>
-        </tr>
-
-        <!-- Amount Table -->
-        <tr>
-          <td style="padding:0 32px 24px">
-            <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-              <tr style="background:#f9fafb">
-                <td style="padding:10px 14px;font-size:12px;font-weight:700;color:#888;letter-spacing:0.5px;text-transform:uppercase">Description</td>
-                <td style="padding:10px 14px;font-size:12px;font-weight:700;color:#888;letter-spacing:0.5px;text-transform:uppercase;text-align:right">Amount</td>
-              </tr>
-              <tr>
-                <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#555;font-size:14px">Billing Month</td>
-                <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#111;font-size:14px;text-align:right">${rent.collectionMonth || '—'}</td>
-              </tr>
-              <tr>
-                <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#555;font-size:14px">Rent Amount</td>
-                <td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;color:#111;font-size:14px;text-align:right">₹${rent.rentAmount || 0}</td>
-              </tr>
-              ${penaltyRow}
-              ${electricityRow}
-              <tr style="background:#f9fafb">
-                <td style="padding:12px 14px;color:#111;font-size:15px;font-weight:700">Total Due</td>
-                <td style="padding:12px 14px;color:${headerColor};font-size:16px;font-weight:700;text-align:right">₹${rent.totalDue || rent.rentAmount || 0}</td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-
-        <!-- Days Overdue (phases 2 & 3 only) -->
-        ${!isPhase1 ? `
-        <tr>
-          <td style="padding:0 32px 20px">
-            <p style="margin:0;background:${badgeColor};border-left:4px solid ${headerColor};padding:10px 14px;border-radius:4px;color:${badgeText};font-size:13px">
-              <strong style="color:${headerColor}">${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} overdue</strong> — ${footerMessage}
-            </p>
-          </td>
-        </tr>` : `
-        <tr>
-          <td style="padding:0 32px 20px">
-            <p style="margin:0;background:#eff6ff;border-left:4px solid #2563eb;padding:10px 14px;border-radius:4px;color:#1e3a8a;font-size:13px">${footerMessage}</p>
-          </td>
-        </tr>`}
-
-        <!-- Pay Now section -->
-        ${(ownerUpiId || ownerAccountNumber) ? `
-        <tr>
-          <td style="padding:0 32px 24px">
-            <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #d1fae5;border-radius:8px;overflow:hidden;background:#f0fdf4">
-              <tr>
-                <td colspan="2" style="padding:10px 14px 6px;font-size:12px;font-weight:700;color:#166534;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #d1fae5">
-                  ✅ Complete Your Payment
-                </td>
-              </tr>
-              ${ownerUpiId ? `
-              <tr>
-                <td style="padding:10px 14px;color:#555;font-size:13px;width:140px;vertical-align:top">Pay via UPI</td>
-                <td style="padding:10px 14px;font-weight:700;font-size:14px;color:#166534;font-family:monospace">${ownerUpiId}</td>
-              </tr>` : ''}
-              ${ownerAccountNumber ? `
-              <tr style="border-top:1px solid #d1fae5">
-                <td style="padding:10px 14px;color:#555;font-size:13px;vertical-align:top">Bank Transfer</td>
-                <td style="padding:10px 14px;font-size:13px;color:#111;line-height:1.7">
-                  ${ownerBankName ? `<strong>${ownerBankName}</strong><br>` : ''}
-                  ${ownerAccountHolder ? `A/c Holder: ${ownerAccountHolder}<br>` : ''}
-                  A/c No: <strong style="font-family:monospace">${ownerAccountNumber}</strong><br>
-                  ${ownerIfscCode ? `IFSC: <strong style="font-family:monospace">${ownerIfscCode}</strong>` : ''}
-                </td>
-              </tr>` : ''}
-            </table>
-          </td>
-        </tr>` : ''}
-
-
-
-        <!-- Footer -->
-        <tr>
-          <td style="background:#f9fafb;padding:20px 32px;border-top:1px solid #e5e7eb">
-            <p style="margin:0;color:#888;font-size:12px;line-height:1.6">
-              This is an automated notification from <strong style="color:#333">Roomhy</strong>. Please do not reply to this email.<br>
-              For queries, contact your property manager directly.
-            </p>
-          </td>
-        </tr>
-
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
-}
-
-// Fetch owner payment details helper
-async function getOwnerPaymentDetails(ownerLoginId) {
-    const info = {
-        ownerUpiId: '',
-        ownerBankName: '',
-        ownerAccountHolder: '',
-        ownerAccountNumber: '',
-        ownerIfscCode: ''
-    };
-    if (!ownerLoginId) return info;
-    try {
-        if (Owner) {
-            const ownerDoc = await Owner.findOne({ loginId: ownerLoginId }).lean();
-            if (ownerDoc) {
-                info.ownerUpiId = ownerDoc.checkinUpiId || '';
-                info.ownerAccountNumber = ownerDoc.checkinBankAccountNumber || '';
-                info.ownerIfscCode = ownerDoc.checkinIfscCode || '';
-                info.ownerBankName = ownerDoc.checkinBankName || '';
-                info.ownerAccountHolder = ownerDoc.checkinAccountHolderName || '';
-            }
-        }
-        let CheckinRecord = null;
-        try { CheckinRecord = require('../models/CheckinRecord'); } catch (_) {}
-        if (CheckinRecord) {
-            const checkinDoc = await CheckinRecord.findOne({ role: 'owner', loginId: ownerLoginId }).lean();
-            const cp = checkinDoc?.ownerProfile?.payment || {};
-            if (cp.upiId && !info.ownerUpiId) info.ownerUpiId = cp.upiId;
-            if (cp.bankAccountNumber && !info.ownerAccountNumber) info.ownerAccountNumber = cp.bankAccountNumber;
-            if (cp.ifscCode && !info.ownerIfscCode) info.ownerIfscCode = cp.ifscCode;
-            if (cp.accountHolderName && !info.ownerAccountHolder) info.ownerAccountHolder = cp.accountHolderName;
-        }
-    } catch (err) {
-        console.warn('Error resolving owner bank details for reminder email:', err.message);
-    }
-    return info;
-}
-
 // Email function for rent reminder
 async function sendRentReminderEmail(rent, type = 'initial') {
     try {
@@ -736,10 +484,6 @@ async function sendRentReminderEmail(rent, type = 'initial') {
         const dashboardUrl = `${appBaseUrl}/tenant/tenantdashboard`;
         const onlinePayUrl = `${dashboardUrl}?pay=online`;
         const cashPayUrl = `${dashboardUrl}?pay=cash`;
-
-        const ownerInfo = await getOwnerPaymentDetails(rent.ownerLoginId);
-        const html = buildRentReminderEmailHtml(rent, 1, 0, ownerInfo);
-
         const subject = `Rent Due Reminder - ${rent.propertyName}`;
         const text = [
             `Hi ${rent.tenantName || 'Tenant'},`,
@@ -752,6 +496,29 @@ async function sendRentReminderEmail(rent, type = 'initial') {
             '',
             'If already paid, please ignore this reminder.'
         ].join('\n');
+        const html = `
+                <h2>Rent Due Reminder</h2>
+                <p>Dear ${rent.tenantName},</p>
+                <p>This is a reminder that rent is due between <strong>10th to 15th</strong> of the month.</p>
+                <hr>
+                <p><strong>Rent Details:</strong></p>
+                <ul>
+                    <li>Property: ${rent.propertyName}</li>
+                    <li>Room: ${rent.roomNumber}</li>
+                    <li>Rent Amount: ₹${rent.rentAmount}</li>
+                    <li>Collection Period: 10th - 15th of the month</li>
+                    <li>Current Month: ${rent.collectionMonth}</li>
+                </ul>
+                <p style="color: #d32f2f;"><strong>Please complete your payment by 15th to avoid late fees.</strong></p>
+                <p>Choose a payment method:</p>
+                <p>
+                    <a href="${onlinePayUrl}" style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-right: 8px;">Pay Online (Razorpay)</a>
+                    <a href="${cashPayUrl}" style="background-color: #16a34a; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">Pay by Cash</a>
+                </p>
+                <p style="font-size: 13px; color: #444;">
+                    Cash flow: Request cash in tenant dashboard, owner marks received, then enter OTP to complete.
+                </p>
+            `;
 
         if (rent.tenantEmail) {
             await sendMail(rent.tenantEmail, subject, text, html);
@@ -771,36 +538,46 @@ async function sendRentReminderEmail(rent, type = 'initial') {
 // Email function for delayed payment reminder
 async function sendDelayedReminderEmail(rent, reminderType) {
     try {
-        let num = 1;
-        if (reminderType && reminderType.includes('_')) {
-            const parts = reminderType.split('_');
-            num = parseInt(parts[1], 10) || 1;
-        }
+        const reminderNumber = reminderType.split('_')[1];
         const urgency = ['', 'URGENT', 'VERY URGENT', 'FINAL NOTICE'];
-        const urgencyText = urgency[num] || 'FINAL NOTICE';
-        const phase = num === 3 ? 3 : 2;
-
         const appBaseUrl = (process.env.APP_BASE_URL || 'https://app.roomhy.com').replace(/\/$/, '');
         const dashboardUrl = `${appBaseUrl}/tenant/tenantdashboard`;
         const onlinePayUrl = `${dashboardUrl}?pay=online`;
         const cashPayUrl = `${dashboardUrl}?pay=cash`;
 
-        const daysOverdue = getDaysOverdue(rent);
-        const ownerInfo = await getOwnerPaymentDetails(rent.ownerLoginId);
-        const html = buildRentReminderEmailHtml(rent, phase, daysOverdue, ownerInfo);
-
-        const subject = `Rent ${phase === 3 ? 'Final Notice' : 'Penalty Notice'} — ${rent.collectionMonth}`;
+        const subject = `${urgency[reminderNumber]} - Overdue Rent Payment - ${rent.propertyName}`;
         const text = [
-            `${urgencyText}: Overdue rent payment`,
+            `${urgency[reminderNumber]}: Overdue rent payment`,
             `Property: ${rent.propertyName || '-'}`,
             `Room: ${rent.roomNumber || '-'}`,
             `Amount Due: INR ${Number((rent.totalDue || 0) - (rent.paidAmount || 0))}`,
-            `Days Overdue: ${daysOverdue}`,
+            `Days Overdue: ${getDaysOverdue(rent.overdueStartDate)}`,
             '',
             'Pay now using:',
             `1) Razorpay Online: ${onlinePayUrl}`,
             `2) Cash + OTP flow: ${cashPayUrl}`
         ].join('\n');
+        const html = `
+                <h2 style="color: #d32f2f;">${urgency[reminderNumber]}</h2>
+                <p>Dear ${rent.tenantName},</p>
+                <p style="color: #d32f2f; font-weight: bold;">Your rent payment is overdue!</p>
+                <hr>
+                <p><strong>Overdue Details:</strong></p>
+                <ul>
+                    <li>Property: ${rent.propertyName}</li>
+                    <li>Room: ${rent.roomNumber}</li>
+                    <li>Amount Due: ₹${rent.totalDue - rent.paidAmount}</li>
+                    <li>Due Date: 15th of ${rent.collectionMonth}</li>
+                    <li>Days Overdue: ${getDaysOverdue(rent.overdueStartDate)}</li>
+                </ul>
+                <p style="color: #d32f2f; background-color: #fff3cd; padding: 10px; border-left: 4px solid #d32f2f;">
+                    <strong>Reminder #${reminderNumber}:</strong> Please arrange payment immediately to avoid late fees and legal action.
+                </p>
+                <p>
+                    <a href="${onlinePayUrl}" style="background-color: #d32f2f; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin-right: 8px;">Pay Online (Razorpay)</a>
+                    <a href="${cashPayUrl}" style="background-color: #16a34a; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">Pay by Cash</a>
+                </p>
+            `;
 
         if (rent.tenantEmail) {
             await sendMail(rent.tenantEmail, subject, text, html);
@@ -809,7 +586,7 @@ async function sendDelayedReminderEmail(rent, reminderType) {
             await sendMail(process.env.ADMIN_EMAIL, `[Copy] ${subject}`, text, html);
         }
 
-        console.log(`Delayed payment reminder #${num} attempted for`, rent.tenantEmail || 'no-tenant-email');
+        console.log(`Delayed payment reminder #${reminderNumber} attempted for`, rent.tenantEmail || 'no-tenant-email');
         return true;
     } catch (err) {
         console.error('Failed to send delayed reminder:', err.message);
@@ -818,23 +595,11 @@ async function sendDelayedReminderEmail(rent, reminderType) {
 }
 
 // Helper function to calculate days overdue
-function getDaysOverdue(rent) {
+function getDaysOverdue(overdueStartDate) {
+    if (!overdueStartDate) return 0;
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    let start = rent.overdueStartDate ? new Date(rent.overdueStartDate) : null;
-    if (!start && rent.collectionMonth && rent.collectionMonth.includes('-')) {
-        const [year, month] = rent.collectionMonth.split('-');
-        start = new Date(parseInt(year, 10), parseInt(month, 10) - 1, 15);
-    }
-    if (!start) {
-        start = new Date();
-        start.setDate(15);
-    }
-    start.setHours(0, 0, 0, 0);
-    const diff = today - start;
-    if (diff <= 0) return 0;
-    return Math.floor(diff / (1000 * 60 * 60 * 24));
+    const start = new Date(overdueStartDate);
+    return Math.floor((today - start) / (1000 * 60 * 60 * 24));
 }
 
 // Update rent details (admin)
@@ -951,66 +716,61 @@ exports.requestCashPayment = async (req, res) => {
 
         const tenantProfile = await getTenantProfileByLoginId(loginId);
 
-        const result = await runInTransaction(async (session) => {
-            let rent = await Rent.findOne({
+        let rent = await Rent.findOne({
+            tenantLoginId: loginId,
+            ownerLoginId: ownerId,
+            collectionMonth: month
+        }).sort({ createdAt: -1 });
+
+        if (!rent) {
+            rent = await Rent.create({
                 tenantLoginId: loginId,
                 ownerLoginId: ownerId,
+                tenantId: tenantProfile?._id,
+                tenantName: tenantName || tenantProfile?.name || '',
+                tenantEmail: tenantEmail || tenantProfile?.email || '',
+                tenantPhone: tenantPhone || tenantProfile?.phone || '',
+                propertyName: propertyName || tenantProfile?.propertyTitle || '',
+                roomNumber: roomNumber || tenantProfile?.roomNo || '',
+                rentAmount,
+                totalDue: rentAmount,
+                paidAmount: 0,
+                paymentStatus: 'pending',
+                paymentMethod: 'cash',
                 collectionMonth: month
-            }).session(session).sort({ createdAt: -1 });
+            });
+        } else {
+            applyTenantProfileToRent(rent, tenantProfile);
+            rent.paymentMethod = 'cash';
+            rent.paymentStatus = rent.paymentStatus === 'paid' ? 'paid' : 'pending';
+            rent.rentAmount = rentAmount || rent.rentAmount;
+            rent.totalDue = rent.totalDue || rentAmount;
+            rent.tenantName = tenantName || rent.tenantName;
+            rent.tenantEmail = tenantEmail || rent.tenantEmail;
+            rent.tenantPhone = tenantPhone || rent.tenantPhone;
+            rent.propertyName = propertyName || rent.propertyName;
+            rent.roomNumber = roomNumber || rent.roomNumber;
+        }
 
-            if (!rent) {
-                rent = new Rent({
-                    tenantLoginId: loginId,
-                    ownerLoginId: ownerId,
-                    tenantId: tenantProfile?._id,
-                    tenantName: tenantName || tenantProfile?.name || '',
-                    tenantEmail: tenantEmail || tenantProfile?.email || '',
-                    tenantPhone: tenantPhone || tenantProfile?.phone || '',
-                    propertyName: propertyName || tenantProfile?.propertyTitle || '',
-                    roomNumber: roomNumber || tenantProfile?.roomNo || '',
-                    rentAmount,
-                    totalDue: rentAmount,
-                    paidAmount: 0,
-                    paymentStatus: 'pending',
-                    paymentMethod: 'cash',
-                    collectionMonth: month
-                });
-                applyTenantProfileToRent(rent, tenantProfile);
-            } else {
-                applyTenantProfileToRent(rent, tenantProfile);
-                rent.paymentMethod = 'cash';
-                rent.paymentStatus = rent.paymentStatus === 'paid' ? 'paid' : 'pending';
-                rent.rentAmount = rentAmount || rent.rentAmount;
-                rent.totalDue = rent.totalDue || rentAmount;
-                rent.tenantName = tenantName || rent.tenantName;
-                rent.tenantEmail = tenantEmail || rent.tenantEmail;
-                rent.tenantPhone = tenantPhone || rent.tenantPhone;
-                rent.propertyName = propertyName || rent.propertyName;
-                rent.roomNumber = roomNumber || rent.roomNumber;
-            }
+        rent.cashRequestStatus = 'requested';
+        rent.cashRequestedAt = new Date();
+        rent.cashOtpCode = undefined;
+        rent.cashOtpExpiry = undefined;
+        rent.cashOtpSentAt = undefined;
+        await rent.save();
 
-            rent.cashRequestStatus = 'requested';
-            rent.cashRequestedAt = new Date();
-            rent.cashOtpCode = undefined;
-            rent.cashOtpExpiry = undefined;
-            rent.cashOtpSentAt = undefined;
-            await rent.save({ session });
-
-            await Notification.create([{
-                toLoginId: ownerId,
-                from: loginId,
-                type: 'cash_payment_requested',
-                meta: {
-                    title: 'Cash Payment Request',
-                    message: `${tenantName || loginId} requested cash payment collection`,
-                    rentId: String(rent._id),
-                    tenantLoginId: loginId,
-                    amount: rentAmount
-                },
-                read: false
-            }], { session });
-
-            return { rent };
+        await Notification.create({
+            toLoginId: ownerId,
+            from: loginId,
+            type: 'cash_payment_requested',
+            meta: {
+                title: 'Cash Payment Request',
+                message: `${tenantName || loginId} requested cash payment collection`,
+                rentId: String(rent._id),
+                tenantLoginId: loginId,
+                amount: rentAmount
+            },
+            read: false
         });
 
         try {
@@ -1023,7 +783,7 @@ exports.requestCashPayment = async (req, res) => {
                     process.env.APP_BASE_URL ||
                     'https://api.roomhy.com'
                 ).replace(/\/$/, '');
-                const receivedUrl = `${ownerPortalBaseUrl}/propertyowner/payment-received?rentId=${encodeURIComponent(String(result.rent._id))}&ownerLoginId=${encodeURIComponent(ownerId)}`;
+                const receivedUrl = `${ownerPortalBaseUrl}/propertyowner/payment-received?rentId=${encodeURIComponent(String(rent._id))}&ownerLoginId=${encodeURIComponent(ownerId)}`;
                 const html = `
                     <div style="font-family:Arial,sans-serif;">
                         <h3>Cash Payment Request</h3>
@@ -1047,7 +807,7 @@ exports.requestCashPayment = async (req, res) => {
             console.warn('cash request owner email failed:', e.message);
         }
 
-        return res.json({ success: true, message: 'Cash payment request sent to owner', rent: result.rent });
+        return res.json({ success: true, message: 'Cash payment request sent to owner', rent });
     } catch (err) {
         console.error('requestCashPayment error:', err);
         return res.status(500).json({ success: false, message: err.message });
@@ -1111,34 +871,25 @@ exports.markCashReceivedByOwner = async (req, res) => {
         }
 
         const ownerId = String(ownerLoginId).trim().toUpperCase();
+        const rent = await Rent.findById(rentId);
+        if (!rent) return res.status(404).json({ success: false, message: 'Rent record not found' });
+        if (String(rent.ownerLoginId || '').toUpperCase() !== ownerId) {
+            return res.status(403).json({ success: false, message: 'Not authorized for this rent record' });
+        }
 
         const otp = String(Math.floor(100000 + Math.random() * 900000));
         const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
-        const result = await runInTransaction(async (session) => {
-            const rent = await Rent.findById(rentId).session(session);
-            if (!rent) return { status: 404, error: 'Rent record not found' };
-            if (String(rent.ownerLoginId || '').toUpperCase() !== ownerId) {
-                return { status: 403, error: 'Not authorized for this rent record' };
-            }
+        rent.cashRequestStatus = 'otp_sent';
+        rent.cashReceivedAt = new Date();
+        rent.cashOtpCode = otp;
+        rent.cashOtpExpiry = expiry;
+        rent.cashOtpSentAt = new Date();
+        rent.paymentMethod = 'cash';
+        await rent.save();
 
-            rent.cashRequestStatus = 'otp_sent';
-            rent.cashReceivedAt = new Date();
-            rent.cashOtpCode = otp;
-            rent.cashOtpExpiry = expiry;
-            rent.cashOtpSentAt = new Date();
-            rent.paymentMethod = 'cash';
-            await rent.save({ session });
-
-            if (!rent.tenantEmail) {
-                return { status: 400, error: 'Tenant email missing in rent record' };
-            }
-
-            return { success: true, rent };
-        });
-
-        if (result.error) {
-            return res.status(result.status).json({ success: false, message: result.error });
+        if (!rent.tenantEmail) {
+            return res.status(400).json({ success: false, message: 'Tenant email missing in rent record' });
         }
 
         const html = `
@@ -1150,9 +901,9 @@ exports.markCashReceivedByOwner = async (req, res) => {
                 <p style="font-size:12px;color:#666;">Expires in 10 minutes.</p>
             </div>
         `;
-        await sendMail(result.rent.tenantEmail, 'RoomHy Cash Payment OTP', '', html);
+        await sendMail(rent.tenantEmail, 'RoomHy Cash Payment OTP', '', html);
 
-        return res.json({ success: true, message: 'OTP sent to tenant email', rentId: String(result.rent._id) });
+        return res.json({ success: true, message: 'OTP sent to tenant email', rentId: String(rent._id) });
     } catch (err) {
         console.error('markCashReceivedByOwner error:', err);
         return res.status(500).json({ success: false, message: err.message });
@@ -1167,36 +918,35 @@ exports.verifyCashPaymentOtp = async (req, res) => {
             return res.status(400).json({ success: false, message: 'tenantLoginId and otp are required' });
         }
         const loginId = String(tenantLoginId).trim().toUpperCase();
+        const rent = await Rent.findOne({
+            tenantLoginId: loginId,
+            cashRequestStatus: { $in: ['otp_sent', 'received', 'requested'] }
+        }).sort({ updatedAt: -1 });
 
-        const result = await runInTransaction(async (session) => {
-            const rent = await Rent.findOne({
-                tenantLoginId: loginId,
-                cashRequestStatus: { $in: ['otp_sent', 'received', 'requested'] }
-            }).session(session).sort({ updatedAt: -1 });
+        if (!rent) return res.status(404).json({ success: false, message: 'No pending cash payment found' });
+        if (!rent.cashOtpCode || !rent.cashOtpExpiry) {
+            return res.status(400).json({ success: false, message: 'OTP not sent yet by owner' });
+        }
+        if (new Date() > new Date(rent.cashOtpExpiry)) {
+            return res.status(400).json({ success: false, message: 'OTP expired' });
+        }
+        if (String(otp).trim() !== String(rent.cashOtpCode).trim()) {
+            return res.status(400).json({ success: false, message: 'Invalid OTP' });
+        }
 
-            if (!rent) return { status: 404, error: 'No pending cash payment found' };
-            if (!rent.cashOtpCode || !rent.cashOtpExpiry) {
-                return { status: 400, error: 'OTP not sent yet by owner' };
-            }
-            if (new Date() > new Date(rent.cashOtpExpiry)) {
-                return { status: 400, error: 'OTP expired' };
-            }
-            if (String(otp).trim() !== String(rent.cashOtpCode).trim()) {
-                return { status: 400, error: 'Invalid OTP' };
-            }
+        rent.cashRequestStatus = 'paid';
+        rent.paymentStatus = 'paid';
+        rent.paymentMethod = 'cash';
+        rent.paidAmount = rent.totalDue || rent.rentAmount || rent.paidAmount || 0;
+        rent.paymentDate = new Date();
+        rent.autoReminderEnabled = false;
+        rent.autoReminderLastSentAt = undefined;
+        rent.cashOtpCode = undefined;
+        rent.cashOtpExpiry = undefined;
+        await rent.save();
 
-            rent.cashRequestStatus = 'paid';
-            rent.paymentStatus = 'paid';
-            rent.paymentMethod = 'cash';
-            rent.paidAmount = rent.totalDue || rent.rentAmount || rent.paidAmount || 0;
-            rent.paymentDate = new Date();
-            rent.autoReminderEnabled = false;
-            rent.autoReminderLastSentAt = undefined;
-            rent.cashOtpCode = undefined;
-            rent.cashOtpExpiry = undefined;
-            await rent.save({ session });
-
-            await Notification.create([{
+        try {
+            await Notification.create({
                 toLoginId: String(rent.ownerLoginId || '').toUpperCase(),
                 from: loginId,
                 type: 'cash_payment_completed',
@@ -1207,16 +957,10 @@ exports.verifyCashPaymentOtp = async (req, res) => {
                     amount: rent.paidAmount
                 },
                 read: false
-            }], { session });
+            });
+        } catch (_) {}
 
-            return { success: true, rent };
-        });
-
-        if (result.error) {
-            return res.status(result.status).json({ success: false, message: result.error });
-        }
-
-        return res.json({ success: true, message: 'Cash payment marked as paid', rent: result.rent });
+        return res.json({ success: true, message: 'Cash payment marked as paid', rent });
     } catch (err) {
         console.error('verifyCashPaymentOtp error:', err);
         return res.status(500).json({ success: false, message: err.message });
@@ -1299,42 +1043,32 @@ exports.processOwnerPayout = async (req, res) => {
         }
 
         const month = new Date().toISOString().slice(0, 7);
+        const rentDocs = await Rent.find({
+            ownerLoginId: ownerId,
+            tenantLoginId: tenantId,
+            collectionMonth: month
+        }).sort({ createdAt: -1 });
 
-        // Check already paid and transition to processing inside a transaction
-        const transitionResult = await runInTransaction(async (session) => {
-            const rentDocs = await Rent.find({
-                ownerLoginId: ownerId,
-                tenantLoginId: tenantId,
-                collectionMonth: month
-            }).session(session).sort({ createdAt: -1 });
-
-            if (!rentDocs.length) {
-                return { error: 'No rent record found for this owner/tenant in current month', status: 404 };
-            }
-
-            const anyAlreadyPaid = rentDocs.some((r) => r.ownerPayoutStatus === 'paid' || r.ownerPayoutStatus === 'processing');
-            if (anyAlreadyPaid) {
-                return { error: 'Payout already completed or processing for this owner/tenant', status: 409 };
-            }
-
-            await Rent.updateMany(
-                { _id: { $in: rentDocs.map((r) => r._id) } },
-                {
-                    $set: {
-                        ownerPayoutStatus: 'processing',
-                        ownerPayoutAmount: payoutAmount,
-                        ownerPayoutNote: `Rent: ${Number(rentAmount || 0)}, Commission: ${Number(commissionAmount || 0)}, Service Fee: ${Number(serviceFeeAmount || 0)}`
-                    }
-                },
-                { session }
-            );
-
-            return { success: true, rentDocs };
-        });
-
-        if (transitionResult.error) {
-            return res.status(transitionResult.status).json({ success: false, message: transitionResult.error });
+        if (!rentDocs.length) {
+            return res.status(404).json({ success: false, message: 'No rent record found for this owner/tenant in current month' });
         }
+
+        const anyAlreadyPaid = rentDocs.some((r) => r.ownerPayoutStatus === 'paid');
+        if (anyAlreadyPaid) {
+            return res.status(409).json({ success: false, message: 'Payout already completed for this owner/tenant' });
+        }
+
+        // Mark processing before external call
+        await Rent.updateMany(
+            { _id: { $in: rentDocs.map((r) => r._id) } },
+            {
+                $set: {
+                    ownerPayoutStatus: 'processing',
+                    ownerPayoutAmount: payoutAmount,
+                    ownerPayoutNote: `Rent: ${Number(rentAmount || 0)}, Commission: ${Number(commissionAmount || 0)}, Service Fee: ${Number(serviceFeeAmount || 0)}`
+                }
+            }
+        );
 
         const Razorpay = require('razorpay');
         const keyId = process.env.RAZORPAY_KEY_ID;
@@ -1342,94 +1076,72 @@ exports.processOwnerPayout = async (req, res) => {
         const payoutAccountNumber = process.env.RAZORPAY_PAYOUT_ACCOUNT_NUMBER;
 
         if (!keyId || !keySecret) {
-            await runInTransaction(async (session) => {
-                await Rent.updateMany(
-                    { _id: { $in: transitionResult.rentDocs.map((r) => r._id) } },
-                    { $set: { ownerPayoutStatus: 'failed', ownerPayoutNote: 'Razorpay key/secret not configured' } },
-                    { session }
-                );
-            });
+            await Rent.updateMany(
+                { _id: { $in: rentDocs.map((r) => r._id) } },
+                { $set: { ownerPayoutStatus: 'failed', ownerPayoutNote: 'Razorpay key/secret not configured' } }
+            );
             return res.status(500).json({ success: false, message: 'Razorpay credentials are not configured' });
         }
 
         if (!payoutAccountNumber) {
-            await runInTransaction(async (session) => {
-                await Rent.updateMany(
-                    { _id: { $in: transitionResult.rentDocs.map((r) => r._id) } },
-                    { $set: { ownerPayoutStatus: 'failed', ownerPayoutNote: 'RAZORPAY_PAYOUT_ACCOUNT_NUMBER missing' } },
-                    { session }
-                );
-            });
+            await Rent.updateMany(
+                { _id: { $in: rentDocs.map((r) => r._id) } },
+                { $set: { ownerPayoutStatus: 'failed', ownerPayoutNote: 'RAZORPAY_PAYOUT_ACCOUNT_NUMBER missing' } }
+            );
             return res.status(500).json({ success: false, message: 'RAZORPAY_PAYOUT_ACCOUNT_NUMBER is required for payout transfers' });
         }
 
         const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
 
-        let contact, fundAccount, payout;
-        try {
-            // Create contact and fund account for owner payout
-            contact = await razorpay.contacts.create({
-                name: ownerInfo.ownerName || ownerId,
-                email: ownerInfo.ownerEmail || undefined,
-                type: 'vendor',
-                reference_id: `owner_${ownerId}`,
-                notes: { ownerLoginId: ownerId }
-            });
+        // Create contact and fund account for owner payout
+        const contact = await razorpay.contacts.create({
+            name: ownerInfo.ownerName || ownerId,
+            email: ownerInfo.ownerEmail || undefined,
+            type: 'vendor',
+            reference_id: `owner_${ownerId}`,
+            notes: { ownerLoginId: ownerId }
+        });
 
-            fundAccount = await razorpay.fundAccount.create({
-                contact_id: contact.id,
-                account_type: 'bank_account',
-                bank_account: {
-                    name: ownerInfo.accountHolderName || ownerInfo.ownerName || ownerId,
-                    ifsc: ownerInfo.ifscCode,
-                    account_number: ownerInfo.accountNumber
-                }
-            });
+        const fundAccount = await razorpay.fundAccount.create({
+            contact_id: contact.id,
+            account_type: 'bank_account',
+            bank_account: {
+                name: ownerInfo.accountHolderName || ownerInfo.ownerName || ownerId,
+                ifsc: ownerInfo.ifscCode,
+                account_number: ownerInfo.accountNumber
+            }
+        });
 
-            payout = await razorpay.payouts.create({
-                account_number: payoutAccountNumber,
-                fund_account_id: fundAccount.id,
-                amount: Math.round(payoutAmount * 100),
-                currency: 'INR',
-                mode: 'IMPS',
-                purpose: 'payout',
-                queue_if_low_balance: true,
-                reference_id: `roomhy_${ownerId}_${tenantId}_${Date.now()}`,
-                narration: 'RoomHy Rent Payout',
-                notes: {
-                    ownerLoginId: ownerId,
-                    tenantLoginId: tenantId,
-                    propertyName: propertyName || ''
-                }
-            });
-        } catch (razorpayErr) {
-            console.error('Razorpay payout API error:', razorpayErr);
-            await runInTransaction(async (session) => {
-                await Rent.updateMany(
-                    { _id: { $in: transitionResult.rentDocs.map((r) => r._id) } },
-                    { $set: { ownerPayoutStatus: 'failed', ownerPayoutNote: `Razorpay API error: ${razorpayErr.message}` } },
-                    { session }
-                );
-            });
-            return res.status(500).json({ success: false, message: `Failed to execute Razorpay payout API: ${razorpayErr.message}` });
-        }
+        const payout = await razorpay.payouts.create({
+            account_number: payoutAccountNumber,
+            fund_account_id: fundAccount.id,
+            amount: Math.round(payoutAmount * 100),
+            currency: 'INR',
+            mode: 'IMPS',
+            purpose: 'payout',
+            queue_if_low_balance: true,
+            reference_id: `roomhy_${ownerId}_${tenantId}_${Date.now()}`,
+            narration: 'RoomHy Rent Payout',
+            notes: {
+                ownerLoginId: ownerId,
+                tenantLoginId: tenantId,
+                propertyName: propertyName || ''
+            }
+        });
 
         const payoutRef = payout.id || payout.reference_id || '';
-        await runInTransaction(async (session) => {
-            await Rent.updateMany(
-                { _id: { $in: transitionResult.rentDocs.map((r) => r._id) } },
-                {
-                    $set: {
-                        ownerPayoutStatus: 'paid',
-                        ownerPayoutAt: new Date(),
-                        ownerPayoutRef: payoutRef,
-                        ownerPayoutAmount: payoutAmount,
-                        ownerPayoutNote: 'Transfer successful'
-                    }
-                },
-                { session }
-            );
-        });
+        await Rent.updateMany(
+            { _id: { $in: rentDocs.map((r) => r._id) } },
+            {
+                $set: {
+                    ownerPayoutStatus: 'paid',
+                    ownerPayoutAt: new Date(),
+                    ownerPayoutRef: payoutRef,
+                    ownerPayoutAmount: payoutAmount,
+                    ownerPayoutNote: 'Transfer successful'
+                }
+            }
+        );
 
         await sendOwnerPayoutSuccessEmail({
             toEmail: ownerInfo.ownerEmail,
@@ -1492,27 +1204,25 @@ exports.testTenantEmail = async (req, res) => {
         if (!email) return res.status(400).json({ success: false, message: 'Email required' });
 
         const mailer = require('../utils/mailer');
-        
-        const mockRent = {
-            tenantName: 'Pratap Narayan Choubey',
-            collectionMonth: '2026-06',
-            rentAmount: 3000,
-            totalDue: 7100,
-            propertyName: 'Roomhy Premium PG - 1',
-            roomNumber: 'Room 2'
-        };
-
-        const mockOwnerInfo = {
-            ownerUpiId: 'yesjokazis',
-            ownerBankName: 'jfyfyhjh',
-            ownerAccountHolder: 'Yes',
-            ownerAccountNumber: 'ngrfeyjbgke',
-            ownerIfscCode: 'USI09999'
-        };
-
-        const html = buildRentReminderEmailHtml(mockRent, 3, 6, mockOwnerInfo);
-        const subject = `Rent Final Notice — ${mockRent.collectionMonth}`;
-        const text = 'Testing premium rent notice email delivery.';
+        const subject = 'RoomHy System Check - Multiple Channel Verification';
+        const text = 'Testing email delivery priorities: 1. Mailjet API, 2. Gmail SMTP.';
+        const html = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+                <div style="background-color: #6366f1; color: white; padding: 20px; text-align: center;">
+                    <h2 style="margin: 0;">RoomHy System Check</h2>
+                </div>
+                <div style="padding: 25px; color: #374151; line-height: 1.6;">
+                    <p>Hello,</p>
+                    <p>This is a <strong>multi-channel delivery test</strong> triggered from the RoomHy server.</p>
+                    <p>Current configuration status:</p>
+                    <ul style="padding-left: 20px;">
+                        <li><strong>Primary:</strong> Mailjet HTTP API</li>
+                        <li><strong>Fallback:</strong> Gmail SMTP Relay</li>
+                    </ul>
+                    <p>If you received this, the delivery system is functional.</p>
+                </div>
+            </div>
+        `;
 
         const sent = await mailer.sendMail(email, subject, text, html);
         return res.json({ 

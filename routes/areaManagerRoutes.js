@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const areaManagerController = require('../controllers/areaManagerController');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Get all area managers
 router.get('/', areaManagerController.getAllAreaManagers);
@@ -18,18 +19,18 @@ router.get('/area/:area', areaManagerController.getManagersByArea);
 router.get('/:id', areaManagerController.getAreaManagerById);
 
 // Create new area manager
-router.post('/', areaManagerController.createAreaManager);
+router.post('/', protect, authorize('superadmin'), areaManagerController.createAreaManager);
 
 // Bulk import area managers
-router.post('/bulk/import', areaManagerController.bulkImportAreaManagers);
+router.post('/bulk/import', protect, authorize('superadmin'), areaManagerController.bulkImportAreaManagers);
 
 // Update area manager
-router.put('/:id', areaManagerController.updateAreaManager);
+router.put('/:id', protect, authorize('superadmin'), areaManagerController.updateAreaManager);
 
 // Update password
-router.patch('/:id/password', areaManagerController.updatePassword);
+router.patch('/:id/password', protect, authorize('superadmin'), areaManagerController.updatePassword);
 
 // Delete area manager (soft delete)
-router.delete('/:id', areaManagerController.deleteAreaManager);
+router.delete('/:id', protect, authorize('superadmin'), areaManagerController.deleteAreaManager);
 
 module.exports = router;

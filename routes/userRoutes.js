@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/user');
 const KYCVerification = require('../models/KYCVerification');
-const { protect } = require('../middleware/authMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
+const { authLimiter } = require('../middleware/security');
 
 // Get user profile
 router.get('/profile', protect, async (req, res) => {
@@ -145,7 +146,7 @@ router.put('/settings', protect, async (req, res) => {
 });
 
 // Change password
-router.put('/change-password', protect, async (req, res) => {
+router.put('/change-password', authLimiter, protect, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
 
@@ -283,10 +284,7 @@ router.delete('/account', protect, async (req, res) => {
 });
 
 // Seed user - for development only
-router.post('/seed-user', async (req, res) => {
-    if (process.env.NODE_ENV === 'production') {
-        return res.status(403).json({ success: false, message: 'Seeding is forbidden in production' });
-    }
+router.post('/seed-user', protect, authorize('superadmin'), async (req, res) => {
     try {
         const bcrypt = require('bcryptjs');
         const KYCVerification = require('../models/KYCVerification');

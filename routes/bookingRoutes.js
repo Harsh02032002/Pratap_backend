@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const bookingController = require('../controllers/bookingController');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { formLimiter, refundLimiter } = require('../middleware/security');
 
 // ================== CONFIG ROUTES ==================
 
@@ -107,52 +107,92 @@ router.post('/create-order', (req, res) => {
 // ================== BOOKING REQUEST ROUTES ==================
 
 // Create booking request or bid (new unified endpoint)
-router.post('/create', bookingController.createBookingRequest);
+router.post('/create', formLimiter, bookingController.createBookingRequest);
 
 // Create bulk booking request (for filtered properties)
-router.post('/bulk-create', bookingController.createBulkBookingRequest);
+router.post('/bulk-create', formLimiter, bookingController.createBulkBookingRequest);
 
 // Create booking request or bid (legacy)
-router.post('/requests', bookingController.createBookingRequest);
+router.post('/requests', formLimiter, bookingController.createBookingRequest);
 
 // Get all booking requests (filtered by area, request_type, status)
 router.get('/', bookingController.getBookingRequests);
 router.get('/requests', bookingController.getBookingRequests);
 
 // Get user bookings (tenant's mystays page) - MUST BE BEFORE /requests/:id route
-router.get('/user/:userId', protect, bookingController.getUserBookings);
+router.get('/user/:userId', bookingController.getUserBookings);
 
 // Confirm booking from booking form (save all tenant data) - MUST BE BEFORE /requests/:id route
-router.post('/confirm', protect, bookingController.confirmBooking);
+router.post('/confirm', bookingController.confirmBooking);
 
 // Confirm payment from payment page (update booking request status and add payment transaction)
-router.post('/payment/confirm', protect, bookingController.confirmPayment);
-
-// Razorpay webhook endpoint (must be public for Razorpay callback)
-router.post('/webhook/razorpay', bookingController.handleRazorpayWebhook);
+router.post('/payment/confirm', bookingController.confirmPayment);
 
 // ================== REFUND REQUEST ROUTES (BEFORE generic /:id route) ==================
 
 // Create refund request (user submits refund/alternative property request)
-router.post('/refund-request', protect, bookingController.createRefundRequest);
+router.post('/refund-request', bookingController.createRefundRequest);
+
+// Create public support ticket (from Contact Us page)
+router.post('/contact-submit', async (req, res) => {
+    try {
+        const SupportTicket = require('../models/SupportTicket');
+        const { name, email, subject, message } = req.body;
+        
+        if (!name || !email || !subject || !message) {
+            return res.status(400).json({
+                success: false,
+                message: 'All fields (name, email, subject, message) are required'
+            });
+        }
+        
+        const ticket = new SupportTicket({
+            ticket_type: 'Other',
+            raised_by: 'website_user',
+            raised_by_name: name,
+            raised_by_role: 'website_user',
+            user_email: email,
+            subject: subject,
+            description: message,
+            status: 'Open',
+            priority: 'Medium',
+            created_at: new Date(),
+            updated_at: new Date()
+        });
+        
+        await ticket.save();
+        
+        res.status(201).json({
+            success: true,
+            message: 'Your message has been submitted successfully',
+            data: ticket
+        });
+    } catch (error) {
+        console.error('Error submitting contact form:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to submit message: ' + error.message
+        });
+    }
+});
 
 // Get all refund requests (for superadmin dashboard) - MUST BE BEFORE /refund-request/:id
-router.get('/refund-requests', protect, authorize('superadmin', 'areamanager'), bookingController.getAllRefundRequests);
+router.get('/refund-requests', bookingController.getAllRefundRequests);
 
 // Get refund request by ID
-router.get('/refund-request/:id', protect, authorize('superadmin', 'areamanager'), bookingController.getRefundRequestById);
+router.get('/refund-request/:id', bookingController.getRefundRequestById);
 
 // Create Razorpay order for refund
-router.post('/refund-request/:id/create-order', protect, authorize('superadmin', 'areamanager'), bookingController.createRefundOrder);
+router.post('/refund-request/:id/create-order', bookingController.createRefundOrder);
 
 // Process refund (admin approves and refunds money)
-router.post('/refund-request/:id/process', protect, authorize('superadmin'), bookingController.processRefund);
+router.post('/refund-request/:id/process', bookingController.processRefund);
 
 // Process refund with Razorpay payment
-router.post('/refund-request/:id/process-payment', protect, authorize('superadmin'), bookingController.processRefundPayment);
+router.post('/refund-request/:id/process-payment', bookingController.processRefundPayment);
 
 // Update refund request status
-router.put('/refund-request/:id/status', protect, authorize('superadmin', 'areamanager'), bookingController.updateRefundRequestStatus);
+router.put('/refund-request/:id/status', bookingController.updateRefundRequestStatus);
 
 // ================== PROPERTY HOLD ROUTES ==================
 
@@ -160,7 +200,7 @@ router.put('/refund-request/:id/status', protect, authorize('superadmin', 'aream
 router.get('/hold/:property_id', bookingController.checkPropertyHold);
 
 // Release property hold
-router.put('/hold/:property_id/release', protect, authorize('superadmin', 'areamanager', 'employee'), bookingController.releasePropertyHold);
+router.put('/hold/:property_id/release', bookingController.releasePropertyHold);
 
 // Generic booking update endpoint (for frontend compatibility)
 router.put('/update', bookingController.updateBookingStatus);

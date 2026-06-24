@@ -18,6 +18,7 @@ router.patch('/invoices/:id/waive',  ctrl.waivePenaltyHandler);
 
 // Payments
 router.post('/payments',             ctrl.recordPaymentHandler);
+router.get('/payments/daily-summary', ctrl.getDailyPaymentSummary);
 router.get('/payments',              ctrl.listPaymentsHandler);
 
 // Penalty
@@ -25,6 +26,7 @@ router.post('/penalty/calculate',    ctrl.previewPenaltyCalculation);
 
 // Dashboard
 router.get('/dashboard',             ctrl.getDashboard);
+router.get('/monthly-summary',       ctrl.getMonthlySummary);
 
 // Config
 router.get('/configs',               ctrl.getPenaltyConfigs);

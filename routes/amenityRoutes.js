@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Amenity = require('../models/Amenity');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Get all amenities
 router.get('/', async (req, res) => {
@@ -19,7 +20,7 @@ router.get('/', async (req, res) => {
 });
 
 // Create amenity
-router.post('/', async (req, res) => {
+router.post('/', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { name, icon, category, description, status } = req.body;
     
@@ -49,7 +50,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update amenity
-router.put('/:id', async (req, res) => {
+router.put('/:id', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, icon, category, description, status } = req.body;
@@ -75,7 +76,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete amenity
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const amenity = await Amenity.findByIdAndDelete(id);

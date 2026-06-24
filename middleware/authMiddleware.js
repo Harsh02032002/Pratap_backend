@@ -1,6 +1,10 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 
+if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is not configured');
+}
+
 exports.protect = async (req, res, next) => {
     let token = null;
     if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
@@ -8,64 +12,10 @@ exports.protect = async (req, res, next) => {
     }
     if (!token) return res.status(401).json({ message: 'Not authorized, token missing' });
 
-    // Support local offline testing tokens (disabled in production)
-    if (process.env.NODE_ENV !== 'production') {
-        if (token === 'superadmin_token') {
-            let user = await User.findOne({ role: 'superadmin' }).select('-password');
-            if (!user) {
-                user = await User.findOne({ email: 'roomhyadmin@gmail.com' }).select('-password');
-            }
-            if (!user) {
-                user = {
-                    _id: '60c72b2f9b1d8b2bad000001',
-                    name: 'Super Admin',
-                    email: 'roomhyadmin@gmail.com',
-                    phone: '1234567890',
-                    role: 'superadmin'
-                };
-            }
-            req.user = user;
-            return next();
-        }
-
-        if (token === 'manager_token' || token === 'areamanager_token') {
-            const AreaManager = require('../models/AreaManager');
-            let user = await AreaManager.findOne().select('-password');
-            if (!user) {
-                user = {
-                    _id: '60c72b2f9b1d8b2bad000002',
-                    name: 'Area Manager',
-                    role: 'areamanager'
-                };
-            } else {
-                user.role = 'areamanager';
-            }
-            req.user = user;
-            return next();
-        }
-
-        if (token === 'employee_token') {
-            const Employee = require('../models/Employee');
-            let user = await Employee.findOne().select('-password');
-            if (!user) {
-                user = {
-                    _id: '60c72b2f9b1d8b2bad000003',
-                    name: 'Employee',
-                    role: 'employee'
-                };
-            } else {
-                user.team = user.role;
-                user.role = user.role && user.role.toLowerCase() === 'manager' ? 'manager' : 'employee';
-            }
-            req.user = user;
-            return next();
-        }
-    }
-
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         let user = await User.findById(decoded.id).select('-password');
-        
+
         if (!user) {
             const AreaManager = require('../models/AreaManager');
             user = await AreaManager.findById(decoded.id).select('-password');

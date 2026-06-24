@@ -17,16 +17,16 @@ exports.getTenantComplaints = async (req, res) => {
 exports.getOwnerComplaints = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
-        const escapedId = ownerLoginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const ownerRegex = new RegExp('^' + escapedId + '$', 'i');
+        // Use exact uppercase match — all loginIds stored uppercase, so this hits the index
+        const normalizedId = String(ownerLoginId || '').trim().toUpperCase();
 
-        // Primary: complaints tagged with this owner's loginId
-        const byOwner = await Complaint.find({ ownerLoginId: ownerRegex }).sort({ createdAt: -1 });
+        // Primary: complaints tagged with this owner's loginId (index scan, not collection scan)
+        const byOwner = await Complaint.find({ ownerLoginId: normalizedId }).sort({ createdAt: -1 });
 
         // Fallback: complaints from this owner's tenants that lack ownerLoginId
         // (handles older complaints where ownerLoginId wasn't stored)
         const Tenant = require('../models/Tenant');
-        const ownerTenants = await Tenant.find({ ownerLoginId: ownerRegex }, '_id');
+        const ownerTenants = await Tenant.find({ ownerLoginId: normalizedId }, '_id');
         const tenantIds = ownerTenants.map(t => String(t._id));
 
         let complaints = byOwner;

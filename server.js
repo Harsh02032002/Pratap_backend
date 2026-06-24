@@ -41,42 +41,15 @@ if (currentServers && currentServers.includes("127.0.0.1")) {
 // Always load env from this folder, regardless of where the process was started.
 dotenv.config({ path: path.join(__dirname, '.env') });
 
-if (process.env.NODE_ENV === 'production') {
-    const requiredEnv = [
-        'JWT_SECRET',
-        'MONGO_URI',
-        'RAZORPAY_KEY_ID',
-        'RAZORPAY_KEY_SECRET',
-        'RAZORPAY_WEBHOOK_SECRET'
-    ];
-    const missing = requiredEnv.filter(key => !process.env[key]);
-
-    // Check for AI moderation key based on the active provider
-    const provider = (process.env.AI_MODERATION_PROVIDER || 'groq').toLowerCase().trim();
-    const hasAIKey = process.env.AI_MODERATION_API_KEY || 
-                      (provider === 'groq' && process.env.GROQ_API_KEY) || 
-                      (provider === 'openai' && process.env.OPENAI_API_KEY);
-
-    if (!hasAIKey) {
-        missing.push(provider === 'openai' ? 'OPENAI_API_KEY or AI_MODERATION_API_KEY' : 'GROQ_API_KEY or AI_MODERATION_API_KEY');
-    }
-
-    if (missing.length > 0) {
-        console.error(`❌ CRITICAL: Missing required environment variables in production: ${missing.join(', ')}`);
-        process.exit(1);
-    }
-}
-
 const app = express();
 const server = http.createServer(app);
 
 // 1. Robust CORS Middleware - Handles preflight and credentials for all our environments
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    const isAllowedOrigin = !origin || 
-        origin.includes('localhost') || 
-        origin.includes('127.0.0.1') || 
-        origin.includes('vercel.app') || 
+    const isAllowedOrigin = !origin ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1') ||
         origin.includes('roomhy.com') ||
         origin === 'https://roohmy-frontend-ux44.vercel.app';
 
@@ -94,15 +67,22 @@ app.use((req, res, next) => {
     next();
 });
 
-// 2. Socket.io initialization with CORS
+// 2. Socket.io initialization with CORS — same origin rules as REST API
 const io = new Server(server, {
     cors: {
-        origin: (origin, callback) => callback(null, true),
+        origin: (origin, callback) => {
+            const allowed = !origin ||
+                origin.includes('localhost') ||
+                origin.includes('127.0.0.1') ||
+                origin.includes('roomhy.com') ||
+                origin === 'https://roohmy-frontend-ux44.vercel.app';
+            if (allowed) callback(null, true);
+            else callback(new Error('Socket.io: origin not allowed'));
+        },
         credentials: true,
         methods: ["GET", "POST"]
     }
 });
-global.io = io;
 initChatSocket(io);
 
 // 3. Security & Optimization Middlewares
@@ -139,12 +119,7 @@ app.use((req, res, next) => {
 app.use(compressionMiddleware);
 
 // Body Parsers
-app.use(express.json({
-    limit: '10mb',
-    verify: (req, res, buf) => {
-        req.rawBody = buf;
-    }
-}));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Security Hardening
@@ -205,19 +180,8 @@ if (!mongoUri) {
 
 // Connect to MongoDB
 mongoose.connect(mongoUri, mongoOptions)
-    .then(async () => {
+    .then(() => {
         console.log('✅ MongoDB Connected');
-        try {
-            const User = require('./models/user');
-            const Owner = require('./models/Owner');
-            await Promise.all([
-                User.updateMany({}, { $unset: { chatRestrictedUntil: 1 } }),
-                Owner.updateMany({}, { $unset: { chatRestrictedUntil: 1 } })
-            ]);
-            console.log('🧹 Cleared all existing chat restrictions from database');
-        } catch (err) {
-            console.error('Error clearing restrictions on startup:', err);
-        }
         startServer();
     })
     .catch(err => {
@@ -275,6 +239,8 @@ try {
     console.log('  ✓ notificationRoutes');
     app.use('/api/owners', require('./routes/ownerRoutes'));
     console.log('  ✓ ownerRoutes');
+    app.use('/api/dashboard', require('./routes/dashboardRoutes'));
+    console.log('  ✓ dashboardRoutes');
     app.use('/api/owner-change-requests', require('./routes/ownerChangeRequestRoutes'));
     console.log('  ✓ ownerChangeRequestRoutes');
     app.use('/api/employees', require('./routes/employeeRoutes'));
@@ -404,9 +370,6 @@ app.get('/api/health', (req, res) => {
 
 // ── TEST ENDPOINT: Trigger agreement expiry for a tenant (remove in production) ──
 app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
-    if (process.env.NODE_ENV === 'production') {
-        return res.status(403).json({ success: false, message: 'Forbidden in production' });
-    }
     try {
         const Tenant = require('./models/Tenant');
         const Notification = require('./models/Notification');

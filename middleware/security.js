@@ -12,9 +12,19 @@ function getClientIp(req) {
     return req.socket.remoteAddress || '';
 }
 
+// Read all limits from environment — never hardcode production values.
+// Override via .env: RATE_LIMIT_GLOBAL_MAX, RATE_LIMIT_AUTH_MAX, etc.
+const GLOBAL_MAX   = parseInt(process.env.RATE_LIMIT_GLOBAL_MAX,  10) || 300;
+const AUTH_MAX     = parseInt(process.env.RATE_LIMIT_AUTH_MAX,    10) || 10;
+const OTP_MAX      = parseInt(process.env.RATE_LIMIT_OTP_MAX,     10) || 5;
+const FORM_MAX     = parseInt(process.env.RATE_LIMIT_FORM_MAX,    10) || 20;
+const CONTACT_MAX  = parseInt(process.env.RATE_LIMIT_CONTACT_MAX, 10) || 10;
+const REFUND_MAX   = parseInt(process.env.RATE_LIMIT_REFUND_MAX,  10) || 5;
+const CHAT_MAX     = parseInt(process.env.RATE_LIMIT_CHAT_MAX,    10) || 30;
+
 const globalApiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100000, // Fixed high limit for stable local testing and development
+    max: GLOBAL_MAX,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => getClientIp(req),
@@ -24,21 +34,23 @@ const globalApiLimiter = rateLimit({
     }
 });
 
+// Login, register, password set/reset flows
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10000,
+    max: AUTH_MAX,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => getClientIp(req),
     message: {
         success: false,
-        message: 'Too many authentication attempts. Please wait and retry.'
+        message: 'Too many authentication attempts. Please try again later.'
     }
 });
 
+// OTP request and verify — applies across all roles (user, owner, tenant)
 const otpLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
-    max: 1000,
+    max: OTP_MAX,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => getClientIp(req),
@@ -48,15 +60,55 @@ const otpLimiter = rateLimit({
     }
 });
 
+// General form submissions (enquiries, property add/edit, KYC submit, email)
 const formLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10000,
+    max: FORM_MAX,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => getClientIp(req),
     message: {
         success: false,
         message: 'Too many submissions. Please try again later.'
+    }
+});
+
+// Contact form — lower hourly cap to prevent spam
+const contactLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: CONTACT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => getClientIp(req),
+    message: {
+        success: false,
+        message: 'Too many contact requests. Please try again later.'
+    }
+});
+
+// Refund requests — strict hourly cap (financial endpoint)
+const refundLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: REFUND_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => getClientIp(req),
+    message: {
+        success: false,
+        message: 'Too many refund requests. Please try again later.'
+    }
+});
+
+// Chat message REST endpoints — per-minute cap
+const chatLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: CHAT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => getClientIp(req),
+    message: {
+        success: false,
+        message: 'Too many messages. Please slow down.'
     }
 });
 
@@ -147,5 +199,8 @@ module.exports = {
     authLimiter,
     otpLimiter,
     formLimiter,
+    contactLimiter,
+    refundLimiter,
+    chatLimiter,
     captchaProtection
 };

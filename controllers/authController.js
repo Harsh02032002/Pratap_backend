@@ -6,6 +6,10 @@ const Owner = require('../models/Owner');
 const KYCVerification = require('../models/KYCVerification');
 const jwt = require('jsonwebtoken');
 const mailer = require('../utils/mailer');
+
+if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is not configured');
+}
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const OWNER_LOGIN_ID_REGEX = /^ROOMHY\d{4}$/i;
 
@@ -13,7 +17,7 @@ const OWNER_LOGIN_ID_REGEX = /^ROOMHY\d{4}$/i;
 const otpStore = new Map();
 
 function generateToken(user) {
-    return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' });
+    return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 }
 
 // Generate 6-digit OTP
@@ -206,7 +210,7 @@ exports.forgotPasswordVerifyOTP = async (req, res) => {
         }
 
         // OTP verified - generate reset token (valid for 15 minutes)
-        const resetToken = jwt.sign({ email, type: 'forgot-password' }, process.env.JWT_SECRET || 'secret', { expiresIn: '15m' });
+        const resetToken = jwt.sign({ email, type: 'forgot-password' }, process.env.JWT_SECRET, { expiresIn: '15m' });
 
         // Clear OTP after successful verification
         otpStore.delete(email);
@@ -238,7 +242,7 @@ exports.forgotPasswordReset = async (req, res) => {
 
         // Verify reset token
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
             if (decoded.type !== 'forgot-password' || decoded.email !== email) {
                 return res.status(401).json({ message: 'Invalid reset token' });
             }
@@ -398,7 +402,7 @@ exports.ownerForgotPasswordVerifyOTP = async (req, res) => {
 
         const resetToken = jwt.sign(
             { loginId, type: 'owner-forgot-password' },
-            process.env.JWT_SECRET || 'secret',
+            process.env.JWT_SECRET,
             { expiresIn: '15m' }
         );
 
@@ -426,7 +430,7 @@ exports.ownerForgotPasswordReset = async (req, res) => {
         }
 
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
             if (decoded.type !== 'owner-forgot-password' || decoded.loginId !== loginId) {
                 return res.status(401).json({ message: 'Invalid reset token' });
             }
@@ -547,7 +551,7 @@ exports.tenantForgotPasswordVerifyOTP = async (req, res) => {
 
         const resetToken = jwt.sign(
             { loginId, type: 'tenant-forgot-password' },
-            process.env.JWT_SECRET || 'secret',
+            process.env.JWT_SECRET,
             { expiresIn: '15m' }
         );
 
@@ -574,7 +578,7 @@ exports.tenantForgotPasswordReset = async (req, res) => {
         }
 
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
             if (decoded.type !== 'tenant-forgot-password' || decoded.loginId !== loginId) {
                 return res.status(401).json({ message: 'Invalid reset token' });
             }
@@ -1033,7 +1037,10 @@ exports.register = async (req, res) => {
         if (existing) return res.status(400).json({ message: 'User exists' });
 
         const normalizedEmail = (email || '').toString().trim().toLowerCase();
-        const normalizedRole = role || 'tenant';
+        const ALLOWED_SELF_REGISTER_ROLES = ['tenant', 'owner'];
+        const normalizedRole = ALLOWED_SELF_REGISTER_ROLES.includes(String(role || '').toLowerCase())
+            ? String(role).toLowerCase()
+            : 'tenant';
         const derivedLoginId = normalizedEmail;
 
         const user = await User.create({

@@ -255,16 +255,33 @@ async function getDashboard(req, res) {
       RentInvoice.countDocuments({ ownerId, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 3 }),
     ]);
 
-    const overdueTotals = await RentInvoice.aggregate([
-      { $match: { ownerId, status: { $in: ['PENDING', 'PARTIAL'] } } },
-      { $group: { _id: null, totalOutstanding: { $sum: '$outstandingAmount' }, totalPenalty: { $sum: '$totalPenalty' } } },
+    const [overdueTotals, allTotals, penaltyTotals] = await Promise.all([
+      // Outstanding + penalty only from unpaid invoices
+      RentInvoice.aggregate([
+        { $match: { ownerId, status: { $in: ['PENDING', 'PARTIAL'] } } },
+        { $group: { _id: null, totalOutstanding: { $sum: '$outstandingAmount' } } },
+      ]),
+      // Gross totals across every invoice
+      RentInvoice.aggregate([
+        { $match: { ownerId } },
+        { $group: { _id: null, totalRentAmount: { $sum: '$rentAmount' }, totalPaid: { $sum: '$paidAmount' } } },
+      ]),
+      // Total penalty charged across ALL invoices (including PAID ones)
+      RentInvoice.aggregate([
+        { $match: { ownerId, totalPenalty: { $gt: 0 } } },
+        { $group: { _id: null, totalPenalty: { $sum: '$totalPenalty' } } },
+      ]),
     ]);
 
-    const totals = overdueTotals[0] || { totalOutstanding: 0, totalPenalty: 0 };
+    const totalOutstanding = overdueTotals[0]?.totalOutstanding || 0;
+    const totalCollected   = allTotals[0]?.totalPaid     || 0;
+    const totalRentAmount  = allTotals[0]?.totalRentAmount || 0;
+    const totalPenalty     = penaltyTotals[0]?.totalPenalty || 0;
 
     res.json({
       success: true,
-      stats: { total: all, paid, partial, pending, waived, phase1, phase2, phase3, ...totals },
+      stats: { total: all, paid, partial, pending, waived, phase1, phase2, phase3,
+               totalOutstanding, totalPenalty, totalCollected, totalRentAmount },
       mode: globalConfig.mode,
     });
   } catch (err) {
@@ -534,6 +551,90 @@ async function getWhatsAppTemplates(req, res) {
   }
 }
 
+// ─── GET /api/rent-collection/monthly-summary ────────────────────────────────
+async function getMonthlySummary(req, res) {
+  try {
+    const ownerId = req.user._id;
+
+    // Build last 8 calendar months (oldest → newest)
+    const slots = [];
+    const now   = new Date();
+    for (let i = 7; i >= 0; i--) {
+      const d   = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      slots.push({ key, label: d.toLocaleString('en', { month: 'short' }) });
+    }
+
+    const keys = slots.map(s => s.key);
+    const rows = await RentInvoice.aggregate([
+      { $match: { ownerId, billingMonth: { $in: keys } } },
+      { $group: {
+        _id:       '$billingMonth',
+        due:       { $sum: '$rentAmount' },
+        collected: { $sum: '$paidAmount' },
+      }},
+    ]);
+
+    const map = {};
+    rows.forEach(r => { map[r._id] = { due: r.due, collected: r.collected }; });
+
+    const data = slots.map(s => ({
+      month:     s.label,
+      due:       map[s.key]?.due       || 0,
+      collected: map[s.key]?.collected || 0,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+// ─── GET /api/rent-collection/payments/daily-summary ─────────────────────────
+async function getDailyPaymentSummary(req, res) {
+  try {
+    const ownerId = req.user._id;
+    const { startDate, endDate } = req.query;
+
+    const start = startDate ? new Date(startDate) : (() => { const d = new Date(); d.setDate(d.getDate() - 6); d.setHours(0,0,0,0); return d; })();
+    const end   = endDate   ? new Date(endDate)   : new Date();
+    end.setHours(23, 59, 59, 999);
+
+    const rows = await RentPayment.aggregate([
+      { $match: { ownerId, paymentDate: { $gte: start, $lte: end } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$paymentDate' } },
+          amount: { $sum: '$amount' },
+          count:  { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Fill every calendar day in the range so the chart has no gaps
+    const dayMap = {};
+    rows.forEach(r => { dayMap[r._id] = r.amount; });
+
+    const result = [];
+    const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const cur = new Date(start);
+    while (cur <= end) {
+      const key = cur.toISOString().split('T')[0];
+      result.push({
+        date:   key,
+        day:    DAYS[cur.getDay()],
+        amount: dayMap[key] || 0,
+      });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
 module.exports = {
   generateInvoices,
   previewPenaltyCalculation,
@@ -549,4 +650,6 @@ module.exports = {
   getMissingContacts,
   listPaymentsHandler,
   getWhatsAppTemplates,
+  getDailyPaymentSummary,
+  getMonthlySummary,
 };

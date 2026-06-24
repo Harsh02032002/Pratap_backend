@@ -1,9 +1,9 @@
 const BookingRequest = require('../models/BookingRequest');
-const { runInTransaction } = require('../utils/dbHelper');
 const RefundRequest = require('../models/RefundRequest');
 const Notification = require('../models/Notification');
 const User = require('../models/user');
 const Owner = require('../models/Owner');
+const ApprovedProperty = require('../models/ApprovedProperty');
 const CheckinRecord = require('../models/CheckinRecord');
 const ChatRoom = require('../models/ChatRoom');
 const ChatMessage = require('../models/ChatMessage');
@@ -353,22 +353,27 @@ exports.createBookingRequest = async (req, res) => {
             });
         }
 
-        // ✅ NEW: Validate owner_id is present
-        if (!owner_id) {
-            console.warn('❌ owner_id is missing from request');
-            return res.status(400).json({
-                success: false,
-                message: 'Property owner ID is required'
-            });
+        // Resolve owner_id — if not sent by client, look it up from the property record
+        let resolvedOwnerId = owner_id;
+        if (!resolvedOwnerId && property_id) {
+            try {
+                const prop = await ApprovedProperty.findById(property_id).select('generatedCredentials');
+                resolvedOwnerId = prop?.generatedCredentials?.loginId || null;
+                if (resolvedOwnerId) console.log(`🔍 owner_id resolved from property: ${resolvedOwnerId}`);
+            } catch (_) {}
+        }
+        if (!resolvedOwnerId) {
+            console.warn('❌ owner_id could not be resolved');
+            return res.status(400).json({ success: false, message: 'Property owner ID is required' });
         }
 
-        console.log(`✅ Creating ${request_type} for property: ${property_name}, owner: ${owner_id}`);
+        console.log(`✅ Creating ${request_type} for property: ${property_name}, owner: ${resolvedOwnerId}`);
 
         // Find area manager by area (for notifications)
         const manager = await User.findOne({ role: 'area_manager', area: area });
         
         // Find owner to get owner name/email (supports both User and Owner collections)
-        const ownerLoginId = String(owner_id || '').toUpperCase();
+        const ownerLoginId = String(resolvedOwnerId || '').toUpperCase();
         const owner = await User.findOne({ loginId: ownerLoginId });
         const ownerProfile = await Owner.findOne({ loginId: ownerLoginId });
         const ownerName = owner
@@ -392,7 +397,7 @@ exports.createBookingRequest = async (req, res) => {
             name,
             phone: phone || null,  // Allow null if phone not provided
             email,
-            owner_id,                      // ✅ SET OWNER ID FROM REQUEST
+            owner_id: resolvedOwnerId,     // ✅ SET OWNER ID (resolved from request or property)
             owner_name: ownerName,          // ✅ SET OWNER NAME FROM USER DB
             request_type,
             bid_amount: request_type === 'bid' ? (bid_amount || 500) : 0,
@@ -840,18 +845,6 @@ exports.updateBookingStatus = async (req, res) => {
                 success: false, 
                 message: 'Booking request not found' 
             });
-        }
-
-        if (status === 'active' || status === 'checked_in') {
-            try {
-                const PaymentTransaction = require('../models/PaymentTransaction');
-                const txs = await PaymentTransaction.find({ booking_id: id, status: 'Verified' });
-                for (const tx of txs) {
-                    await settlePayment(tx._id);
-                }
-            } catch (settleErr) {
-                console.error('[updateBookingStatus] Settle payment error:', settleErr.message);
-            }
         }
 
         res.status(200).json({ 
@@ -1366,197 +1359,6 @@ exports.updateChatDecision = async (req, res) => {
  * CONFIRM BOOKING FROM BOOKING FORM
  * Saves the complete booking with tenant info, payment details, and property info
  */
-// Helper to verify a payment transaction
-async function verifyPaymentTransaction(transactionId, session = null) {
-    const PaymentTransaction = require('../models/PaymentTransaction');
-    const Owner = require('../models/Owner');
-    const SystemSettings = require('../models/SystemSettings');
-
-    const tx = await PaymentTransaction.findById(transactionId).session(session);
-    if (!tx) {
-        throw new Error('Payment transaction not found');
-    }
-
-    if (tx.status === 'Verified' || tx.status === 'Settled') {
-        console.log(`[Verification] Transaction ${tx.razorpay_payment_id} is already ${tx.status}. Skipping.`);
-        return tx;
-    }
-
-    const ownerId = tx.owner_id;
-    const ownerAmt = tx.owner_amount || 0;
-    const commAmt = tx.commission_amount || 0;
-
-    // Increment Owner pending balance
-    await Owner.findOneAndUpdate(
-        { loginId: String(ownerId).toUpperCase() },
-        { $inc: { pendingBalance: ownerAmt } },
-        { new: true, upsert: true, session }
-    );
-
-    // Update system revenue balance immediately upon verification
-    await SystemSettings.findOneAndUpdate(
-        {},
-        { $inc: { revenueBalance: commAmt } },
-        { new: true, upsert: true, session }
-    );
-
-    tx.status = 'Verified';
-    await tx.save({ session });
-
-    console.log(`[Verification] Transaction ${tx.razorpay_payment_id} marked as Verified. Added pending balance to Owner ${ownerId}: ₹${ownerAmt}, Revenue: ₹${commAmt}`);
-    return tx;
-}
-
-// Helper to settle a payment transaction
-async function settlePayment(transactionId, session = null) {
-    const PaymentTransaction = require('../models/PaymentTransaction');
-    const Owner = require('../models/Owner');
-
-    const tx = await PaymentTransaction.findById(transactionId).session(session);
-    if (!tx) {
-        throw new Error('Payment transaction not found');
-    }
-
-    if (tx.status === 'Settled') {
-        console.log(`[Settlement] Transaction ${tx.razorpay_payment_id} is already Settled. Skipping duplicate credit.`);
-        return tx;
-    }
-
-    if (tx.status !== 'Verified' && tx.status !== 'Created') {
-        throw new Error(`Cannot settle transaction in status ${tx.status}`);
-    }
-
-    const ownerId = tx.owner_id;
-    const ownerAmt = tx.owner_amount || 0;
-
-    // Update Owner balances: increment walletBalance, decrement pendingBalance
-    await Owner.findOneAndUpdate(
-        { loginId: String(ownerId).toUpperCase() },
-        { 
-            $inc: { 
-                walletBalance: ownerAmt,
-                pendingBalance: -ownerAmt
-            } 
-        },
-        { new: true, session }
-    );
-
-    tx.status = 'Settled';
-    await tx.save({ session });
-
-    console.log(`[Settlement] Transaction ${tx.razorpay_payment_id} successfully settled. Credited Owner ${ownerId}: ₹${ownerAmt}`);
-    return tx;
-}
-
-// Common handler to process/verify payment verification safely
-async function processPaymentVerification({ bookingId, paymentId, orderId, signature, amount }, session = null) {
-    const BookingRequest = require('../models/BookingRequest');
-    const PaymentTransaction = require('../models/PaymentTransaction');
-    const SystemSettings = require('../models/SystemSettings');
-
-    const booking = await BookingRequest.findById(bookingId).session(session);
-    if (!booking) {
-        throw new Error('Booking request not found');
-    }
-
-    let tx = await PaymentTransaction.findOne({ razorpay_payment_id: paymentId }).session(session);
-    
-    if (tx) {
-        if (tx.status === 'Verified' || tx.status === 'Settled') {
-            console.log(`[processPaymentVerification] Transaction ${paymentId} already verified/settled. Status: ${tx.status}. Skipping.`);
-            return { booking, transaction: tx };
-        }
-    }
-
-    let settings = await SystemSettings.findOne().session(session);
-    let commPct = 10;
-    if (settings && typeof settings.commission_percentage === 'number') {
-        commPct = settings.commission_percentage;
-    }
-
-    const amt = Number(amount || booking.rent_amount || 0);
-    const commAmt = Math.round((amt * commPct / 100) * 100) / 100;
-    const ownerAmt = Math.round((amt - commAmt) * 100) / 100;
-
-    if (!tx) {
-        try {
-            tx = await PaymentTransaction.create([{
-                razorpay_payment_id: paymentId,
-                razorpay_order_id: orderId || null,
-                razorpay_signature: signature || null,
-                booking_id: booking._id.toString(),
-                property_id: booking.property_id,
-                property_name: booking.property_name || '',
-                tenant_id: booking.user_id,
-                tenant_name: booking.name || '',
-                owner_id: String(booking.owner_id || '').toUpperCase(),
-                owner_name: booking.owner_name || 'Property Owner',
-                booking_amount: amt,
-                commission_percentage: commPct,
-                commission_amount: commAmt,
-                owner_amount: ownerAmt,
-                payout_status: 'Pending',
-                payment_method: 'razorpay',
-                status: 'Created',
-                payment_date: new Date()
-            }], { session });
-            tx = tx[0];
-        } catch (createErr) {
-            if (createErr.code === 11000) {
-                console.log(`[processPaymentVerification] Concurrent creation detected for ${paymentId}. Fetching existing transaction.`);
-                tx = await PaymentTransaction.findOne({ razorpay_payment_id: paymentId }).session(session);
-                if (!tx) throw createErr;
-            } else {
-                throw createErr;
-            }
-        }
-    }
-
-    await verifyPaymentTransaction(tx._id, session);
-
-    booking.status = 'confirmed';
-    booking.booking_status = 'confirmed';
-    booking.bookingStatus = 'confirmed';
-    booking.payment_id = paymentId;
-    booking.paymentId = paymentId;
-    booking.payment_amount = amt;
-    booking.payment_status = 'completed';
-    booking.payment_completed_at = new Date();
-    booking.booking_confirmed_at = new Date();
-    booking.updated_at = Date.now();
-    await booking.save({ session });
-
-    return { booking, transaction: tx };
-}
-
-// Helper to settle all verified transactions for a tenant upon move-in / checkin
-exports.settleTransactionMoveIn = async (tenantLoginId, session = null) => {
-    const PaymentTransaction = require('../models/PaymentTransaction');
-    const Tenant = require('../models/Tenant');
-
-    const tenant = await Tenant.findOne({ loginId: String(tenantLoginId).toUpperCase() }).session(session);
-    if (!tenant) {
-        console.warn(`[settleTransactionMoveIn] Tenant not found for ${tenantLoginId}`);
-        return;
-    }
-
-    const emails = [tenant.email, tenant.loginId].filter(Boolean);
-    const txs = await PaymentTransaction.find({
-        $or: [
-            { tenant_id: tenant.loginId },
-            { tenant_id: tenant.user ? tenant.user.toString() : null },
-            { tenant_id: { $in: emails } }
-        ],
-        status: 'Verified'
-    }).session(session);
-
-    console.log(`[settleTransactionMoveIn] Found ${txs.length} verified transactions to settle for tenant ${tenantLoginId}`);
-
-    for (const tx of txs) {
-        await settlePayment(tx._id, session);
-    }
-};
-
 exports.confirmBooking = async (req, res) => {
     try {
         const {
@@ -1604,6 +1406,7 @@ exports.confirmBooking = async (req, res) => {
             message,
             bookedAt,
             status,
+            // Booking dates and amounts
             checkInDate,
             check_in_date,
             checkOutDate,
@@ -1613,11 +1416,10 @@ exports.confirmBooking = async (req, res) => {
             propertyImage,
             property_image,
             propertyPhotos,
-            property_photos,
-            razorpay_order_id,
-            razorpay_signature
+            property_photos
         } = req.body;
 
+        // Normalize field names (handle both camelCase and snake_case)
         const normalizedUserId = userId || user_id;
         const normalizedPaymentId = paymentId || payment_id;
         const normalizedName = name || fullName;
@@ -1636,6 +1438,7 @@ exports.confirmBooking = async (req, res) => {
         const normalizedPaymentStatus = payment_status || paymentStatus || 'completed';
         const normalizedBidAmount = bid_amount || bidAmount;
 
+        // Validation - userId and paymentId are required
         if (!normalizedUserId || !normalizedPaymentId) {
             return res.status(400).json({
                 success: false,
@@ -1643,6 +1446,7 @@ exports.confirmBooking = async (req, res) => {
             });
         }
 
+        // Check core required fields (area and owner_id can be optional/from booking request)
         if (!normalizedName || !email || !normalizedPropertyId) {
             return res.status(400).json({
                 success: false,
@@ -1650,10 +1454,12 @@ exports.confirmBooking = async (req, res) => {
             });
         }
 
+        // Use defaults for optional fields if not provided
         const finalArea = normalizedArea || 'N/A';
         const finalOwnerId = normalizedOwnerId || 'owner_unknown';
         const finalOwnerName = normalizedOwnerName || 'Unknown Owner';
 
+        // Build address string
         let fullAddress = 'N/A';
         if (address) {
             fullAddress = typeof address === 'string' ? address : 
@@ -1662,121 +1468,105 @@ exports.confirmBooking = async (req, res) => {
             fullAddress = `${address_street || ''}, ${address_city || ''}, ${address_state || ''}, ${address_postal_code || ''}`.replace(/^,\s*|,\s*$/g, '').trim();
         }
 
-        let booking;
+        // Create booking confirmation record with all fields
+        const booking = new BookingRequest({
+            user_id: normalizedUserId,
+            payment_id: normalizedPaymentId,
+            paymentId: normalizedPaymentId,
+            payment_amount: normalizedPaymentAmount,
+            payment_method: normalizedPaymentMethod,
+            payment_status: normalizedPaymentStatus,
+            name: normalizedName,
+            phone: phone,
+            email: email,
+            guardian_name: normalizedGuardianName,
+            guardian_phone: normalizedGuardianPhone,
+            property_id: normalizedPropertyId,
+            property_name: normalizedPropertyName,
+            owner_id: finalOwnerId,
+            owner_name: finalOwnerName,
+            rent_amount: normalizedRent,
+            area: finalArea,
+            property_type: normalizedPropertyType,
+            request_type: normalizedRequestType,
+            address_street: address_street,
+            address_city: address_city,
+            address_state: address_state,
+            address_postal_code: address_postal_code,
+            address_country: address_country,
+            full_address: fullAddress,
+            bid_amount: normalizedBidAmount || 0,
+            message: message || `Booking confirmed via booking form with payment ${normalizedPaymentId}`,
+            status: status || 'confirmed',
+            booking_status: bookingStatus || 'confirmed',
+            bookingStatus: bookingStatus || 'confirmed',
+            // Booking dates
+            check_in_date: checkInDate || check_in_date,
+            checkInDate: checkInDate || check_in_date,
+            check_out_date: checkOutDate || check_out_date,
+            checkOutDate: checkOutDate || check_out_date,
+            // Booking amounts
+            total_amount: totalAmount || total_amount || normalizedPaymentAmount,
+            totalAmount: totalAmount || total_amount || normalizedPaymentAmount,
+            price: totalAmount || total_amount || normalizedPaymentAmount,
+            // Property images
+            propertyImage: propertyImage || property_image,
+            property_image: propertyImage || property_image,
+            propertyPhotos: propertyPhotos || property_photos || [],
+            property_photos: propertyPhotos || property_photos || [],
+            created_at: new Date(),
+            updated_at: new Date()
+        });
+
+        await booking.save();
+
+        // Create PaymentTransaction in DB using dynamic commission percentage
         try {
-            await runInTransaction(async (session) => {
-                booking = new BookingRequest({
-                    user_id: normalizedUserId,
-                    payment_id: normalizedPaymentId,
-                    paymentId: normalizedPaymentId,
-                    payment_amount: normalizedPaymentAmount,
-                    payment_method: normalizedPaymentMethod,
-                    payment_status: normalizedPaymentStatus,
-                    name: normalizedName,
-                    phone: phone,
-                    email: email,
-                    guardian_name: normalizedGuardianName,
-                    guardian_phone: normalizedGuardianPhone,
-                    property_id: normalizedPropertyId,
-                    property_name: normalizedPropertyName,
-                    owner_id: finalOwnerId,
-                    owner_name: finalOwnerName,
-                    rent_amount: normalizedRent,
-                    area: finalArea,
-                    property_type: normalizedPropertyType,
-                    request_type: normalizedRequestType,
-                    address_street: address_street,
-                    address_city: address_city,
-                    address_state: address_state,
-                    address_postal_code: address_postal_code,
-                    address_country: address_country,
-                    full_address: fullAddress,
-                    bid_amount: normalizedBidAmount || 0,
-                    message: message || `Booking confirmed via booking form with payment ${normalizedPaymentId}`,
-                    status: status || 'confirmed',
-                    booking_status: bookingStatus || 'confirmed',
-                    bookingStatus: bookingStatus || 'confirmed',
-                    check_in_date: checkInDate || check_in_date,
-                    checkInDate: checkInDate || check_in_date,
-                    check_out_date: checkOutDate || check_out_date,
-                    checkOutDate: checkOutDate || check_out_date,
-                    total_amount: totalAmount || total_amount || normalizedPaymentAmount,
-                    totalAmount: totalAmount || total_amount || normalizedPaymentAmount,
-                    price: totalAmount || total_amount || normalizedPaymentAmount,
-                    propertyImage: propertyImage || property_image,
-                    property_image: propertyImage || property_image,
-                    propertyPhotos: propertyPhotos || property_photos || [],
-                    property_photos: propertyPhotos || property_photos || [],
-                    created_at: new Date(),
-                    updated_at: new Date()
-                });
-
-                await booking.save({ session });
-
-                const SystemSettings = require('../models/SystemSettings');
-                const PaymentTransaction = require('../models/PaymentTransaction');
-                
-                let settings = await SystemSettings.findOne().session(session);
-                let commPct = 10;
-                if (settings && typeof settings.commission_percentage === 'number') {
-                    commPct = settings.commission_percentage;
-                }
-
-                const amt = Number(normalizedPaymentAmount || normalizedRent || 0);
-                const commAmt = Math.round((amt * commPct / 100) * 100) / 100;
-                const ownerAmt = Math.round((amt - commAmt) * 100) / 100;
-
-                await PaymentTransaction.create([{
-                    razorpay_payment_id: normalizedPaymentId,
-                    razorpay_order_id: razorpay_order_id || null,
-                    razorpay_signature: razorpay_signature || null,
-                    booking_id: booking._id.toString(),
-                    property_id: normalizedPropertyId,
-                    property_name: normalizedPropertyName,
-                    tenant_id: normalizedUserId,
-                    tenant_name: normalizedName,
-                    owner_id: finalOwnerId,
-                    owner_name: finalOwnerName,
-                    booking_amount: amt,
-                    commission_percentage: commPct,
-                    commission_amount: commAmt,
-                    owner_amount: ownerAmt,
-                    payout_status: 'Pending',
-                    payment_method: normalizedPaymentMethod,
-                    status: 'Verified',
-                    payment_date: new Date()
-                }], { session });
-
-                await Owner.findOneAndUpdate(
-                    { loginId: String(finalOwnerId).toUpperCase() },
-                    { $inc: { pendingBalance: ownerAmt } },
-                    { new: true, upsert: true, session }
-                );
-
-                await SystemSettings.findOneAndUpdate(
-                    {},
-                    { $inc: { revenueBalance: commAmt } },
-                    { new: true, upsert: true, session }
-                );
-            });
-        } catch (txnErr) {
-            if (txnErr.code === 11000) {
-                console.log(`[confirmBooking] Booking already exists for ${normalizedPaymentId}`);
-                const existingBooking = await BookingRequest.findOne({ payment_id: normalizedPaymentId });
-                return res.status(201).json({
-                    success: true,
-                    message: 'Booking already confirmed successfully',
-                    data: existingBooking
-                });
+            const SystemSettings = require('../models/SystemSettings');
+            const PaymentTransaction = require('../models/PaymentTransaction');
+            
+            // Get setting
+            let settings = await SystemSettings.findOne();
+            let commPct = 10; // default
+            if (settings && typeof settings.commission_percentage === 'number') {
+                commPct = settings.commission_percentage;
             }
-            throw txnErr;
+
+            const amt = Number(normalizedPaymentAmount || normalizedRent || 0);
+            const commAmt = Math.round((amt * commPct / 100) * 100) / 100;
+            const ownerAmt = Math.round((amt - commAmt) * 100) / 100;
+
+            await PaymentTransaction.create({
+                razorpay_payment_id: normalizedPaymentId,
+                razorpay_order_id: razorpay_order_id || null,
+                razorpay_signature: razorpay_signature || null,
+                booking_id: booking._id.toString(),
+                property_id: normalizedPropertyId,
+                property_name: normalizedPropertyName,
+                tenant_id: normalizedUserId,
+                tenant_name: normalizedName,
+                owner_id: finalOwnerId,
+                owner_name: finalOwnerName,
+                booking_amount: amt,
+                commission_percentage: commPct,
+                commission_amount: commAmt,
+                owner_amount: ownerAmt,
+                payout_status: 'Pending',
+                payment_method: normalizedPaymentMethod,
+                payment_date: new Date()
+            });
+            console.log('✅ Created PaymentTransaction for payment', normalizedPaymentId);
+        } catch (ptErr) {
+            console.error('⚠️ Failed to create PaymentTransaction:', ptErr.message);
         }
 
+        // Email notifications: tenant + owner + superadmin (booking confirmation / transaction)
         try {
             const paymentRef = normalizedPaymentId || 'N/A';
             const amountValue = normalizedPaymentAmount || 0;
             const propertyLabel = normalizedPropertyName || normalizedPropertyId || 'Property';
 
+            // Tenant confirmation
             if (email) {
                 const tenantHtml = `
                     <div style="font-family: Arial, sans-serif; font-size: 14px;">
@@ -1787,9 +1577,10 @@ exports.confirmBooking = async (req, res) => {
                         <p><strong>Amount:</strong> INR ${amountValue}</p>
                     </div>
                 `;
-                await mailer.sendMail(email, `Booking Confirmed - ${propertyLabel}`, '', tenantHtml).catch(e => console.warn('Tenant confirm email failed:', e.message));
+                await mailer.sendMail(email, `Booking Confirmed - ${propertyLabel}`, '', tenantHtml);
             }
 
+            // Owner confirmation
             let ownerEmail = '';
             if (finalOwnerId && finalOwnerId !== 'owner_unknown') {
                 const ownerUser = await User.findOne({ loginId: finalOwnerId }).lean();
@@ -1811,9 +1602,10 @@ exports.confirmBooking = async (req, res) => {
                         <p>Amount: <strong>INR ${amountValue}</strong></p>
                     </div>
                 `;
-                await mailer.sendMail(ownerEmail, `New Booking - ${propertyLabel}`, '', ownerHtml).catch(e => console.warn('Owner booking confirm email failed:', e.message));
+                await mailer.sendMail(ownerEmail, `New Booking - ${propertyLabel}`, '', ownerHtml);
             }
 
+            // Superadmin copy
             const superadminEmails = [];
             const superadminUsers = await User.find({ role: 'superadmin' }).select('email').lean();
             for (const u of superadminUsers) {
@@ -1833,7 +1625,7 @@ exports.confirmBooking = async (req, res) => {
                         <p>Status: <strong>${booking.booking_status || booking.status || 'confirmed'}</strong></p>
                     </div>
                 `;
-                await mailer.sendMail(uniqueAdminEmails, `Booking Transaction - ${propertyLabel}`, '', adminHtml).catch(e => console.warn('Superadmin confirm email failed:', e.message));
+                await mailer.sendMail(uniqueAdminEmails, `Booking Transaction - ${propertyLabel}`, '', adminHtml);
             }
         } catch (mailErr) {
             console.warn('Booking confirmation email dispatch failed:', mailErr.message);
@@ -1847,6 +1639,8 @@ exports.confirmBooking = async (req, res) => {
 
     } catch (error) {
         console.error('❌ Error confirming booking:', error);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
         res.status(500).json({
             success: false,
             message: 'Failed to confirm booking: ' + error.message,
@@ -1863,7 +1657,7 @@ exports.confirmBooking = async (req, res) => {
  */
 exports.createRefundRequest = async (req, res) => {
     try {
-        const {
+        let {
             booking_id,
             user_id,
             payment_id,
@@ -1882,6 +1676,40 @@ exports.createRefundRequest = async (req, res) => {
             preferred_area,
             property_requirements
         } = req.body;
+
+        // If booking_id is provided but other fields are missing, attempt lookup
+        if (booking_id && (!user_id || !payment_id)) {
+            const mongoose = require('mongoose');
+            const BookingRequest = require('../models/BookingRequest');
+            const booking = await BookingRequest.findOne({
+                $or: [
+                    { _id: mongoose.Types.ObjectId.isValid(booking_id) ? booking_id : null },
+                    { booking_id: booking_id },
+                    { payment_id: booking_id }
+                ]
+            });
+
+            if (booking) {
+                // Verify email if provided
+                if (user_email && booking.email && booking.email.toLowerCase().trim() !== user_email.toLowerCase().trim()) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Provided email does not match the email associated with this booking'
+                    });
+                }
+                user_id = user_id || booking.user_id;
+                payment_id = payment_id || booking.payment_id || booking.paymentId || `pay_dummy_${booking._id}`;
+                user_name = user_name || booking.name;
+                user_phone = user_phone || booking.phone;
+                user_email = user_email || booking.email;
+                refund_amount = refund_amount || booking.payment_amount || 500;
+            } else {
+                user_id = user_id || 'usr_guest_' + Math.random().toString(36).substring(7);
+                payment_id = payment_id || 'pay_manual_' + Math.random().toString(36).substring(7);
+                user_name = user_name || 'Guest User';
+                user_phone = user_phone || 'N/A';
+            }
+        }
 
         // Validation
         if (!booking_id || !user_id || !payment_id || !user_name || !user_phone || !request_type) {
@@ -2286,72 +2114,109 @@ exports.confirmPayment = async (req, res) => {
             });
         }
 
-        let result;
-        try {
-            result = await runInTransaction(async (session) => {
-                return await processPaymentVerification({
-                    bookingId,
-                    paymentId,
-                    orderId,
-                    signature,
-                    amount
-                }, session);
+        const BookingRequest = require('../models/BookingRequest');
+        const SystemSettings = require('../models/SystemSettings');
+        const PaymentTransaction = require('../models/PaymentTransaction');
+
+        const booking = await BookingRequest.findById(bookingId);
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Booking request not found'
             });
-        } catch (txnErr) {
-            if (txnErr.message.includes('already verified/settled') || txnErr.code === 11000) {
-                console.log(`[confirmPayment] Payment already verified/settled for ${paymentId}`);
-                const BookingRequest = require('../models/BookingRequest');
-                const booking = await BookingRequest.findById(bookingId);
-                return res.status(200).json({
-                    success: true,
-                    message: 'Payment already confirmed and booking updated successfully',
-                    data: booking
-                });
-            }
-            throw txnErr;
         }
 
-        const { booking } = result;
+        // Update booking request status to confirmed and completed payment
+        booking.status = 'confirmed';
+        booking.booking_status = 'confirmed';
+        booking.bookingStatus = 'confirmed';
+        booking.payment_id = paymentId;
+        booking.paymentId = paymentId;
+        booking.payment_amount = Number(amount || booking.rent_amount || 0);
+        booking.payment_status = 'completed';
+        booking.payment_completed_at = new Date();
+        booking.booking_confirmed_at = new Date();
+        booking.updated_at = Date.now();
 
-        // Notify property owner about payment completion
-        const ownerId = booking.owner_id;
-        let ownerEmail = '';
-        if (ownerId) {
-            const ownerUser = await User.findOne({ loginId: String(ownerId).toUpperCase() }).lean();
-            const ownerRecord = await Owner.findOne({ loginId: String(ownerId).toUpperCase() }).lean();
-            ownerEmail = (ownerUser && ownerUser.email) || (ownerRecord && ownerRecord.email) || (ownerRecord && ownerRecord.profile && ownerRecord.profile.email) || '';
-            // Send email notification to owner
-            if (ownerEmail) {
-                const subject = `Payment Received by Superadmin for ${booking.property_name || ''}`;
-                const html = `
-                    <div style="font-family: Arial, sans-serif; font-size: 14px;">
-                        <h2>Payment Received by Superadmin</h2>
-                        <p>Dear Owner,</p>
-                        <p>The tenant <strong>${booking.name || ''}</strong> has completed the payment of <strong>INR ${booking.payment_amount || 0}</strong> for the property <strong>${booking.property_name || ''}</strong>.</p>
-                        <p>This payment has gone to Superadmin. Once the tenant moves in, the amount will be transferred to you.</p>
-                        <p>You can now onboard/add this tenant and assign them a room.</p>
-                        <p>Booking ID: ${booking._id.toString()}</p>
-                    </div>`;
-                await mailer.sendMail(ownerEmail, subject, '', html).catch(e => console.warn('Owner notify email failed:', e.message));
+        await booking.save();
+
+// Notify property owner about payment completion
+const ownerId = booking.owner_id;
+let ownerEmail = '';
+if (ownerId) {
+    const ownerUser = await User.findOne({ loginId: String(ownerId).toUpperCase() }).lean();
+    const ownerRecord = await Owner.findOne({ loginId: String(ownerId).toUpperCase() }).lean();
+    ownerEmail = (ownerUser && ownerUser.email) || (ownerRecord && ownerRecord.email) || (ownerRecord && ownerRecord.profile && ownerRecord.profile.email) || '';
+    // Send email notification to owner
+    if (ownerEmail) {
+        const subject = `Payment Received by Superadmin for ${booking.property_name || ''}`;
+        const html = `
+            <div style="font-family: Arial, sans-serif; font-size: 14px;">
+                <h2>Payment Received by Superadmin</h2>
+                <p>Dear Owner,</p>
+                <p>The tenant <strong>${booking.name || ''}</strong> has completed the payment of <strong>INR ${booking.payment_amount || 0}</strong> for the property <strong>${booking.property_name || ''}</strong>.</p>
+                <p>This payment has gone to Superadmin. Once the tenant moves in, the amount will be transferred to you.</p>
+                <p>You can now onboard/add this tenant and assign them a room.</p>
+                <p>Booking ID: ${booking._id.toString()}</p>
+            </div>`;
+        await mailer.sendMail(ownerEmail, subject, '', html);
+    }
+    // Create in-app notification for owner
+    await Notification.create({
+        toLoginId: String(ownerId).toUpperCase(),
+        toRole: 'owner',
+        from: 'system',
+        type: 'payment', // Set to payment for UI routing
+        meta: { 
+            bookingId: booking._id.toString(), 
+            amount: booking.payment_amount || 0,
+            tenantName: booking.name || '',
+            tenantEmail: booking.email || '',
+            tenantPhone: booking.phone || '',
+            propertyId: booking.property_id || '',
+            title: 'Payment Received by Superadmin',
+            message: `Tenant ${booking.name || ''} has paid INR ${booking.payment_amount || 0}. The payment has gone to Superadmin. Once the tenant moves in, the payment will be transferred to you, so you can now add the tenant.`
+        },
+        read: false
+    });
+}
+
+// Create PaymentTransaction in DB using dynamic commission percentage
+
+        // Create PaymentTransaction in DB using dynamic commission percentage
+        try {
+            let settings = await SystemSettings.findOne();
+            let commPct = 10; // default
+            if (settings && typeof settings.commission_percentage === 'number') {
+                commPct = settings.commission_percentage;
             }
-            // Create in-app notification for owner
-            await Notification.create({
-                toLoginId: String(ownerId).toUpperCase(),
-                toRole: 'owner',
-                from: 'system',
-                type: 'payment',
-                meta: { 
-                    bookingId: booking._id.toString(), 
-                    amount: booking.payment_amount || 0,
-                    tenantName: booking.name || '',
-                    tenantEmail: booking.email || '',
-                    tenantPhone: booking.phone || '',
-                    propertyId: booking.property_id || '',
-                    title: 'Payment Received by Superadmin',
-                    message: `Tenant ${booking.name || ''} has paid INR ${booking.payment_amount || 0}. The payment has gone to Superadmin. Once the tenant moves in, the payment will be transferred to you, so you can now add the tenant.`
-                },
-                read: false
-            }).catch(e => console.warn('Owner notify in-app failed:', e.message));
+
+            const amt = Number(amount || booking.rent_amount || 0);
+            const commAmt = Math.round((amt * commPct / 100) * 100) / 100;
+            const ownerAmt = Math.round((amt - commAmt) * 100) / 100;
+
+            await PaymentTransaction.create({
+                razorpay_payment_id: paymentId,
+                razorpay_order_id: orderId || null,
+                razorpay_signature: signature || null,
+                booking_id: booking._id.toString(),
+                property_id: booking.property_id,
+                property_name: booking.property_name || '',
+                tenant_id: booking.user_id,
+                tenant_name: booking.name || '',
+                owner_id: String(booking.owner_id || '').toUpperCase(),
+                owner_name: booking.owner_name || 'Property Owner',
+                booking_amount: amt,
+                commission_percentage: commPct,
+                commission_amount: commAmt,
+                owner_amount: ownerAmt,
+                payout_status: 'Pending',
+                payment_method: 'razorpay',
+                payment_date: new Date()
+            });
+            console.log('✅ Created PaymentTransaction for payment', paymentId);
+        } catch (ptErr) {
+            console.error('⚠️ Failed to create PaymentTransaction:', ptErr.message);
         }
 
         res.status(200).json({
@@ -2365,100 +2230,6 @@ exports.confirmPayment = async (req, res) => {
             success: false,
             message: error.message
         });
-    }
-};
-
-/**
- * HANDLE RAZORPAY WEBHOOK
- * Primary payment settlement mechanism check and event deduplication
- */
-exports.handleRazorpayWebhook = async (req, res) => {
-    const crypto = require('crypto');
-    const ProcessedWebhookEvent = require('../models/ProcessedWebhookEvent');
-    const BookingRequest = require('../models/BookingRequest');
-
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const signature = req.headers['x-razorpay-signature'];
-
-    console.log('[Razorpay Webhook] Received webhook call');
-
-    if (!signature || !webhookSecret) {
-        console.error('[Razorpay Webhook] Missing signature or webhook secret');
-        return res.status(400).json({ success: false, message: 'Missing signature or webhook secret' });
-    }
-
-    try {
-        const shasum = crypto.createHmac('sha256', webhookSecret);
-        shasum.update(req.rawBody || JSON.stringify(req.body));
-        const digest = shasum.digest('hex');
-
-        if (digest !== signature) {
-            console.error('[Razorpay Webhook] Invalid signature');
-            return res.status(400).json({ success: false, message: 'Invalid signature' });
-        }
-    } catch (err) {
-        console.error('[Razorpay Webhook] Error verifying signature:', err.message);
-        return res.status(500).json({ success: false, message: 'Error verifying signature' });
-    }
-
-    const event = req.body;
-    const eventId = event.id;
-
-    if (!eventId) {
-        console.error('[Razorpay Webhook] Missing event ID');
-        return res.status(400).json({ success: false, message: 'Missing event ID' });
-    }
-
-    console.log(`[Razorpay Webhook] Event verified: ${event.event} (${eventId})`);
-
-    if (event.event !== 'payment.captured') {
-        console.log(`[Razorpay Webhook] Ignoring non-payment-captured event: ${event.event}`);
-        return res.status(200).json({ success: true, message: 'Event ignored' });
-    }
-
-    const payment = event.payload.payment.entity;
-    const paymentId = payment.id;
-    const orderId = payment.order_id;
-    const amount = payment.amount / 100;
-
-    const bookingId = payment.notes?.bookingId || payment.notes?.booking_id;
-
-    try {
-        await runInTransaction(async (session) => {
-            const alreadyProcessed = await ProcessedWebhookEvent.findOne({ eventId }).session(session);
-            if (alreadyProcessed) {
-                console.log(`[Razorpay Webhook] Webhook event ${eventId} already processed. Returning success.`);
-                return;
-            }
-
-            await ProcessedWebhookEvent.create([{ eventId }], { session });
-
-            let booking = null;
-            if (bookingId) {
-                booking = await BookingRequest.findById(bookingId).session(session);
-            }
-            if (!booking && orderId) {
-                booking = await BookingRequest.findOne({ $or: [{ razorpay_order_id: orderId }, { payment_id: paymentId }] }).session(session);
-            }
-
-            if (!booking) {
-                throw new Error(`Booking request not found for webhook processing`);
-            }
-
-            await processPaymentVerification({
-                bookingId: booking._id.toString(),
-                paymentId,
-                orderId,
-                signature: signature || null,
-                amount
-            }, session);
-        });
-
-        console.log(`[Razorpay Webhook] Payment ${paymentId} successfully processed via webhook`);
-        return res.status(200).json({ success: true, message: 'Webhook processed successfully' });
-    } catch (err) {
-        console.error(`[Razorpay Webhook] Webhook processing failed:`, err.message);
-        return res.status(500).json({ success: false, message: err.message });
     }
 };
 

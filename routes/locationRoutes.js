@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const locationController = require('../controllers/locationController');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Configure multer for image upload (in-memory storage)
 const storage = multer.memoryStorage();
@@ -48,7 +49,7 @@ router.get('/cities', locationController.getCities);
 router.get('/cities/:id', locationController.getCityById);
 
 // Create city (with optional image upload)
-router.post('/cities', (req, res, next) => {
+router.post('/cities', protect, authorize('superadmin'), (req, res, next) => {
     upload.single('image')(req, res, (err) => {
         if (err) {
             return handleMulterError(err, req, res, next);
@@ -58,7 +59,7 @@ router.post('/cities', (req, res, next) => {
 }, locationController.createCity);
 
 // Update city (with optional image upload)
-router.put('/cities/:id', (req, res, next) => {
+router.put('/cities/:id', protect, authorize('superadmin'), (req, res, next) => {
     upload.single('image')(req, res, (err) => {
         if (err) {
             return handleMulterError(err, req, res, next);
@@ -68,7 +69,7 @@ router.put('/cities/:id', (req, res, next) => {
 }, locationController.updateCity);
 
 // Delete city
-router.delete('/cities/:id', locationController.deleteCity);
+router.delete('/cities/:id', protect, authorize('superadmin'), locationController.deleteCity);
 
 // ================== AREA ROUTES ==================
 
@@ -79,7 +80,7 @@ router.get('/areas', locationController.getAreas);
 router.get('/areas/city/:city', locationController.getAreasByCity);
 
 // Create area (with optional image upload)
-router.post('/areas', (req, res, next) => {
+router.post('/areas', protect, authorize('superadmin'), (req, res, next) => {
     upload.single('image')(req, res, (err) => {
         if (err) {
             return handleMulterError(err, req, res, next);
@@ -89,7 +90,7 @@ router.post('/areas', (req, res, next) => {
 }, locationController.createArea);
 
 // Update area (with optional image upload)
-router.put('/areas/:id', (req, res, next) => {
+router.put('/areas/:id', protect, authorize('superadmin'), (req, res, next) => {
     upload.single('image')(req, res, (err) => {
         if (err) {
             return handleMulterError(err, req, res, next);
@@ -99,7 +100,7 @@ router.put('/areas/:id', (req, res, next) => {
 }, locationController.updateArea);
 
 // Delete area
-router.delete('/areas/:id', locationController.deleteArea);
+router.delete('/areas/:id', protect, authorize('superadmin'), locationController.deleteArea);
 
 // ================== CONFIG ROUTES ==================
 

@@ -4,6 +4,7 @@ const chatController = require('../controllers/chatController');
 const chatManagementController = require('../controllers/chatManagementController');
 const ChatRoom = require('../models/ChatRoom');
 const ChatMessage = require('../models/ChatMessage');
+const { chatLimiter } = require('../middleware/security');
 
 function normalizeWebsiteUserId(raw) {
     const value = String(raw || '').trim().toLowerCase();
@@ -132,8 +133,8 @@ router.get('/inbox/:login_id', chatController.getInbox);
 router.get('/all-chats', chatController.getAllChats);
 router.get('/messages/:room_id', chatController.getMessages);
 router.get('/conversation', chatController.getConversation);
-router.post('/mark-read/:room_id', chatController.markAsRead);
-router.post('/send', chatController.sendMessage);
+router.post('/mark-read/:room_id', chatLimiter, chatController.markAsRead);
+router.post('/send', chatLimiter, chatController.sendMessage);
 router.get('/unread/:room_id', chatController.getUnreadCount);
 router.delete('/message/:message_id', chatController.deleteMessage);
 router.delete('/delete-conversation', chatController.deleteConversation);
@@ -163,7 +164,6 @@ router.post('/admin/leads/map', chatManagementController.mapLead);
 // Violations
 router.get('/admin/violations', chatManagementController.getViolations);
 router.post('/admin/violations/:id/resolve', chatManagementController.resolveViolation);
-router.post('/admin/violations/:id/action', chatManagementController.adminActionOnViolation);
 
 // Booking Conversion Tracker
 router.get('/admin/booking-tracker', chatManagementController.getBookingTracker);

@@ -66,10 +66,22 @@ exports.assignTenant = async (req, res) => {
             .map(([k]) => k);
 
         if (missing.length > 0) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `Missing required fields: ${missing.join(', ')}` 
+            return res.status(400).json({
+                success: false,
+                message: `Missing required fields: ${missing.join(', ')}`
             });
+        }
+
+        // Indian mobile number validation: must be 10 digits starting with 6-9
+        const phoneClean = String(phone || '').replace(/\D/g, '');
+        if (!/^[6-9]\d{9}$/.test(phoneClean)) {
+            return res.status(400).json({ success: false, message: 'Please enter a valid mobile number' });
+        }
+        if (additional?.emergencyPhone) {
+            const emergencyClean = String(additional.emergencyPhone).replace(/\D/g, '');
+            if (!/^[6-9]\d{9}$/.test(emergencyClean)) {
+                return res.status(400).json({ success: false, message: 'Please enter a valid guardian mobile number' });
+            }
         }
 
         // Additional validation for emergency contact (optional for owner panel)
@@ -476,13 +488,93 @@ exports.assignTenant = async (req, res) => {
     }
 };
 
+// ─── Field-level security projections ────────────────────────────────────────
+// Defence-in-depth: sensitive PII is stripped at the database query layer so it
+// can never appear in a response even if a future auth check is accidentally
+// skipped or bypassed upstream.
+//
+// ALWAYS_EXCLUDED — never sent to any caller regardless of role
+const ALWAYS_EXCLUDED_PROJECTION =
+    '-tempPassword' +
+    ' -kyc.aadhaarNumber' +
+    ' -kyc.aadhar' +
+    ' -kyc.aadhaarLinkedPhone' +
+    ' -kyc.aadharFile' +
+    ' -kyc.aadhaarFront' +
+    ' -kyc.aadhaarBack' +
+    ' -kyc.idProofFile' +
+    ' -kyc.addressProofFile' +
+    ' -kyc.otpVerified' +
+    ' -kyc.otpVerifiedAt' +
+    ' -digitalCheckin.kyc' +
+    ' -digitalCheckin.agreement.signatureDataUrl' +
+    ' -agreementRequestId' +
+    ' -agreementESignName';
+
+// ME_PROJECTION — whitelist for the tenant self-service /me endpoint.
+// Uses explicit inclusion so adding fields to the Tenant schema never
+// accidentally exposes them; they must be consciously added here.
+const ME_PROJECTION =
+    'name email phone status roomNo bedNo building floor moveInDate agreedRent' +
+    ' kycStatus loginId propertyTitle ownerLoginId property occupation company' +
+    ' gender dob guardianNumber emergencyContact' +
+    ' policeVerification.status policeVerification.submittedAt' +
+    ' moveoutRequest.status moveoutRequest.requestedDate moveoutRequest.reason moveoutRequest.submittedAt' +
+    ' securityDepositTotal securityDepositPaid securityDepositBalance' +
+    ' electricityCharge maintenanceCharge' +
+    ' agreementSigned agreementSignedAt agreementESignName' +
+    ' digitalCheckin.agreement.pdfUrl digitalCheckin.agreement.pdfUploadedAt' +
+    ' digitalCheckin.agreementDetails' +
+    ' kyc.idProof kyc.uploadedAt' +
+    ' createdAt';
+
 /**
- * Get all tenants (Super Admin)
+ * GET /api/tenants/me
+ * Tenant self-service: fetch only their own record.
+ * Identity is always derived from the verified JWT — never from request body/query.
+ * Returns a whitelist of safe fields; sensitive KYC documents are excluded.
+ */
+exports.getMyProfile = async (req, res) => {
+    try {
+        const authenticatedLoginId = String(req.user.loginId || '').toUpperCase();
+        if (!authenticatedLoginId) {
+            return res.status(401).json({ success: false, message: 'Authenticated identity could not be resolved.' });
+        }
+
+        const tenant = await Tenant.findOne({ loginId: authenticatedLoginId })
+            .select(ME_PROJECTION)
+            .populate('property', 'title locationCode ownerLoginId')
+            .lean();
+
+        if (!tenant) {
+            return res.status(404).json({
+                success: false,
+                message: 'Tenant record not found for your account. Please contact your property manager.'
+            });
+        }
+
+        if (tenant.isDeleted || tenant.status === 'inactive') {
+            return res.status(403).json({
+                success: false,
+                message: 'Your account is no longer active.'
+            });
+        }
+
+        res.json({ success: true, tenant });
+    } catch (error) {
+        console.error('getMyProfile error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+/**
+ * Get all tenants (Super Admin / Area Manager only)
  * GET /api/tenants
  */
 exports.getAllTenants = async (req, res) => {
     try {
         const tenants = await Tenant.find({ isDeleted: { $ne: true } })
+            .select(ALWAYS_EXCLUDED_PROJECTION)
             .populate('property', 'title locationCode ownerLoginId')
             .populate('user', 'name email phone')
             .sort({ createdAt: -1 })
@@ -510,6 +602,7 @@ exports.getTenantsByOwner = async (req, res) => {
             ownerLoginId: normalizedId,
             isDeleted: { $ne: true }
         })
+        .select(ALWAYS_EXCLUDED_PROJECTION)
         .populate('property', 'title roomType locationCode owner ownerLoginId')
         .populate('user', 'name email phone')
         .sort({ createdAt: -1 })
@@ -526,6 +619,7 @@ exports.getTenantsByOwner = async (req, res) => {
         const propertyIds = properties.map(p => p._id);
         const propTenants = propertyIds.length > 0
             ? await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
+                .select(ALWAYS_EXCLUDED_PROJECTION)
                 .populate('property', 'title roomType locationCode owner ownerLoginId')
                 .populate('user', 'name email phone')
                 .sort({ createdAt: -1 })

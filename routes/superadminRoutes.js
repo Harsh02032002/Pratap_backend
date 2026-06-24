@@ -12,12 +12,8 @@ const Room = require('../models/Room');
 const Employee = require('../models/Employee');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
-// Secure all superadmin routes with router-level middleware
-router.use(protect);
-router.use(authorize('superadmin'));
-
 // Get platform overview stats (Main Dashboard)
-router.get('/diagnostic-db', async (req, res) => {
+router.get('/diagnostic-db', protect, authorize('superadmin'), async (req, res) => {
   try {
     const counts = {
       users: await mongoose.model('User').countDocuments(),
@@ -39,7 +35,7 @@ router.get('/diagnostic-db', async (req, res) => {
   }
 });
 
-router.get('/stats', async (req, res) => {
+router.get('/stats', protect, authorize('superadmin'), async (req, res) => {
   try {
     const [
       totalProperties,
@@ -106,7 +102,7 @@ router.get('/stats', async (req, res) => {
 });
 
 // Home Overview Stats
-router.get('/home/overview', async (req, res) => {
+router.get('/home/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const [properties, tenants, rents, pendingRents] = await Promise.all([
       Property.countDocuments(),
@@ -167,7 +163,7 @@ router.get('/home/overview', async (req, res) => {
 });
 
 // Property Management Overview
-router.get('/properties/overview', async (req, res) => {
+router.get('/properties/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const [total, approved, pending, rejected] = await Promise.all([
       Property.countDocuments(),
@@ -192,7 +188,7 @@ router.get('/properties/overview', async (req, res) => {
 });
 
 // User Management Overview
-router.get('/users/overview', async (req, res) => {
+router.get('/users/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const [total, team, owners, tenants] = await Promise.all([
       User.countDocuments(),
@@ -211,7 +207,7 @@ router.get('/users/overview', async (req, res) => {
 });
 
 // Accounting Overview
-router.get('/accounting/overview', async (req, res) => {
+router.get('/accounting/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Rent = require('../models/Rent');
     const PaymentTransaction = require('../models/PaymentTransaction');
@@ -320,7 +316,7 @@ router.get('/accounting/overview', async (req, res) => {
 });
 
 // Bookings Overview
-router.get('/bookings/overview', async (req, res) => {
+router.get('/bookings/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
@@ -507,7 +503,7 @@ router.get('/bookings/overview', async (req, res) => {
 });
 
 // Reviews Overview
-router.get('/reviews/overview', async (req, res) => {
+router.get('/reviews/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Review = require('../models/Review');
     const now = new Date();
@@ -553,7 +549,7 @@ router.get('/reviews/overview', async (req, res) => {
 });
 
 // Booking Conversion Rate Stats
-router.get('/booking/conversion-stats', async (req, res) => {
+router.get('/booking/conversion-stats', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
@@ -651,7 +647,7 @@ router.get('/booking/conversion-stats', async (req, res) => {
 });
 
 // Leads List API
-router.get('/booking/leads', async (req, res) => {
+router.get('/booking/leads', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const enquiries = await Enquiry.find().sort({ ts: -1 }).lean();
@@ -681,7 +677,7 @@ const SystemSettings = require('../models/SystemSettings');
 const BookingRequest = require('../models/BookingRequest');
 
 // Get System Settings
-router.get('/settings', async (req, res) => {
+router.get('/settings', protect, authorize('superadmin'), async (req, res) => {
   try {
     let settings = await SystemSettings.findOne();
     if (!settings) {
@@ -694,7 +690,7 @@ router.get('/settings', async (req, res) => {
 });
 
 // Update System Settings
-router.post('/settings', async (req, res) => {
+router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { commission_percentage, updated_by } = req.body;
     
@@ -741,7 +737,7 @@ router.post('/settings', async (req, res) => {
 
 // ─── REVENUE REPORTS & STATS ────────────────────────────────────────────────
 // Get Revenue Intelligence Stats
-router.get('/revenue/stats', async (req, res) => {
+router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) => {
   try {
     const txs = await PaymentTransaction.find({}).lean();
     
@@ -805,7 +801,7 @@ router.get('/revenue/stats', async (req, res) => {
 });
 
 // Get Revenue Transactions (Payments, Commissions, Payouts)
-router.get('/revenue/transactions', async (req, res) => {
+router.get('/revenue/transactions', protect, authorize('superadmin'), async (req, res) => {
   try {
     const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
     
@@ -897,7 +893,7 @@ router.get('/revenue/transactions', async (req, res) => {
 });
 
 // Transfer Payout to Owner (initiates mock or real transfer, updates status)
-router.post('/revenue/payout/:id/transfer', async (req, res) => {
+router.post('/revenue/payout/:id/transfer', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { 
@@ -961,39 +957,6 @@ router.post('/revenue/payout/:id/transfer', async (req, res) => {
     
     await tx.save();
 
-    // ── PAYOUT SANDBOX LAYER (additive-only, fully isolated) ─────────────────
-    // This block ONLY runs when PAYOUT_ENABLED=true in .env
-    // Any failure here is completely non-blocking — existing tx, balance,
-    // and booking records are NEVER rolled back or modified by this block.
-    if (process.env.PAYOUT_ENABLED === 'true') {
-      try {
-        const razorpayPayoutService = require('../services/razorpayPayoutService');
-        const ownerForPayout = await Owner.findOne({
-          loginId: { $regex: new RegExp(`^${String(tx.owner_id || '').trim()}$`, 'i') }
-        }).lean();
-
-        const payoutResult = await razorpayPayoutService.initiateOwnerPayout(
-          tx,
-          ownerForPayout || {},
-          { initiated_by: initiated_by || 'superadmin' }
-        );
-
-        if (payoutResult.success && payoutResult.razorpay_payout_id) {
-          // Only update payout_reference with real Razorpay ID — no other fields touched
-          tx.payout_reference = payoutResult.razorpay_payout_id;
-          await tx.save();
-          console.log(`[Payout] ✅ Real payout initiated: ${payoutResult.razorpay_payout_id} | sandbox=${process.env.PAYOUT_SANDBOX_MODE}`);
-        } else {
-          // Payout failed — existing mock reference remains, log already saved in service
-          console.warn(`[Payout] ⚠️ Payout attempt failed (non-blocking): ${payoutResult.error}`);
-        }
-      } catch (payoutLayerErr) {
-        // ❌ Any unexpected error is fully swallowed here — response is unaffected
-        console.warn('[Payout] ⚠️ Payout sandbox layer error (non-blocking):', payoutLayerErr.message);
-      }
-    }
-    // ── END PAYOUT SANDBOX LAYER ──────────────────────────────────────────────
-
     // Audit log for payout transfer
     try {
       const AuditLog = require('../models/AuditLog');
@@ -1028,38 +991,8 @@ router.post('/revenue/payout/:id/transfer', async (req, res) => {
   }
 });
 
-// ─── PAYOUT LOGS (Sandbox/Testing Audit Trail) ───────────────────────────────
-// GET /api/superadmin/payout-logs
-// Returns payout attempt history from PayoutLog collection.
-// This endpoint is additive — it reads from payout_logs collection only.
-router.get('/payout-logs', async (req, res) => {
-  try {
-    const PayoutLog = require('../models/PayoutLog');
-    const { owner_id, status, limit = 50 } = req.query;
-
-    const filter = {};
-    if (owner_id) filter.owner_id = String(owner_id).toUpperCase();
-    if (status)   filter.status   = status;
-
-    const logs = await PayoutLog.find(filter)
-      .sort({ created_at: -1 })
-      .limit(Math.min(Number(limit) || 50, 200))
-      .lean();
-
-    res.json({
-      success: true,
-      count: logs.length,
-      payout_enabled: process.env.PAYOUT_ENABLED === 'true',
-      sandbox_mode:   process.env.PAYOUT_SANDBOX_MODE !== 'false',
-      logs
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
 // Reports Overview
-router.get('/reports/overview', async (req, res) => {
+router.get('/reports/overview', protect, authorize('superadmin'), async (req, res) => {
   const fs = require('fs');
   const path = require('path');
   const logPath = path.join(__dirname, '../reports-debug.log');
@@ -1212,7 +1145,7 @@ router.get('/reports/overview', async (req, res) => {
 });
 
 // Support Overview
-router.get('/support/overview', async (req, res) => {
+router.get('/support/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
     const [total, open, resolved, overdue] = await Promise.all([
@@ -1248,7 +1181,7 @@ router.get('/support/overview', async (req, res) => {
 });
 
 // GET support tickets
-router.get('/support/tickets', async (req, res) => {
+router.get('/support/tickets', protect, authorize('superadmin'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
     const tickets = await SupportTicket.find({}).sort({ created_at: -1 }).lean();
@@ -1259,7 +1192,7 @@ router.get('/support/tickets', async (req, res) => {
 });
 
 // PUT support ticket update
-router.put('/support/tickets/:id', async (req, res) => {
+router.put('/support/tickets/:id', protect, authorize('superadmin'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
     const { id } = req.params;
@@ -1327,7 +1260,7 @@ router.put('/support/tickets/:id', async (req, res) => {
 });
 
 // GET support resolution-data
-router.get('/support/resolution-data', async (req, res) => {
+router.get('/support/resolution-data', protect, authorize('superadmin'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
     const tickets = await SupportTicket.find({}).sort({ created_at: -1 }).lean();
@@ -1343,8 +1276,9 @@ router.get('/support/resolution-data', async (req, res) => {
     let resolvedCount = 0;
     tickets.forEach(tk => {
       if (['Resolved', 'Closed'].includes(tk.status)) {
-        const end = tk.resolved_at || tk.closed_at || tk.updated_at;
-        totalMs += (new Date(end) - new Date(tk.created_at));
+        const end = tk.resolved_at || tk.closed_at || tk.updated_at || new Date();
+        const start = tk.created_at || (tk._id ? new Date(parseInt(tk._id.toString().substring(0, 8), 16) * 1000) : new Date());
+        totalMs += (new Date(end) - new Date(start));
         resolvedCount++;
       }
     });
@@ -1368,8 +1302,9 @@ router.get('/support/resolution-data', async (req, res) => {
     tickets.forEach(tk => {
       if (['Resolved', 'Closed'].includes(tk.status)) {
         const type = tk.ticket_type || 'Other';
-        const end = tk.resolved_at || tk.closed_at || tk.updated_at;
-        const diffDays = (new Date(end) - new Date(tk.created_at)) / (1000 * 60 * 60 * 24);
+        const end = tk.resolved_at || tk.closed_at || tk.updated_at || new Date();
+        const start = tk.created_at || (tk._id ? new Date(parseInt(tk._id.toString().substring(0, 8), 16) * 1000) : new Date());
+        const diffDays = (new Date(end) - new Date(start)) / (1000 * 60 * 60 * 24);
         if (!typeResolutionTimes[type]) {
           typeResolutionTimes[type] = { totalDays: 0, count: 0 };
         }
@@ -1395,13 +1330,14 @@ router.get('/support/resolution-data', async (req, res) => {
     }
 
     tickets.forEach(t => {
-      if (!t.created_at) return;
-      const createdMonth = months[new Date(t.created_at).getMonth()];
+      const start = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : null);
+      if (!start) return;
+      const createdMonth = months[new Date(start).getMonth()];
       if (monthlyTrendMap[createdMonth]) {
         monthlyTrendMap[createdMonth].raised += 1;
       }
       if (['Resolved', 'Closed'].includes(t.status)) {
-        const resolvedDate = t.resolved_at || t.closed_at || t.updated_at;
+        const resolvedDate = t.resolved_at || t.closed_at || t.updated_at || new Date();
         if (resolvedDate) {
           const resolvedMonth = months[new Date(resolvedDate).getMonth()];
           if (monthlyTrendMap[resolvedMonth]) {
@@ -1425,8 +1361,9 @@ router.get('/support/resolution-data', async (req, res) => {
       else if (t.status === 'Assigned') res_status = 'Under Investigation';
       else if (t.status === 'Waiting For Response') res_status = 'Awaiting User Response';
 
-      const end = ['Resolved', 'Closed'].includes(t.status) ? (t.resolved_at || t.closed_at || t.updated_at) : new Date();
-      const openHours = (new Date(end) - new Date(t.created_at)) / (1000 * 60 * 60);
+      const start = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : new Date());
+      const end = ['Resolved', 'Closed'].includes(t.status) ? (t.resolved_at || t.closed_at || t.updated_at || new Date()) : new Date();
+      const openHours = (new Date(end) - new Date(start)) / (1000 * 60 * 60);
       let res_time = '0 Hours';
       if (openHours >= 24) {
         res_time = `${(openHours / 24).toFixed(1)} Days`;
@@ -1436,15 +1373,15 @@ router.get('/support/resolution-data', async (req, res) => {
 
       return {
         id: t._id,
-        ticket_id: t.ticket_id,
-        type: t.ticket_type,
+        ticket_id: t.ticket_id || `TK-${t._id.toString().substring(18).toUpperCase()}`,
+        type: t.ticket_type || 'Other',
         property: t.property_name || 'N/A',
         tenant: t.raised_by_name || 'N/A',
         owner: t.owner_name || 'N/A',
         admin: t.assigned_admin_name || 'Unassigned',
         res_status,
         res_time,
-        created: t.created_at ? t.created_at.toISOString().split('T')[0] : 'N/A'
+        created: start ? new Date(start).toISOString().split('T')[0] : 'N/A'
       };
     });
 
@@ -1464,7 +1401,7 @@ router.get('/support/resolution-data', async (req, res) => {
 });
 
 // User distribution for charts
-router.get('/user-distribution', async (req, res) => {
+router.get('/user-distribution', protect, authorize('superadmin'), async (req, res) => {
   try {
     const [tenants, owners, staff] = await Promise.all([
       User.countDocuments({ role: { $in: ['tenant', 'user'] } }),
@@ -1478,7 +1415,7 @@ router.get('/user-distribution', async (req, res) => {
 });
 
 // Revenue trends
-router.get('/revenue-trends', async (req, res) => {
+router.get('/revenue-trends', protect, authorize('superadmin'), async (req, res) => {
   try {
     const txs = await PaymentTransaction.find({}).lean();
     const monthlyTrendMap = {};
@@ -1510,7 +1447,7 @@ router.get('/revenue-trends', async (req, res) => {
 });
 
 // Get all owners
-router.get('/owners', async (req, res) => {
+router.get('/owners', protect, authorize('superadmin'), async (req, res) => {
   try {
     const owners = await User.find({ role: 'owner' }).select('name phone loginId email');
     res.json({ success: true, data: owners });
@@ -1518,8 +1455,5 @@ router.get('/owners', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// Finance Sub-System Mount
-router.use('/finance', require('./financeRoutes'));
 
 module.exports = router;

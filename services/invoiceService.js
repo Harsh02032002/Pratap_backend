@@ -156,7 +156,30 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
 async function evaluateInvoice(invoice, asOfDate = null) {
   // Always use the live config so invoices created before penalty settings were
   // configured still get correct penalties after the owner sets them up.
-  const config   = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+  let config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+
+  // If the owner hasn't configured a Phase 3 penalty (or set it to 0), fall back
+  // to the lateFee stored on the tenant's agreement (digitalCheckin.agreementDetails.lateFee).
+  // This ensures the per-tenant late fee actually appears in penalty calculations.
+  if (!config.majorPenalty?.enabled || !config.majorPenalty?.value) {
+    const tenantDoc = await Tenant.findById(invoice.tenantId)
+      .select('digitalCheckin.agreementDetails.lateFee')
+      .lean();
+    const tenantLateFee = Number(tenantDoc?.digitalCheckin?.agreementDetails?.lateFee) || 0;
+    if (tenantLateFee > 0) {
+      config = {
+        ...config,
+        majorPenalty: {
+          enabled:        true,
+          type:           'per_day',
+          value:          tenantLateFee,
+          incrementValue: 0,
+          maxCap:         0,
+        },
+      };
+    }
+  }
+
   const penalties = calculatePenalties(invoice, config, asOfDate);
   const previousPhase = invoice.currentPhase;
 

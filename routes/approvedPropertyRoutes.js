@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const ApprovedProperty = require('../models/ApprovedProperty');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // ============================================================
 // GET: Get all approved properties
@@ -151,7 +152,7 @@ router.get('/:propertyId', async (req, res) => {
 // ============================================================
 // PUT: Toggle property visibility on website
 // ============================================================
-router.put('/:propertyId/toggle-website', async (req, res) => {
+router.put('/:propertyId/toggle-website', protect, authorize('superadmin'), async (req, res) => {
     try {
         const property = await ApprovedProperty.findOne({ 
             propertyId: req.params.propertyId 
@@ -184,7 +185,7 @@ router.put('/:propertyId/toggle-website', async (req, res) => {
 // ============================================================
 // PUT: Toggle property visibility on ourproperty
 // ============================================================
-router.put('/:propertyId/toggle-ourproperty', async (req, res) => {
+router.put('/:propertyId/toggle-ourproperty', protect, authorize('superadmin'), async (req, res) => {
     try {
         const property = await ApprovedProperty.findOne({ 
             propertyId: req.params.propertyId 
@@ -217,7 +218,7 @@ router.put('/:propertyId/toggle-ourproperty', async (req, res) => {
 // ============================================================
 // PUT: Update property details
 // ============================================================
-router.put('/:propertyId', async (req, res) => {
+router.put('/:propertyId', protect, authorize('superadmin'), async (req, res) => {
     try {
         const property = await ApprovedProperty.findOneAndUpdate(
             { propertyId: req.params.propertyId },
@@ -249,7 +250,7 @@ router.put('/:propertyId', async (req, res) => {
 // ============================================================
 // DELETE: Delete an approved property
 // ============================================================
-router.delete('/:propertyId', async (req, res) => {
+router.delete('/:propertyId', protect, authorize('superadmin'), async (req, res) => {
     try {
         const property = await ApprovedProperty.findOneAndDelete({ 
             propertyId: req.params.propertyId 

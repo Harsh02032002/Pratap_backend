@@ -121,4 +121,7 @@ const complaintSchema = new mongoose.Schema({
     }
 });
 
+complaintSchema.index({ ownerLoginId: 1, createdAt: -1 });
+complaintSchema.index({ tenantId: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Complaint', complaintSchema);

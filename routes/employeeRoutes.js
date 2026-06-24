@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 /**
  * POST /api/employees/login
@@ -51,7 +52,7 @@ router.post('/login', async (req, res) => {
  * POST /api/employees/:loginId/reset-password
  * Staff one-time password reset
  */
-router.post('/:loginId/reset-password', async (req, res) => {
+router.post('/:loginId/reset-password', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { loginId } = req.params;
         const { newPassword, currentPassword } = req.body;
@@ -59,6 +60,15 @@ router.post('/:loginId/reset-password', async (req, res) => {
 
         const emp = await Employee.findOne({ loginId });
         if (!emp) return res.status(404).json({ success: false, error: 'Employee not found' });
+
+        // Areamanager scope check: can only reset passwords for employees they manage
+        if (req.user.role === 'areamanager') {
+            const areaManagerLoginId = String(req.user.loginId || '').toUpperCase();
+            const empParent = String(emp.parentLoginId || '').toUpperCase();
+            if (!areaManagerLoginId || empParent !== areaManagerLoginId) {
+                return res.status(403).json({ success: false, error: 'Forbidden: You can only reset passwords for employees under your management' });
+            }
+        }
 
         // Verify current password
         let currentMatch = false;
@@ -88,16 +98,22 @@ router.post('/:loginId/reset-password', async (req, res) => {
  * Get all employees (with optional filters)
  * Query params: area, role, isActive (true/false)
  */
-router.get('/', async (req, res) => {
+router.get('/', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
-        const { area, role, isActive, parentLoginId } = req.query;
+        const { area, role, isActive } = req.query;
         const filter = { isDeleted: { $ne: true } };
         if (area) filter.area = area;
         if (role) filter.role = role;
-        if (parentLoginId) filter.parentLoginId = parentLoginId;
         if (typeof isActive !== 'undefined') filter.isActive = isActive === 'true';
 
-        const employees = await Employee.find(filter).sort({ createdAt: -1 });
+        // Areamanager scope: restrict to employees they manage; ignore any client-supplied parentLoginId
+        if (req.user.role === 'areamanager') {
+            filter.parentLoginId = String(req.user.loginId || '').toUpperCase();
+        } else if (req.query.parentLoginId) {
+            filter.parentLoginId = req.query.parentLoginId;
+        }
+
+        const employees = await Employee.find(filter).select('-password').sort({ createdAt: -1 });
         return res.status(200).json({ success: true, data: employees, count: employees.length });
     } catch (err) {
         console.error('Get employees error:', err);
@@ -109,9 +125,17 @@ router.get('/', async (req, res) => {
  * GET /api/employees/generate-staff-id/:ownerLoginId
  * Generate next sequential STAFF ID for this owner
  */
-router.get('/generate-staff-id/:ownerLoginId', async (req, res) => {
+router.get('/generate-staff-id/:ownerLoginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
+
+        // Owner can only generate IDs within their own staff pool
+        if (req.user.role === 'owner') {
+            const userLoginId = String(req.user.loginId || '').toUpperCase();
+            if (userLoginId !== String(ownerLoginId || '').toUpperCase()) {
+                return res.status(403).json({ error: 'Forbidden: You can only generate staff IDs for your own employees' });
+            }
+        }
         // Count all staff (including inactive/deleted) for this owner to get next number
         const count = await Employee.countDocuments({ parentLoginId: ownerLoginId });
         const nextNum = String(count + 1).padStart(4, '0');
@@ -138,9 +162,17 @@ router.get('/generate-staff-id/:ownerLoginId', async (req, res) => {
  * GET /api/employees/stats/:ownerLoginId
  * Returns staff counts: total, active, inactive for an owner
  */
-router.get('/stats/:ownerLoginId', async (req, res) => {
+router.get('/stats/:ownerLoginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
+
+        // Owner can only view stats for their own staff
+        if (req.user.role === 'owner') {
+            const userLoginId = String(req.user.loginId || '').toUpperCase();
+            if (userLoginId !== String(ownerLoginId || '').toUpperCase()) {
+                return res.status(403).json({ error: 'Forbidden: You can only view stats for your own employees' });
+            }
+        }
         const StaffAttendance = require('../models/StaffAttendance');
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -170,7 +202,7 @@ router.get('/stats/:ownerLoginId', async (req, res) => {
  * POST /api/employees/clear
  * Delete all employees (dangerous - requires confirm=true)
  */
-router.post('/clear', async (req, res) => {
+router.post('/clear', protect, authorize('superadmin'), async (req, res) => {
     try {
         const confirm = String(req.query.confirm || req.body.confirm || '').toLowerCase();
         if (confirm !== 'true') {
@@ -188,13 +220,23 @@ router.post('/clear', async (req, res) => {
  * GET /api/employees/:loginId
  * Get a specific employee by loginId
  */
-router.get('/:loginId', async (req, res) => {
+router.get('/:loginId', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { loginId } = req.params;
-        const employee = await Employee.findOne({ loginId });
+        const employee = await Employee.findOne({ loginId }).select('-password');
         if (!employee) {
             return res.status(404).json({ error: 'Employee not found' });
         }
+
+        // Areamanager scope check: can only view employees under their management
+        if (req.user.role === 'areamanager') {
+            const areaManagerLoginId = String(req.user.loginId || '').toUpperCase();
+            const empParent = String(employee.parentLoginId || '').toUpperCase();
+            if (!areaManagerLoginId || empParent !== areaManagerLoginId) {
+                return res.status(403).json({ error: 'Forbidden: You can only view employees under your management' });
+            }
+        }
+
         return res.status(200).json({ success: true, data: employee });
     } catch (err) {
         console.error('Get employee error:', err);
@@ -207,10 +249,23 @@ router.get('/:loginId', async (req, res) => {
  * Create a new employee
  * Body: { name, loginId, email, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId }
  */
-router.post('/', async (req, res) => {
+router.post('/', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { name, loginId, email, phone, password, role, area, areaCode, city, locationCode, permissions = [], parentLoginId, photoDataUrl } = req.body;
         if (!name || !loginId) return res.status(400).json({ error: 'Missing required fields: name, loginId' });
+
+        // Area managers cannot create superadmin or areamanager accounts
+        if (req.user.role === 'areamanager') {
+            const requestedRole = String(role || '').toLowerCase();
+            if (requestedRole === 'superadmin' || requestedRole === 'areamanager') {
+                return res.status(403).json({ error: 'Forbidden: Area managers cannot create accounts with elevated roles' });
+            }
+        }
+
+        // Areamanager scope: force parentLoginId to caller's own loginId — prevents scope planting
+        const effectiveParentLoginId = req.user.role === 'areamanager'
+            ? String(req.user.loginId || '').toUpperCase()
+            : parentLoginId;
 
         console.log('Creating employee:', { name, loginId, email, role });
 
@@ -239,7 +294,7 @@ router.post('/', async (req, res) => {
         const exists = await Employee.findOne({ loginId });
         if (exists) {
             if (exists.isActive === false) {
-                exists.set({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
+                exists.set({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
                 const updated = await exists.save();
                 const emailResult = await sendStaffEmail(email, loginId, password, role);
                 return res.status(201).json({ success: true, data: updated, reused: true, email: emailResult });
@@ -268,7 +323,7 @@ router.post('/', async (req, res) => {
             if (loginConflict && String(loginConflict._id) !== String(reuseTarget._id)) {
                 return res.status(409).json({ error: 'Employee with this loginId already exists' });
             }
-            reuseTarget.set({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
+            reuseTarget.set({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
             const updated = await reuseTarget.save();
             const emailResult = await sendStaffEmail(email, loginId, password, role);
             return res.status(201).json({ success: true, data: updated, reused: true, email: emailResult });
@@ -277,7 +332,7 @@ router.post('/', async (req, res) => {
         // Create fresh employee
         let employee;
         try {
-            employee = await Employee.create({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId, photoDataUrl, requirePasswordReset: true });
+            employee = await Employee.create({ name, loginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, requirePasswordReset: true });
         } catch (dbErr) {
             if (dbErr && dbErr.code === 11000) {
                 const dupField = dbErr.keyPattern ? Object.keys(dbErr.keyPattern)[0] : 'field';
@@ -300,10 +355,42 @@ router.post('/', async (req, res) => {
  * Update an employee
  * Body: { name, email, phone, password, role, area, areaCode, city, permissions, isActive }
  */
-router.patch('/:loginId', async (req, res) => {
+router.patch('/:loginId', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { loginId } = req.params;
-        const updates = req.body;
+
+        // Block role/permissions modification for areamanager entirely
+        if (req.user.role === 'areamanager') {
+            if (req.body.role !== undefined || req.body.permissions !== undefined) {
+                return res.status(403).json({ error: 'Forbidden: Area managers cannot modify role or permissions' });
+            }
+        }
+
+        // Areamanager scope check: can only update employees they manage
+        if (req.user.role === 'areamanager') {
+            const areaManagerLoginId = String(req.user.loginId || '').toUpperCase();
+            const target = await Employee.findOne({ loginId, isDeleted: { $ne: true } });
+            if (!target) return res.status(404).json({ error: 'Employee not found' });
+            const empParent = String(target.parentLoginId || '').toUpperCase();
+            if (!areaManagerLoginId || empParent !== areaManagerLoginId) {
+                return res.status(403).json({ error: 'Forbidden: You can only update employees under your management' });
+            }
+        }
+
+        // Explicit field whitelist — prevents full req.body passthrough
+        const COMMON_FIELDS = ['name', 'email', 'phone', 'status', 'department',
+            'isActive', 'area', 'areaCode', 'city', 'locationCode',
+            'password', 'photoDataUrl'];
+        // parentLoginId is superadmin-only: areamanager must not overwrite the scope enforcement field
+        const SUPERADMIN_FIELDS = ['role', 'permissions', 'parentLoginId'];
+        const allowedFields = req.user.role === 'superadmin'
+            ? [...COMMON_FIELDS, ...SUPERADMIN_FIELDS]
+            : COMMON_FIELDS;
+
+        const updates = {};
+        for (const field of allowedFields) {
+            if (req.body[field] !== undefined) updates[field] = req.body[field];
+        }
 
         if (updates.password) {
             updates.requirePasswordReset = true;
@@ -330,9 +417,23 @@ router.patch('/:loginId', async (req, res) => {
  * POST /api/employees/:loginId/deactivate
  * Deactivate an employee without removing the cached credential shell on the client
  */
-router.post('/:loginId/deactivate', async (req, res) => {
+router.post('/:loginId/deactivate', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { loginId } = req.params;
+
+        if (req.user.role === 'areamanager') {
+            const areaManagerLoginId = String(req.user.loginId || '').toUpperCase();
+            const target = await Employee.findOne({ loginId, isDeleted: { $ne: true } });
+            if (!target) return res.status(404).json({ error: 'Employee not found' });
+            if (target.role === 'superadmin' || target.role === 'areamanager') {
+                return res.status(403).json({ error: 'Forbidden: Area managers cannot deactivate accounts with elevated roles' });
+            }
+            const empParent = String(target.parentLoginId || '').toUpperCase();
+            if (!areaManagerLoginId || empParent !== areaManagerLoginId) {
+                return res.status(403).json({ error: 'Forbidden: You can only deactivate employees under your management' });
+            }
+        }
+
         const employee = await Employee.findOneAndUpdate(
             { loginId },
             { $set: { isActive: false, updatedAt: new Date() } },
@@ -354,7 +455,7 @@ router.post('/:loginId/deactivate', async (req, res) => {
  * DELETE /api/employees/:loginId
  * Delete an employee (Soft Delete)
  */
-router.delete('/:loginId', async (req, res) => {
+router.delete('/:loginId', protect, authorize('superadmin'), async (req, res) => {
     try {
         const { loginId } = req.params;
         const employee = await Employee.findOneAndUpdate(
@@ -378,9 +479,23 @@ router.delete('/:loginId', async (req, res) => {
  * POST /api/employees/:loginId/reactivate
  * Reactivate a deactivated employee
  */
-router.post('/:loginId/reactivate', async (req, res) => {
+router.post('/:loginId/reactivate', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const { loginId } = req.params;
+
+        if (req.user.role === 'areamanager') {
+            const areaManagerLoginId = String(req.user.loginId || '').toUpperCase();
+            const target = await Employee.findOne({ loginId, isDeleted: { $ne: true } });
+            if (!target) return res.status(404).json({ error: 'Employee not found' });
+            if (target.role === 'superadmin' || target.role === 'areamanager') {
+                return res.status(403).json({ error: 'Forbidden: Area managers cannot reactivate accounts with elevated roles' });
+            }
+            const empParent = String(target.parentLoginId || '').toUpperCase();
+            if (!areaManagerLoginId || empParent !== areaManagerLoginId) {
+                return res.status(403).json({ error: 'Forbidden: You can only reactivate employees under your management' });
+            }
+        }
+
         const employee = await Employee.findOneAndUpdate(
             { loginId },
             { isActive: true, updatedAt: new Date() },

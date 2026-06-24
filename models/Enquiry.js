@@ -23,4 +23,7 @@ const EnquirySchema = new mongoose.Schema({
   visitTime: { type: String }
 });
 
+EnquirySchema.index({ ownerLoginId: 1, ts: -1 });
+EnquirySchema.index({ propertyId: 1 });
+
 module.exports = mongoose.model('Enquiry', EnquirySchema);

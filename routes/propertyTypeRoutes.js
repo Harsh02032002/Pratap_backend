@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const PropertyType = require('../models/PropertyType');
-const { protect } = require('../middleware/authMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Get all property types (public)
 router.get('/', async (req, res) => {
@@ -35,7 +35,7 @@ router.get('/category/:category', async (req, res) => {
 });
 
 // Create new property type (admin only)
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { title, category, description, images } = req.body;
     
@@ -72,7 +72,7 @@ router.post('/', protect, async (req, res) => {
 });
 
 // Update property type (admin only)
-router.put('/:id', protect, async (req, res) => {
+router.put('/:id', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { title, category, description, images, status } = req.body;
@@ -102,7 +102,7 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // Bulk import property types (admin only)
-router.post('/bulk', protect, async (req, res) => {
+router.post('/bulk', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { propertyTypes } = req.body;
     
@@ -162,7 +162,7 @@ router.post('/bulk', protect, async (req, res) => {
 });
 
 // Delete property type (admin only)
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, authorize('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const propertyType = await PropertyType.findByIdAndDelete(id);

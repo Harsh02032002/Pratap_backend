@@ -23,22 +23,22 @@ router.get('/me', protect, authController.me);
 
 // Owner specific flows (temp password verification and set new password)
 router.post('/reset-initial-password', authController.resetInitialPasswordAll);
-router.post('/owner/verify-temp', authController.verifyOwnerTemp);
-router.post('/owner/set-password', authController.setOwnerPassword);
+router.post('/owner/verify-temp', authLimiter, authController.verifyOwnerTemp);
+router.post('/owner/set-password', authLimiter, authController.setOwnerPassword);
 router.post('/owner/forgot-password/request-otp', otpLimiter, captchaProtection({ required: false }), authController.ownerForgotPasswordRequestOTP);
 router.post('/owner/forgot-password/verify-otp', otpLimiter, authController.ownerForgotPasswordVerifyOTP);
-router.post('/owner/forgot-password/reset-password', authController.ownerForgotPasswordReset);
+router.post('/owner/forgot-password/reset-password', authLimiter, authController.ownerForgotPasswordReset);
 
 // Tenant specific flows (temp password verification and set new password)
-router.post('/tenant/verify-temp', authController.verifyTenantTemp);
-router.post('/tenant/set-password', authController.setTenantPassword);
+router.post('/tenant/verify-temp', authLimiter, authController.verifyTenantTemp);
+router.post('/tenant/set-password', authLimiter, authController.setTenantPassword);
 router.post('/tenant/forgot-password/request-otp', otpLimiter, captchaProtection({ required: false }), authController.tenantForgotPasswordRequestOTP);
 router.post('/tenant/forgot-password/verify-otp', otpLimiter, authController.tenantForgotPasswordVerifyOTP);
-router.post('/tenant/forgot-password/reset-password', authController.tenantForgotPasswordReset);
+router.post('/tenant/forgot-password/reset-password', authLimiter, authController.tenantForgotPasswordReset);
 
 // Forgot Password Flow
 router.post('/forgot-password/request-otp', otpLimiter, captchaProtection({ required: false }), authController.forgotPasswordRequestOTP);
 router.post('/forgot-password/verify-otp', otpLimiter, authController.forgotPasswordVerifyOTP);
-router.post('/forgot-password/reset-password', authController.forgotPasswordReset);
+router.post('/forgot-password/reset-password', authLimiter, authController.forgotPasswordReset);
 
 module.exports = router;
