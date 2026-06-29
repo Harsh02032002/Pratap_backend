@@ -723,12 +723,6 @@ router.get('/:visitId', async (req, res) => {
             // Credentials — never expose to public
             'generatedCredentials.tempPassword': 0,
             'generatedCredentials.loginId': 0,
-            // Owner PII
-            'propertyInfo.ownerGmail': 0,
-            'propertyInfo.ownerPhone': 0,
-            'propertyInfo.ownerEmail': 0,
-            // Contact details — internal use only
-            contact: 0,
             // Admin-only internal data
             reuploadRequests: 0,
             // Analytics — internal only

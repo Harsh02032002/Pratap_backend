@@ -1,6 +1,7 @@
 const express = require('express');
 const City = require('../models/City');
 const Area = require('../models/Area');
+const ApprovedProperty = require('../models/ApprovedProperty');
 const { uploadImage, deleteImage, getCloudinaryConfig } = require('../utils/cloudinaryService');
 
 // ==================== CITY OPERATIONS ====================
@@ -12,9 +13,25 @@ exports.getCities = async (req, res) => {
     try {
         const cities = await City.find({ status: 'Active' }).select('_id name state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
         
+        // Fetch dynamic property counts for each city from ApprovedProperty
+        const cityDataWithCounts = await Promise.all(cities.map(async (cityDoc) => {
+            const cityName = cityDoc.name;
+            const count = await ApprovedProperty.countDocuments({
+                status: { $in: ['approved', 'live'] },
+                $or: [
+                    { city: new RegExp(`^${cityName}$`, 'i') },
+                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
+                ]
+            });
+            
+            const cityObj = cityDoc.toObject();
+            cityObj.propertyCount = count;
+            return cityObj;
+        }));
+
         res.status(200).json({
             success: true,
-            data: cities
+            data: cityDataWithCounts
         });
     } catch (error) {
         console.error('Error fetching cities:', error);
@@ -231,13 +248,36 @@ exports.deleteCity = async (req, res) => {
  */
 exports.getAreas = async (req, res) => {
     try {
+        const ApprovedProperty = require('../models/ApprovedProperty');
         const areas = await Area.find({ status: 'Active' })
             .populate('city')
             .sort({ createdAt: -1 });
 
+        // Calculate dynamic count for each area
+        const areasWithCounts = await Promise.all(areas.map(async (areaDoc) => {
+            const areaName = areaDoc.name;
+            const cityName = areaDoc.cityName || areaDoc.city?.name;
+            
+            const count = await ApprovedProperty.countDocuments({
+                status: { $in: ['approved', 'live'] },
+                $or: [
+                    { area: new RegExp(`^${areaName}$`, 'i') },
+                    { 'propertyInfo.area': new RegExp(`^${areaName}$`, 'i') }
+                ],
+                $or: [
+                    { city: new RegExp(`^${cityName}$`, 'i') },
+                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
+                ]
+            });
+            
+            const areaObj = areaDoc.toObject();
+            areaObj.propertyCount = count;
+            return areaObj;
+        }));
+
         res.status(200).json({
             success: true,
-            data: areas
+            data: areasWithCounts
         });
     } catch (error) {
         console.error('Error fetching areas:', error);
@@ -264,17 +304,40 @@ exports.getAreasByCity = async (req, res) => {
             });
         }
 
+        const ApprovedProperty = require('../models/ApprovedProperty');
+        
         // Search areas by cityName (case-insensitive) - uses denormalized field
         const areas = await Area.find({
             cityName: new RegExp(`^${city}$`, 'i'),
             status: 'Active'
         }).sort({ createdAt: -1 });
 
-        console.log('Areas found:', areas.length, areas.map(a => a.name));
+        const areasWithCounts = await Promise.all(areas.map(async (areaDoc) => {
+            const areaName = areaDoc.name;
+            const cityName = areaDoc.cityName || city;
+            
+            const count = await ApprovedProperty.countDocuments({
+                status: { $in: ['approved', 'live'] },
+                $or: [
+                    { area: new RegExp(`^${areaName}$`, 'i') },
+                    { 'propertyInfo.area': new RegExp(`^${areaName}$`, 'i') }
+                ],
+                $or: [
+                    { city: new RegExp(`^${cityName}$`, 'i') },
+                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
+                ]
+            });
+            
+            const areaObj = areaDoc.toObject();
+            areaObj.propertyCount = count;
+            return areaObj;
+        }));
+
+        console.log('Areas found:', areasWithCounts.length, areasWithCounts.map(a => a.name));
 
         res.status(200).json({
             success: true,
-            data: areas
+            data: areasWithCounts
         });
     } catch (error) {
         console.error('Error fetching areas by city:', error);
