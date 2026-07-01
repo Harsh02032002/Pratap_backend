@@ -116,6 +116,7 @@ const demoResetSchedule = cron.schedule('0 0 * * *', async () => {
         await Property.deleteMany({ ownerLoginId: demoLoginId });
 
         // 4. Reset Owner profile (keep login active but clear PII/Bank details)
+        const demoOwner = await Owner.findOne({ loginId: demoLoginId });
         if (demoOwner) {
             demoOwner.checkinAccountHolderName = '';
             demoOwner.checkinBankName = '';
