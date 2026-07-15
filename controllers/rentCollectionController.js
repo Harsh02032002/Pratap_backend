@@ -1,12 +1,12 @@
 'use strict';
-const RentInvoice    = require('../models/RentInvoice');
-const RentPayment    = require('../models/RentPayment');
-const PenaltyConfig  = require('../models/PenaltyConfig');
-const RentAuditLog   = require('../models/RentAuditLog');
-const CronHealth     = require('../models/CronHealth');
-const Tenant         = require('../models/Tenant');
-const Owner          = require('../models/Owner');
-const globalConfig   = require('../config/rentCollectionConfig');
+const RentInvoice = require('../models/RentInvoice');
+const RentPayment = require('../models/RentPayment');
+const PenaltyConfig = require('../models/PenaltyConfig');
+const RentAuditLog = require('../models/RentAuditLog');
+const CronHealth = require('../models/CronHealth');
+const Tenant = require('../models/Tenant');
+const Owner = require('../models/Owner');
+const globalConfig = require('../config/rentCollectionConfig');
 const {
   generateMonthlyInvoices,
   evaluateInvoice,
@@ -66,7 +66,7 @@ async function previewPenaltyCalculation(req, res) {
       dueDate: dueDate || new Date(),
     };
 
-    const current   = calculatePenalties(fakeInvoice, config);
+    const current = calculatePenalties(fakeInvoice, config);
     const breakdown = generatePreviewBreakdown(rentAmount, config, previewDays);
 
     res.json({ success: true, current, breakdown, config });
@@ -103,7 +103,7 @@ async function sendReminder(req, res) {
     const invoice = await RentInvoice.findById(req.params.id).lean();
     await assertOwnership(invoice, req.user._id);
 
-    const config    = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+    const config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
     const penalties = calculatePenalties(invoice, config);
 
     // Always look up the tenant directly — never rely solely on what the frontend passes
@@ -117,12 +117,12 @@ async function sendReminder(req, res) {
         .lean() : null,
       ownerLoginId ? CheckinRecord.findOne({ role: 'owner', loginId: ownerLoginId }).lean() : null,
     ]);
-    const _cp        = checkinDoc?.ownerProfile?.payment || {};
-    const _ownerUpi    = ownerDoc?.checkinUpiId             || _cp.upiId             || '';
-    const _ownerAccNum = ownerDoc?.checkinBankAccountNumber || _cp.bankAccountNumber  || '';
-    const _ownerIfsc   = ownerDoc?.checkinIfscCode          || _cp.ifscCode           || '';
-    const _ownerBank   = ownerDoc?.checkinBankName          || '';
-    const _ownerHolder = ownerDoc?.checkinAccountHolderName || _cp.accountHolderName  || '';
+    const _cp = checkinDoc?.ownerProfile?.payment || {};
+    const _ownerUpi = ownerDoc?.checkinUpiId || _cp.upiId || '';
+    const _ownerAccNum = ownerDoc?.checkinBankAccountNumber || _cp.bankAccountNumber || '';
+    const _ownerIfsc = ownerDoc?.checkinIfscCode || _cp.ifscCode || '';
+    const _ownerBank = ownerDoc?.checkinBankName || '';
+    const _ownerHolder = ownerDoc?.checkinAccountHolderName || _cp.accountHolderName || '';
 
     const [_yr, _mo] = (invoice.billingMonth || '').split('-');
     const billingMonthFormatted = (_yr && _mo)
@@ -130,39 +130,39 @@ async function sendReminder(req, res) {
       : invoice.billingMonth || '';
 
     const payload = {
-      tenantEmail:  tenantDoc?.email || invoice.tenantEmail || req.body.tenantEmail || '',
-      tenantName:   tenantDoc?.name  || invoice.tenantName  || req.body.tenantName  || '',
-      tenantPhone:  tenantDoc?.phone || invoice.tenantPhone || req.body.tenantPhone || '',
+      tenantEmail: tenantDoc?.email || invoice.tenantEmail || req.body.tenantEmail || '',
+      tenantName: tenantDoc?.name || invoice.tenantName || req.body.tenantName || '',
+      tenantPhone: tenantDoc?.phone || invoice.tenantPhone || req.body.tenantPhone || '',
       billingMonth: invoice.billingMonth,
       billingMonthFormatted,
       dueDate: invoice.dueDate
         ? new Date(invoice.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
         : '',
-      rentAmount:   invoice.rentAmount,
+      rentAmount: invoice.rentAmount,
       totalPenalty: penalties.totalPenalty,
       daysSinceDue: penalties.daysSinceDue,
-      electricityBill:          invoice.electricityBill          || 0,
+      electricityBill: invoice.electricityBill || 0,
       electricityUnitsConsumed: invoice.electricityUnitsConsumed || 0,
-      electricityUnitCost:      invoice.electricityBill > 0 && invoice.electricityUnitsConsumed > 0
-                                  ? Math.round(invoice.electricityBill / invoice.electricityUnitsConsumed)
-                                  : 0,
+      electricityUnitCost: invoice.electricityBill > 0 && invoice.electricityUnitsConsumed > 0
+        ? Math.round(invoice.electricityBill / invoice.electricityUnitsConsumed)
+        : 0,
       totalDue: penalties.totalDue + (invoice.electricityBill || 0),
-      ownerUpiId:         _ownerUpi,
-      ownerBankName:      _ownerBank,
+      ownerUpiId: _ownerUpi,
+      ownerBankName: _ownerBank,
       ownerAccountHolder: _ownerHolder,
       ownerAccountNumber: _ownerAccNum,
-      ownerIfscCode:      _ownerIfsc,
+      ownerIfscCode: _ownerIfsc,
     };
 
     if (!payload.tenantEmail || !payload.tenantEmail.includes('@')) {
       // Audit the skip so owners can see which tenants are blocking reminders
       await RentAuditLog.create({
-        action:    'CONTACT_INFO_MISSING',
+        action: 'CONTACT_INFO_MISSING',
         invoiceId: invoice._id,
-        tenantId:  invoice.tenantId,
-        ownerId:   invoice.ownerId,
+        tenantId: invoice.tenantId,
+        ownerId: invoice.ownerId,
         meta: { reason: 'tenant_email_missing', channel: 'email', trigger: 'manual_reminder' },
-      }).catch(() => {});
+      }).catch(() => { });
       return res.status(400).json({
         success: false,
         message: 'Tenant has no email address on file. Add it from the Tenants page first.',
@@ -176,7 +176,7 @@ async function sendReminder(req, res) {
     const channels = ['email'];
     try {
       const { sendWhatsAppTemplate, getMailerConfig, isWhatsAppConfigured, normalizePhoneNumber } = require('../utils/mailer');
-      const cfg   = getMailerConfig();
+      const cfg = getMailerConfig();
       const phone = payload.tenantPhone
         ? normalizePhoneNumber(payload.tenantPhone, cfg.whatsappDefaultCountryCode)
         : '';
@@ -185,30 +185,30 @@ async function sendReminder(req, res) {
         // All phases use the single approved template; amount escalates with phase
         const amount = phase === 1
           ? String(payload.rentAmount || 0)
-          : String(payload.totalDue   || 0); // rent + electricity + penalty for phase 2/3
+          : String(payload.totalDue || 0); // rent + electricity + penalty for phase 2/3
         const params = [
-          { name: 'tenant_name',   value: payload.tenantName            || 'Tenant' },
+          { name: 'tenant_name', value: payload.tenantName || 'Tenant' },
           { name: 'property_name', value: payload.billingMonthFormatted || payload.billingMonth || 'this month' },
-          { name: 'due_date',      value: payload.dueDate               || 'as scheduled' },
-          { name: 'amount',        value: amount },
+          { name: 'due_date', value: payload.dueDate || 'as scheduled' },
+          { name: 'amount', value: amount },
         ];
         const waSent = await sendWhatsAppTemplate(phone, 'roomhy_rent_due_reminder', 'en', params, cfg);
         if (waSent) {
           channels.push('whatsapp');
           // Follow-up free-form message with payment details
           const payLines = [];
-          if (payload.ownerUpiId)         payLines.push(`📱 *UPI ID:* ${payload.ownerUpiId}`);
+          if (payload.ownerUpiId) payLines.push(`📱 *UPI ID:* ${payload.ownerUpiId}`);
           if (payload.ownerAccountNumber) {
             payLines.push(`🏦 *Bank Transfer:*`);
-            if (payload.ownerBankName)      payLines.push(`   Bank: ${payload.ownerBankName}`);
+            if (payload.ownerBankName) payLines.push(`   Bank: ${payload.ownerBankName}`);
             if (payload.ownerAccountHolder) payLines.push(`   A/c Holder: ${payload.ownerAccountHolder}`);
             payLines.push(`   A/c No: ${payload.ownerAccountNumber}`);
-            if (payload.ownerIfscCode)      payLines.push(`   IFSC: ${payload.ownerIfscCode}`);
+            if (payload.ownerIfscCode) payLines.push(`   IFSC: ${payload.ownerIfscCode}`);
           }
           if (payLines.length) {
             const { sendWhatsAppMessage } = require('../utils/mailer');
             const payMsg = `💳 *Complete Your Payment*\n\n${payLines.join('\n')}\n\nPlease confirm once payment is done 🙏`;
-            sendWhatsAppMessage(phone, payMsg, cfg).catch(() => {});
+            sendWhatsAppMessage(phone, payMsg, cfg).catch(() => { });
           }
         }
       }
@@ -255,7 +255,10 @@ async function getDashboard(req, res) {
       RentInvoice.countDocuments({ ownerId, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 3 }),
     ]);
 
-    const [overdueTotals, allTotals, penaltyTotals] = await Promise.all([
+    const now = new Date();
+    const currentBillingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const [overdueTotals, allTotals, penaltyTotals, monthlyAggregates] = await Promise.all([
       // Outstanding + penalty only from unpaid invoices
       RentInvoice.aggregate([
         { $match: { ownerId, status: { $in: ['PENDING', 'PARTIAL'] } } },
@@ -271,17 +274,45 @@ async function getDashboard(req, res) {
         { $match: { ownerId, totalPenalty: { $gt: 0 } } },
         { $group: { _id: null, totalPenalty: { $sum: '$totalPenalty' } } },
       ]),
+      // Strict Monthly Segregation for perfect Spider Chart / UI synchronicity
+      RentInvoice.aggregate([
+        { $match: { ownerId } },
+        {
+          $group: {
+            _id: '$billingMonth',
+            expected: { $sum: { $add: [{ $ifNull: ['$rentAmount', 0] }, { $ifNull: ['$electricityBill', 0] }, { $ifNull: ['$totalPenalty', 0] }] } },
+            collected: { $sum: { $ifNull: ['$paidAmount', 0] } },
+            outstanding: { $sum: { $ifNull: ['$outstandingAmount', 0] } },
+            pendingRent: { $sum: { $cond: [{ $in: ['$status', ['PENDING', 'PARTIAL']] }, { $ifNull: ['$rentAmount', 0] }, 0] } },
+            overduePenalty: { $sum: { $cond: [{ $in: ['$status', ['PENDING', 'PARTIAL']] }, { $ifNull: ['$totalPenalty', 0] }, 0] } }
+          }
+        }
+      ]),
     ]);
 
     const totalOutstanding = overdueTotals[0]?.totalOutstanding || 0;
-    const totalCollected   = allTotals[0]?.totalPaid     || 0;
-    const totalRentAmount  = allTotals[0]?.totalRentAmount || 0;
-    const totalPenalty     = penaltyTotals[0]?.totalPenalty || 0;
+    const totalCollected = allTotals[0]?.totalPaid || 0;
+    const totalRentAmount = allTotals[0]?.totalRentAmount || 0;
+    const totalPenalty = penaltyTotals[0]?.totalPenalty || 0;
+
+    const cmRow = monthlyAggregates.find(m => m._id === currentBillingMonth) || {
+      expected: 0, collected: 0, outstanding: 0, pendingRent: 0, overduePenalty: 0
+    };
 
     res.json({
       success: true,
-      stats: { total: all, paid, partial, pending, waived, phase1, phase2, phase3,
-               totalOutstanding, totalPenalty, totalCollected, totalRentAmount },
+      stats: {
+        total: all, paid, partial, pending, waived, phase1, phase2, phase3,
+        totalOutstanding, totalPenalty, totalCollected, totalRentAmount,
+        currentMonth: {
+          period: currentBillingMonth,
+          expected: cmRow.expected,
+          collected: cmRow.collected,
+          outstanding: cmRow.outstanding,
+          pendingRent: cmRow.pendingRent,
+          overduePenalty: cmRow.overduePenalty
+        }
+      },
       mode: globalConfig.mode,
     });
   } catch (err) {
@@ -300,18 +331,25 @@ async function listInvoices(req, res) {
       const values = status.split(',').map(v => v.trim()).filter(Boolean);
       filter.status = values.length > 1 ? { $in: values } : values[0];
     }
-    if (phase)        filter.currentPhase = parseInt(phase, 10);
-    if (billingMonth) filter.billingMonth  = billingMonth;
+    if (phase) filter.currentPhase = parseInt(phase, 10);
+    if (billingMonth) filter.billingMonth = billingMonth;
 
-    const skip  = (parseInt(page, 10) - 1) * parseInt(limit, 10);
-    const [invoices, total] = await Promise.all([
-      RentInvoice.find(filter)
-        .populate('tenantId', 'name email phone roomNo bedNo')
-        .sort({ dueDate: -1 }).skip(skip).limit(parseInt(limit, 10)).lean(),
-      RentInvoice.countDocuments(filter),
-    ]);
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+    const parsedLimit = parseInt(limit, 10);
 
-    res.json({ success: true, invoices, total, page: parseInt(page, 10), pages: Math.ceil(total / limit) });
+    // Fetch all matching invoices to actively verify tenant deletion status
+    let allInvoices = await RentInvoice.find(filter)
+      .populate('tenantId', 'name email phone roomNo bedNo isDeleted')
+      .sort({ dueDate: -1 })
+      .lean();
+
+    // Remove zombie invoices corresponding to deleted/removed tenants
+    allInvoices = allInvoices.filter(inv => inv.tenantId && !inv.tenantId.isDeleted);
+
+    const total = allInvoices.length;
+    const paginatedInvoices = allInvoices.slice(skip, skip + parsedLimit);
+
+    res.json({ success: true, invoices: paginatedInvoices, total, page: parseInt(page, 10), pages: Math.ceil(total / parsedLimit) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -344,11 +382,11 @@ async function savePenaltyConfig(req, res) {
     );
 
     await RentAuditLog.create({
-      action:      existing ? 'CONFIG_UPDATED' : 'CONFIG_CREATED',
+      action: existing ? 'CONFIG_UPDATED' : 'CONFIG_CREATED',
       ownerId,
       performedBy: getPerformedBy(req),
-      meta:        { propertyId, unitId, old: existing, new: cfg },
-    }).catch(() => {}); // best-effort — never fail the response over audit logging
+      meta: { propertyId, unitId, old: existing, new: cfg },
+    }).catch(() => { }); // best-effort — never fail the response over audit logging
 
     res.json({ success: true, config: cfg });
   } catch (err) {
@@ -359,14 +397,37 @@ async function savePenaltyConfig(req, res) {
 // ─── GET /api/rent-collection/invoices/:id ────────────────────────────────────
 async function getInvoiceById(req, res) {
   try {
+    console.log('getInvoiceById invoiceId:', req.params.id);
     const invoice = await RentInvoice.findById(req.params.id).lean();
     await assertOwnership(invoice, req.user._id);
 
-    const config   = invoice.penaltyConfigSnapshot || await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
-    const live     = calculatePenalties(invoice, config);
+    const config = invoice.penaltyConfigSnapshot || await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+    let live = calculatePenalties(invoice, config);
+
+    // If invoice is already paid or waived, its penalty values are frozen.
+    // Do not reflect ongoing dynamic penalties for closed invoices.
+    if (['PAID', 'WAIVED'].includes(invoice.status)) {
+      live = {
+        ...live,
+        minorPenalty: invoice.minorPenaltyAmount || 0,
+        majorPenalty: invoice.majorPenaltyAmount || 0,
+        totalPenalty: invoice.totalPenalty || 0,
+        totalDue: invoice.totalDue || 0,
+        outstandingAmount: 0,
+      };
+    }
+
+    console.log('Searching RentPayment with invoiceId:', req.params.id);
     const payments = await RentPayment.find({ invoiceId: req.params.id })
       .sort({ paymentDate: -1 })
       .lean();
+
+    console.log('Found', Array.isArray(payments) ? payments.length : 0, 'payment records for invoiceId:', req.params.id);
+    if (!payments || !payments.length) {
+      const allPayments = await RentPayment.find().lean();
+      console.log('No payments found for invoiceId. All RentPayment records count:', Array.isArray(allPayments) ? allPayments.length : 'unknown');
+      console.log('All RentPayment records sample:', allPayments.slice(0, 20));
+    }
 
     res.json({ success: true, invoice, live, config, payments });
   } catch (err) {
@@ -419,8 +480,8 @@ async function getMissingContacts(req, res) {
 
     const noEmail = { ...baseFilter, email: { $in: [null, ''] } };
     const noPhone = { ...baseFilter, phone: { $in: [null, ''] } };
-    const noBoth  = { ...baseFilter, email: { $in: [null, ''] }, phone: { $in: [null, ''] } };
-    const either  = { ...baseFilter, $or: [{ email: { $in: [null, ''] } }, { phone: { $in: [null, ''] } }] };
+    const noBoth = { ...baseFilter, email: { $in: [null, ''] }, phone: { $in: [null, ''] } };
+    const either = { ...baseFilter, $or: [{ email: { $in: [null, ''] } }, { phone: { $in: [null, ''] } }] };
 
     const [missingEmailCount, missingPhoneCount, missingBothCount, samples] = await Promise.all([
       Tenant.countDocuments(noEmail),
@@ -438,12 +499,12 @@ async function getMissingContacts(req, res) {
       missingPhoneCount,
       missingBothCount,
       samples: samples.map(t => ({
-        tenantId:   t._id,
+        tenantId: t._id,
         tenantName: t.name,
-        email:      t.email  || null,
-        phone:      t.phone  || null,
-        roomNo:     t.roomNo || null,
-        bedNo:      t.bedNo  || null,
+        email: t.email || null,
+        phone: t.phone || null,
+        roomNo: t.roomNo || null,
+        bedNo: t.bedNo || null,
       })),
     });
   } catch (err) {
@@ -455,7 +516,7 @@ async function getMissingContacts(req, res) {
 async function listPaymentsHandler(req, res) {
   try {
     const ownerId = req.user._id;
-    const limit   = Math.min(parseInt(req.query.limit) || 200, 500);
+    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
     const payments = await RentPayment.find({ ownerId })
       .sort({ paymentDate: -1 })
       .limit(limit)
@@ -464,27 +525,27 @@ async function listPaymentsHandler(req, res) {
       .lean();
 
     const shaped = payments.map(p => ({
-      _id:            p._id,
-      transactionId:  p.transactionId || p._id.toString().slice(-8).toUpperCase(),
-      tenantName:     p.tenantId?.name    || '—',
-      roomNo:         p.tenantId?.roomNo  || '—',
-      tenantPhone:    p.tenantId?.phone   || '',
-      tenantEmail:    p.tenantId?.email   || '',
-      propertyId:     p.tenantId?.propertyId || '',
-      amount:         p.amount,
-      paymentMethod:  p.paymentMethod,
-      paymentDate:    p.paymentDate,
-      isPartial:      p.isPartial,
+      _id: p._id,
+      transactionId: p.transactionId || p._id.toString().slice(-8).toUpperCase(),
+      tenantName: p.tenantId?.name || '—',
+      roomNo: p.tenantId?.roomNo || '—',
+      tenantPhone: p.tenantId?.phone || '',
+      tenantEmail: p.tenantId?.email || '',
+      propertyId: p.tenantId?.propertyId || '',
+      amount: p.amount,
+      paymentMethod: p.paymentMethod,
+      paymentDate: p.paymentDate,
+      isPartial: p.isPartial,
       remainingAfter: p.remainingAfter,
-      notes:          p.notes,
-      invoiceId:      p.invoiceId?._id || p.invoiceId,
-      billingMonth:   p.invoiceId?.billingMonth   || '',
-      invoiceNumber:  p.invoiceId?.invoiceNumber  || '',
-      rentAmount:     p.invoiceId?.rentAmount      || p.amount,
+      notes: p.notes,
+      invoiceId: p.invoiceId?._id || p.invoiceId,
+      billingMonth: p.invoiceId?.billingMonth || '',
+      invoiceNumber: p.invoiceId?.invoiceNumber || '',
+      rentAmount: p.invoiceId?.rentAmount || p.amount,
       electricityBill: p.invoiceId?.electricityBill || 0,
-      totalPenalty:   p.invoiceId?.totalPenalty    || 0,
-      totalDue:       p.invoiceId?.totalDue        || p.amount,
-      status:         'received',
+      totalPenalty: p.invoiceId?.totalPenalty || 0,
+      totalDue: p.invoiceId?.totalDue || p.amount,
+      status: 'received',
     }));
 
     // Fetch and merge PaymentTransaction (online bookings)
@@ -503,27 +564,27 @@ async function listPaymentsHandler(req, res) {
     const shapedTxs = txs.map(t => {
       const bkObj = t.booking_id ? bkMap.get(t.booking_id.toString()) : null;
       return {
-        _id:            t._id,
-        transactionId:  t.razorpay_payment_id || t._id.toString().slice(-8).toUpperCase(),
-        tenantName:     t.tenant_name || bkObj?.name || '—',
-        roomNo:         '—',
-        tenantPhone:    bkObj?.phone || '',
-        tenantEmail:    bkObj?.email || '',
-        propertyId:     t.property_id || bkObj?.property_id || '',
-        amount:         t.owner_amount,
-        paymentMethod:  t.payment_method || 'online',
-        paymentDate:    t.payment_date || t.created_at,
-        isPartial:      false,
+        _id: t._id,
+        transactionId: t.razorpay_payment_id || t._id.toString().slice(-8).toUpperCase(),
+        tenantName: t.tenant_name || bkObj?.name || '—',
+        roomNo: '—',
+        tenantPhone: bkObj?.phone || '',
+        tenantEmail: bkObj?.email || '',
+        propertyId: t.property_id || bkObj?.property_id || '',
+        amount: t.owner_amount,
+        paymentMethod: t.payment_method || 'online',
+        paymentDate: t.payment_date || t.created_at,
+        isPartial: false,
         remainingAfter: 0,
-        notes:          t.notes || 'Booking Payment',
-        invoiceId:      null,
-        billingMonth:   t.payment_date ? new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '',
-        invoiceNumber:  t.razorpay_payment_id || '—',
-        rentAmount:     t.owner_amount,
+        notes: t.notes || 'Booking Payment',
+        invoiceId: null,
+        billingMonth: t.payment_date ? new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '',
+        invoiceNumber: t.razorpay_payment_id || '—',
+        rentAmount: t.owner_amount,
         electricityBill: 0,
-        totalPenalty:   0,
-        totalDue:       t.owner_amount,
-        status:         t.payout_status === 'Paid' ? 'received' : 'pending_payout',
+        totalPenalty: 0,
+        totalDue: t.owner_amount,
+        status: t.payout_status === 'Paid' ? 'received' : 'pending_payout',
       };
     });
 
@@ -542,7 +603,7 @@ async function listPaymentsHandler(req, res) {
 async function getWhatsAppTemplates(req, res) {
   try {
     const { listWhatsAppTemplates, getMailerConfig } = require('../utils/mailer');
-    const cfg  = getMailerConfig();
+    const cfg = getMailerConfig();
     const name = req.query.name || '';
     const data = await listWhatsAppTemplates(name, cfg);
     res.json({ success: true, data });
@@ -558,9 +619,9 @@ async function getMonthlySummary(req, res) {
 
     // Build last 8 calendar months (oldest → newest)
     const slots = [];
-    const now   = new Date();
+    const now = new Date();
     for (let i = 7; i >= 0; i--) {
-      const d   = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       slots.push({ key, label: d.toLocaleString('en', { month: 'short' }) });
     }
@@ -568,19 +629,21 @@ async function getMonthlySummary(req, res) {
     const keys = slots.map(s => s.key);
     const rows = await RentInvoice.aggregate([
       { $match: { ownerId, billingMonth: { $in: keys } } },
-      { $group: {
-        _id:       '$billingMonth',
-        due:       { $sum: '$rentAmount' },
-        collected: { $sum: '$paidAmount' },
-      }},
+      {
+        $group: {
+          _id: '$billingMonth',
+          due: { $sum: '$rentAmount' },
+          collected: { $sum: '$paidAmount' },
+        }
+      },
     ]);
 
     const map = {};
     rows.forEach(r => { map[r._id] = { due: r.due, collected: r.collected }; });
 
     const data = slots.map(s => ({
-      month:     s.label,
-      due:       map[s.key]?.due       || 0,
+      month: s.label,
+      due: map[s.key]?.due || 0,
       collected: map[s.key]?.collected || 0,
     }));
 
@@ -596,8 +659,8 @@ async function getDailyPaymentSummary(req, res) {
     const ownerId = req.user._id;
     const { startDate, endDate } = req.query;
 
-    const start = startDate ? new Date(startDate) : (() => { const d = new Date(); d.setDate(d.getDate() - 6); d.setHours(0,0,0,0); return d; })();
-    const end   = endDate   ? new Date(endDate)   : new Date();
+    const start = startDate ? new Date(startDate) : (() => { const d = new Date(); d.setDate(d.getDate() - 6); d.setHours(0, 0, 0, 0); return d; })();
+    const end = endDate ? new Date(endDate) : new Date();
     end.setHours(23, 59, 59, 999);
 
     const rows = await RentPayment.aggregate([
@@ -606,7 +669,7 @@ async function getDailyPaymentSummary(req, res) {
         $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$paymentDate' } },
           amount: { $sum: '$amount' },
-          count:  { $sum: 1 },
+          count: { $sum: 1 },
         },
       },
       { $sort: { _id: 1 } },
@@ -622,14 +685,225 @@ async function getDailyPaymentSummary(req, res) {
     while (cur <= end) {
       const key = cur.toISOString().split('T')[0];
       result.push({
-        date:   key,
-        day:    DAYS[cur.getDay()],
+        date: key,
+        day: DAYS[cur.getDay()],
         amount: dayMap[key] || 0,
       });
       cur.setDate(cur.getDate() + 1);
     }
 
     res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+// ─── GET /api/rents/tenant/me ────────────────────────────────────────────────
+// Tenant dashboard: Get latest invoice with LIVE penalty calculations
+async function getTenantInvoiceSummary(req, res) {
+  try {
+    const tenantLoginId = String(req.user?.loginId || '').trim().toUpperCase();
+    if (!tenantLoginId) {
+      return res.status(400).json({ success: false, message: 'Authenticated tenant loginId is required' });
+    }
+
+    // Find tenant record
+    const tenant = await Tenant.findOne({ loginId: tenantLoginId })
+      .select('_id loginId ownerLoginId')
+      .lean();
+
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant record not found' });
+    }
+
+    // Find all invoices for this tenant
+    const invoices = await RentInvoice.find({ tenantId: tenant._id })
+      .sort({ billingMonth: -1, dueDate: -1, createdAt: -1 })
+      .lean();
+
+    // Get current month's invoice (or latest active one).
+    // IMPORTANT: always check ALL invoices (including PAID) for the current month first
+    // so a freshly-paid invoice is still shown correctly in the tenant dashboard.
+    const currentMonth = new Date().toISOString().slice(0, 7);
+
+    // 1. Prefer current billing month — regardless of paid/unpaid status
+    const currentMonthInvoice = invoices.find((inv) => inv.billingMonth === currentMonth);
+
+    // 2. Fall back: highest-phase unpaid invoice (for months where no invoice yet exists for current month)
+    const activeInvoices = invoices.filter((inv) =>
+      !['PAID', 'WAIVED', 'CANCELLED'].includes(String(inv.status || '').toUpperCase())
+    );
+    const fallbackInvoice =
+      activeInvoices.sort((a, b) => {
+        const phaseDiff = Number(b.currentPhase || 0) - Number(a.currentPhase || 0);
+        if (phaseDiff !== 0) return phaseDiff;
+        const dueDiff = Number(b.outstandingAmount || b.totalDue || 0) - Number(a.outstandingAmount || a.totalDue || 0);
+        if (dueDiff !== 0) return dueDiff;
+        const aDate = new Date(a.dueDate || a.createdAt || 0).getTime();
+        const bDate = new Date(b.dueDate || b.createdAt || 0).getTime();
+        return bDate - aDate;
+      })[0] ||
+      invoices[0] ||
+      null;
+
+    const currentInvoice = currentMonthInvoice || fallbackInvoice;
+
+    // Evaluate invoice to get LIVE penalties.
+    // Skip re-evaluation for already-PAID invoices — their amounts are already final.
+    let liveInvoice = currentInvoice;
+    const invoiceIsPaid = ['PAID', 'WAIVED'].includes(String(currentInvoice?.status || '').toUpperCase());
+    if (currentInvoice && !invoiceIsPaid) {
+      try {
+        const evaluated = await evaluateInvoice(currentInvoice);
+        liveInvoice = {
+          ...currentInvoice,
+          ...evaluated.updates,
+        };
+      } catch (evalErr) {
+        console.warn('getTenantInvoiceSummary: evaluateInvoice failed:', evalErr.message);
+      }
+    }
+
+    // ─── NEW: Sync cash payment status from Rent model ───────────────────────
+    // The RentInvoice model doesn't have cashRequestStatus, but Rent model does.
+    // We need to pull the cash state from Rent to show accurate status in tenant UI.
+    // In getTenantInvoiceSummary, replace ye section:
+
+    if (liveInvoice) {
+      const Rent = require('../models/Rent');
+
+      // Try current month first
+      let rentRecord = await Rent.findOne({
+        tenantLoginId: tenantLoginId,
+        collectionMonth: liveInvoice.billingMonth
+      }).select('cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason').lean();
+
+      // If not found, get latest Rent record for this tenant
+      if (!rentRecord) {
+        rentRecord = await Rent.findOne({ tenantLoginId: tenantLoginId })
+          .sort({ collectionMonth: -1 })
+          .select('cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason').lean();
+      }
+
+      if (rentRecord) {
+        liveInvoice.cashRequestStatus = rentRecord.cashRequestStatus || 'none';
+        liveInvoice.cashOtpHash = rentRecord.cashOtpHash;
+        liveInvoice.cashOtpExpiry = rentRecord.cashOtpExpiry;
+        liveInvoice.cashRejectedAt = rentRecord.cashRejectedAt;
+        liveInvoice.cashRejectedReason = rentRecord.cashRejectedReason;
+        // Map paymentStatus for frontend backward-compatibility
+        liveInvoice.paymentStatus = rentRecord.paymentStatus || (String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending');
+      } else {
+        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+      }
+    }
+
+    return res.json({
+      success: true,
+      invoice: liveInvoice,
+      invoices,
+    });
+  } catch (err) {
+    console.error('getTenantInvoiceSummary error:', err);
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load tenant invoice summary' });
+  }
+}
+
+// ─── POST /api/rent-collection/repair-missing-payments ────────────────────────
+// One-time admin endpoint: finds PAID invoices with no RentPayment record and
+// creates the missing entries. Safe to call multiple times (idempotent).
+async function repairMissingPayments(req, res) {
+  try {
+    const paidInvoices = await RentInvoice.find({ status: 'PAID' }).lean();
+    const Rent = require('../models/Rent');
+
+    let repaired = 0;
+    let skipped = 0;
+    let failed = 0;
+    const details = [];
+
+    for (const invoice of paidInvoices) {
+      try {
+        // Skip if payment record already exists
+        const existingPayment = await RentPayment.findOne({ invoiceId: invoice._id });
+        if (existingPayment) { skipped++; continue; }
+
+        if (!invoice.ownerId || !invoice.tenantId || !invoice.propertyId) {
+          details.push({ invoice: invoice.invoiceNumber, result: 'skipped-missing-ids' });
+          failed++;
+          continue;
+        }
+
+        // Deterministic transactionId prevents duplicate rows on re-run
+        const transactionId = `REPAIR-${String(invoice._id).slice(-8).toUpperCase()}-${String(invoice.billingMonth || '').replace('-', '')}`;
+        const dupCheck = await RentPayment.findOne({ transactionId });
+        if (dupCheck) { skipped++; continue; }
+
+        // Find matching Rent for paymentMethod
+        const tenantDoc = await Tenant.findById(invoice.tenantId).select('loginId').lean();
+        const rentRecord = tenantDoc ? await Rent.findOne({
+          $or: [
+            { tenantId: invoice.tenantId },
+            { tenantLoginId: tenantDoc.loginId }
+          ],
+          collectionMonth: invoice.billingMonth,
+          paymentStatus: { $in: ['paid', 'completed'] }
+        }).sort({ updatedAt: -1 }).lean() : null;
+
+        const paidAt = invoice.lastEvaluatedAt || invoice.updatedAt || new Date();
+        const amount = Number(invoice.totalDue || invoice.outstandingAmount || invoice.rentAmount || 0);
+        const rentPaid = Number(invoice.rentAmount || amount);
+        const penaltyPaid = Number(invoice.totalPenalty || 0);
+        const payMethod = rentRecord?.paymentMethod === 'razorpay' ? 'online' : 'cash';
+
+        await RentPayment.create({
+          invoiceId: invoice._id,
+          tenantId: invoice.tenantId,
+          propertyId: invoice.propertyId,
+          ownerId: invoice.ownerId,
+          amount,
+          paymentMethod: payMethod,
+          transactionId,
+          isPartial: false,
+          remainingAfter: 0,
+          rentPaidAmount: rentPaid,
+          penaltyPaidAmount: penaltyPaid,
+          paymentDate: paidAt,
+          recordedBy: getPerformedBy(req) || 'admin-repair',
+          notes: 'Cash payment',
+          isLateEntry: true,
+        });
+
+        // Ensure invoice fields are correct
+        await RentInvoice.findByIdAndUpdate(invoice._id, {
+          $set: {
+            paidAmount: amount,
+            rentPaidAmount: rentPaid,
+            penaltyPaidAmount: penaltyPaid,
+            outstandingAmount: 0,
+            status: 'PAID',
+          }
+        });
+
+        await RentAuditLog.create({
+          action: 'PAYMENT_REPAIRED',
+          invoiceId: invoice._id,
+          tenantId: invoice.tenantId,
+          ownerId: invoice.ownerId,
+          performedBy: getPerformedBy(req) || 'admin-repair',
+          meta: { invoiceNumber: invoice.invoiceNumber, billingMonth: invoice.billingMonth, amount, payMethod },
+        }).catch(() => { });
+
+        details.push({ invoice: invoice.invoiceNumber, billingMonth: invoice.billingMonth, amount, payMethod, result: 'repaired' });
+        repaired++;
+
+      } catch (innerErr) {
+        details.push({ invoice: invoice.invoiceNumber, result: 'error', error: innerErr.message });
+        failed++;
+      }
+    }
+
+    res.json({ success: true, summary: { total: paidInvoices.length, repaired, skipped, failed }, details });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -646,10 +920,12 @@ module.exports = {
   getPenaltyConfigs,
   savePenaltyConfig,
   getInvoiceById,
+  getTenantInvoiceSummary,
   getCronHealth,
   getMissingContacts,
   listPaymentsHandler,
   getWhatsAppTemplates,
   getDailyPaymentSummary,
   getMonthlySummary,
+  repairMissingPayments,
 };

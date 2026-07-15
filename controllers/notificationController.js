@@ -5,6 +5,36 @@ const Employee = require('../models/Employee');
 const AreaManager = require('../models/AreaManager');
 const Tenant = require('../models/Tenant');
 const mailer = require('../utils/mailer');
+const staffNotificationService = require('../services/staffNotificationService');
+
+/**
+ * GET /api/notifications/me
+ * Auth-scoped, paginated, field-selected notifications for the LOGGED-IN user.
+ * Recipient identity comes from `req.user` (set by `protect`) — never from the
+ * query string — so a caller can only ever read their own notifications.
+ *
+ * Query: ?page=1&limit=20&isRead=false&type=task&priority=high&from=&to=
+ * Success: { success, data:[...], pagination:{...} }
+ * Errors : { success:false, message, errorCode }
+ */
+exports.getMyNotifications = async (req, res) => {
+  try {
+    const loginId = req.user && req.user.loginId;
+    if (!loginId) {
+      return res.status(401).json({ success: false, message: 'Not authenticated', errorCode: 'UNAUTHENTICATED' });
+    }
+
+    const result = await staffNotificationService.listForRecipient({ loginId, query: req.query });
+    return res.json({ success: true, data: result.data, pagination: result.pagination });
+  } catch (err) {
+    if (err && err.name === 'ValidationError') {
+      return res.status(err.errorCode === 'UNAUTHENTICATED' ? 401 : 400)
+        .json({ success: false, message: err.message, errorCode: err.errorCode || 'INVALID_QUERY' });
+    }
+    console.error('getMyNotifications error', err);
+    return res.status(500).json({ success: false, message: 'Failed to load notifications', errorCode: 'INTERNAL_ERROR' });
+  }
+};
 
 async function resolveEmailByLoginId(loginId) {
   const id = (loginId || '').toString().trim().toUpperCase();

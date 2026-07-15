@@ -8,7 +8,7 @@ const { syncElectricityToInvoice } = require('../services/tenantDuesService');
  */
 exports.updateMeterReading = async (req, res) => {
     try {
-        const { propertyId, roomNo, billingMonth, currentReading } = req.body;
+        const { propertyId, roomNo, billingMonth, currentReading, previousReading: reqPreviousReading } = req.body;
 
         if (!propertyId || !roomNo || !billingMonth || currentReading === undefined) {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
@@ -23,9 +23,9 @@ exports.updateMeterReading = async (req, res) => {
                 // Get 'YYYY-MM' from the move-in date
                 const moveInMonth = new Date(moveInDateStr).toISOString().slice(0, 7);
                 if (moveInMonth === billingMonth) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        message: 'Tenant is hi month aaya hai, aap is mahine ka electricity bill add nahi kar sakte. Next month se bill add karein.' 
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Tenant is hi month aaya hai, aap is mahine ka electricity bill add nahi kar sakte. Next month se bill add karein.'
                     });
                 }
             }
@@ -39,7 +39,7 @@ exports.updateMeterReading = async (req, res) => {
             // Find the most recent record to get the previous reading and unit cost
             const lastRecord = await ElectricityMeter.findOne({ property: propertyId, roomNo })
                 .sort({ billingMonth: -1 });
-            
+
             const previousReading = lastRecord ? lastRecord.currentReading : 0;
             // Get unit cost from room
             const Room = require('../models/Room');
@@ -58,16 +58,19 @@ exports.updateMeterReading = async (req, res) => {
 
         // Calculate usage and bill
         currentRecord.currentReading = Number(currentReading);
+        if (reqPreviousReading !== undefined && reqPreviousReading !== null && reqPreviousReading !== "") {
+            currentRecord.previousReading = Number(reqPreviousReading);
+        }
         currentRecord.unitsConsumed = Math.max(0, currentRecord.currentReading - currentRecord.previousReading);
-        
+
         if (!currentRecord.unitCost) {
             const Room = require('../models/Room');
             const room = await Room.findOne({ property: propertyId, title: roomNo });
             currentRecord.unitCost = room?.electricity?.unitCost || 0;
         }
-        
+
         currentRecord.totalBill = currentRecord.unitsConsumed * currentRecord.unitCost;
-        
+
         await currentRecord.save();
 
         let invoiceSync = { synced: false };
@@ -121,19 +124,19 @@ exports.getOwnerReadings = async (req, res) => {
         const { ownerLoginId } = req.params;
         const Property = require('../models/Property');
         const Room = require('../models/Room');
-        
+
         const properties = await Property.find({ ownerLoginId: ownerLoginId.toUpperCase() });
         const propertyIds = properties.map(p => p._id);
-        
+
         const rooms = await Room.find({ property: { $in: propertyIds } }).populate('property', 'title');
-        
+
         const readings = await ElectricityMeter.find({ property: { $in: propertyIds } })
             .sort({ billingMonth: -1 });
-            
+
         // Group by room
         const results = rooms.map(room => {
-            const roomReadings = readings.filter(r => 
-                String(r.property) === String(room.property._id) && 
+            const roomReadings = readings.filter(r =>
+                String(r.property) === String(room.property._id) &&
                 String(r.roomNo) === String(room.title)
             );
             return {
@@ -162,11 +165,11 @@ exports.deleteMeterReading = async (req, res) => {
     try {
         const { id } = req.params;
         const record = await ElectricityMeter.findByIdAndDelete(id);
-        
+
         if (!record) {
             return res.status(404).json({ success: false, message: 'Reading not found' });
         }
-        
+
         res.json({ success: true, message: 'Reading deleted successfully' });
     } catch (error) {
         console.error('deleteMeterReading error:', error);

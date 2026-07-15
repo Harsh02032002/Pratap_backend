@@ -16,6 +16,12 @@ const ACTIONS = [
   'CONFIG_CREATED',
   'CONFIG_UPDATED',
   'INVOICE_CANCELLED',
+  'CASH_REQUESTED',
+  'CASH_APPROVED',
+  'OTP_GENERATED',
+  'OTP_SENT',
+  'CASH_VERIFIED',
+  'CASH_REJECTED',
 ];
 
 const rentAuditLogSchema = new Schema({

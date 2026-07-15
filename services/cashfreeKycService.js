@@ -147,8 +147,12 @@ async function aadhaarOcr(_base64Image) {
     return { sandbox: true };
 }
 
+const { verhoeffCheck, extractAadhaarNumber } = require('../utils/aadhaarUtils');
+
 module.exports = {
     requestAadhaarOtp,
     verifyAadhaarOtp,
-    aadhaarOcr
+    aadhaarOcr,
+    verhoeffCheck,
+    extractAadhaarNumber
 };

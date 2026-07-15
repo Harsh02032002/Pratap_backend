@@ -20,4 +20,6 @@ const tenantAttendanceSchema = new mongoose.Schema(
 // Unique index per tenant per date for daily records
 tenantAttendanceSchema.index({ tenantId: 1, date: 1 }, { unique: true });
 
+tenantAttendanceSchema.index({ ownerLoginId: 1 });
+
 module.exports = mongoose.model('TenantAttendance', tenantAttendanceSchema);

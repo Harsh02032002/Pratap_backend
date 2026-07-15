@@ -1,11 +1,17 @@
 const StaffAttendance = require('../models/StaffAttendance');
 const StaffSalary = require('../models/StaffSalary');
 const StaffShift = require('../models/StaffShift');
+const { ensureDailyAutoMarkAbsent } = require('../jobs/autoMarkAbsentJob');
 
 // --- Attendance ---
 exports.getAttendance = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
+        // Serverless-safe backfill: on hosts where the nightly cron never runs
+        // (Vercel and the like), this runs the Warden auto-absent pass at most
+        // once per day when the owner opens attendance. Guarded + idempotent, so
+        // a failure here must never block the read.
+        try { await ensureDailyAutoMarkAbsent(); } catch (e) { console.warn('[AutoAbsent] on-demand run skipped:', e.message); }
         const records = await StaffAttendance.find({
             ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
         }).populate('employeeId', 'name role').sort({ date: -1 });

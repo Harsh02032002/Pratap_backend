@@ -169,7 +169,7 @@ exports.assignTenant = async (req, res) => {
             }
 
             // Also guard against stale bedAssignments: check Tenant collection directly
-            const activeTenantQuery = { property: property._id, roomNo, checkoutDate: null };
+            const activeTenantQuery = { property: property._id, roomNo, isDeleted: { $ne: true }, status: { $ne: 'inactive' } };
             if (normalizedBedNo) activeTenantQuery.bedNo = normalizedBedNo;
             const existingActiveTenant = await Tenant.findOne(activeTenantQuery).select('_id name').lean();
             if (existingActiveTenant) {
@@ -597,18 +597,7 @@ exports.getTenantsByOwner = async (req, res) => {
         const { ownerId } = req.params;
         const normalizedId = String(ownerId).toUpperCase();
 
-        // Query 1: Direct ownerLoginId on Tenant model
-        const directTenants = await Tenant.find({
-            ownerLoginId: normalizedId,
-            isDeleted: { $ne: true }
-        })
-        .select(ALWAYS_EXCLUDED_PROJECTION)
-        .populate('property', 'title roomType locationCode owner ownerLoginId')
-        .populate('user', 'name email phone')
-        .sort({ createdAt: -1 })
-        .lean();
-
-        // Query 2: Via Property model (for older records)
+        // Resolve legacy property IDs (older records link via Property, not ownerLoginId)
         let propQuery = {};
         if (require('mongoose').Types.ObjectId.isValid(ownerId)) {
             propQuery.owner = ownerId;
@@ -617,22 +606,33 @@ exports.getTenantsByOwner = async (req, res) => {
         }
         const properties = await Property.find(propQuery).lean();
         const propertyIds = properties.map(p => p._id);
-        const propTenants = propertyIds.length > 0
-            ? await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
-                .select(ALWAYS_EXCLUDED_PROJECTION)
-                .populate('property', 'title roomType locationCode owner ownerLoginId')
-                .populate('user', 'name email phone')
-                .sort({ createdAt: -1 })
-                .lean()
-            : [];
 
-        // Merge + deduplicate by _id
-        const seen = new Set();
-        const tenants = [];
-        for (const t of [...directTenants, ...propTenants]) {
-            const id = String(t._id);
-            if (!seen.has(id)) { seen.add(id); tenants.push(t); }
+        // Single query covering both direct (ownerLoginId) and legacy (property-linked)
+        // tenants via $or, instead of two separate Tenant.find()+populate() round trips.
+        const allTenants = await Tenant.find({
+            isDeleted: { $ne: true },
+            $or: [
+                { ownerLoginId: normalizedId },
+                ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : [])
+            ]
+        })
+        .select(ALWAYS_EXCLUDED_PROJECTION)
+        .populate('property', 'title roomType locationCode owner ownerLoginId')
+        .populate('user', 'name email phone')
+        .sort({ createdAt: -1 })
+        .lean();
+
+        // Reproduce the original ordering (direct matches first, then legacy-only matches).
+        // Each bucket is a subsequence of an already createdAt-desc-sorted array, so it
+        // stays sorted — concatenating them yields the exact same order as before, and
+        // since $or matches each document at most once, no dedup pass is needed.
+        const direct = [];
+        const legacyOnly = [];
+        for (const t of allTenants) {
+            if (t.ownerLoginId === normalizedId) direct.push(t);
+            else legacyOnly.push(t);
         }
+        const tenants = [...direct, ...legacyOnly];
 
         const tenantsWithDues = await enrichTenantsWithDues(tenants);
         res.json({ success: true, tenants: tenantsWithDues });

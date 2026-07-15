@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const notificationController = require('../controllers/notificationController');
+const { protect } = require('../middleware/authMiddleware');
+
+// Authenticated, self-scoped, paginated notifications for the logged-in user.
+// Recipient is derived from the JWT (never trusted from the query string).
+// Defined before the legacy '/' handler; kept separate for backward compatibility.
+router.get('/me', protect, notificationController.getMyNotifications);
 
 // Existing routes
 router.get('/', notificationController.getNotifications);

@@ -30,11 +30,11 @@ router.post('/', auditTrail('owners'), async (req, res) => {
                 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
                 const password = owner.credentials?.password || owner.checkinPassword || (req.body.credentials && req.body.credentials.password) || '';
                 const area = owner.locationCode || owner.area || '';
-                
+
                 const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(password)}`;
-                
+
                 await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
-                
+
                 // Update KYC status to 'sent'
                 owner.kyc = owner.kyc || {};
                 owner.kyc.status = 'sent';
@@ -152,7 +152,7 @@ router.patch('/:loginId', protect, authorize('superadmin', 'owner'), auditTrail(
             { $set: updatePayload, $setOnInsert: { createdAt: new Date() } },
             { new: true, upsert: true, setDefaultsOnInsert: true }
         );
-        
+
         res.json(owner);
     } catch (err) {
         console.error('❌ Owner PATCH error:', err.message);
@@ -167,7 +167,7 @@ router.get('/:loginId/rooms', async (req, res) => {
         await ownerController.healOwnerProperties(loginId);
         // Find properties owned by this owner
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
-        
+
         // Sync property occupancy (fire-and-forget to avoid blocking API response)
         for (const prop of properties) {
             ownerController.syncPropertyOccupancyData(prop._id).catch(syncErr => {
@@ -215,7 +215,7 @@ router.get('/:loginId/properties', async (req, res) => {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } });
-        
+
         const syncedProperties = [];
         for (const prop of properties) {
             // Trigger async sync in background to keep data fresh without delaying response
@@ -318,26 +318,33 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
-        
+
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
         const propertyIds = properties.map(p => p._id);
-        
+
         // 1. Fetch Tenant Payments (gross)
         // a. From PaymentTransaction
         const PaymentTransaction = require('../models/PaymentTransaction');
         const transactions = await PaymentTransaction.find({ owner_id: loginId }).sort({ payment_date: -1 }).lean();
         const txTotal = transactions.reduce((sum, t) => sum + (t.booking_amount || t.owner_amount || 0), 0);
-        
+
         // b. From RentPayment
-        const RentPayment = require('../models/RentPayment');
-        const ownerDoc = await Owner.findOne({ loginId });
+        // First map all active and historical tenants for these properties
+        const Tenant = require('../models/Tenant');
+        const tenants = await Tenant.find({ property: { $in: propertyIds } }).select('_id').lean();
+        const RentInvoice = require('../models/RentInvoice');
+
         let rentPaymentsTotal = 0;
         let rentPayments = [];
-        if (ownerDoc) {
-            rentPayments = await RentPayment.find({ ownerId: ownerDoc._id }).sort({ createdAt: -1 }).lean();
+
+        if (tenants.length > 0) {
+            const allInvoices = await RentInvoice.find({ tenantId: { $in: tenants.map(t => t._id) } }).select('_id').lean();
+            const RentPayment = require('../models/RentPayment');
+
+            rentPayments = await RentPayment.find({ invoiceId: { $in: allInvoices.map(i => i._id) } }).sort({ createdAt: -1 }).lean();
             rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
         }
-        
+
         // c. From Enquiry (accepted/approved)
         const Enquiry = require('../models/Enquiry');
         const enquiries = await Enquiry.find({
@@ -348,39 +355,36 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             status: { $in: ['accepted', 'approved', 'active'] }
         }).sort({ createdAt: -1 }).lean();
         const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
-        
+
         const tenantCollected = txTotal + rentPaymentsTotal + enquiriesTotal;
 
         // 2. Fetch Payouts
         const PayoutLog = require('../models/PayoutLog');
         const payouts = await PayoutLog.find({ owner_id: loginId }).sort({ created_at: -1 }).lean();
-        
+
         const ownerPayouts = payouts
             .filter(p => ['processed', 'sandbox_success'].includes(p.status))
             .reduce((sum, p) => sum + (p.amount || 0), 0);
-            
+
         const pendingPayouts = payouts
             .filter(p => ['initiated', 'contact_created', 'fund_account_created', 'queued', 'processing'].includes(p.status))
             .reduce((sum, p) => sum + (p.amount || 0), 0);
 
         // 3. Fetch Tenant Dues (Direct optimized query to prevent dashboard hanging)
-        const Tenant = require('../models/Tenant');
-        const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).select('_id').lean();
         let tenantDues = 0;
         if (tenants.length > 0) {
-            const RentInvoice = require('../models/RentInvoice');
             const unpaidInvoices = await RentInvoice.find({
                 tenantId: { $in: tenants.map(t => t._id) },
                 status: { $in: ['PENDING', 'PARTIAL'] }
             }).select('outstandingAmount rentAmount rentPaidAmount paidAmount totalPenalty electricityBill').lean();
-            
+
             unpaidInvoices.forEach(inv => {
                 const rentPaid = inv.rentPaidAmount ?? inv.paidAmount ?? 0;
-                const rentDue  = Math.max(0, (inv.rentAmount || 0) - rentPaid);
-                const penalty  = inv.totalPenalty || 0;
-                const elec     = inv.electricityBill || 0;
+                const rentDue = Math.max(0, (inv.rentAmount || 0) - rentPaid);
+                const penalty = inv.totalPenalty || 0;
+                const elec = inv.electricityBill || 0;
                 const computed = Math.max(0, rentDue + penalty + elec - Math.max(0, (inv.paidAmount || 0) - rentPaid));
-                
+
                 let invOutstanding = computed;
                 if (typeof inv.outstandingAmount === 'number') {
                     invOutstanding = Math.max(computed, Math.max(0, inv.outstandingAmount));
@@ -402,7 +406,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
                 status: 'Paid'
             });
         });
-        
+
         rentPayments.forEach(r => {
             formattedPayments.push({
                 id: r._id ? `RNT-${String(r._id).slice(-6)}` : 'N/A',
@@ -434,7 +438,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             let statusLabel = 'Pending';
             if (['processed', 'sandbox_success'].includes(p.status)) statusLabel = 'Processed';
             if (['failed', 'sandbox_failed'].includes(p.status)) statusLabel = 'Failed';
-            
+
             return {
                 id: p.payout_id || `PAY-${String(p._id).slice(-6)}`,
                 title: p.purpose || 'Owner Payout',
@@ -448,7 +452,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         // 6. Generate Chart Data (Last 5 Months)
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const monthlyData = {};
-        
+
         for (let i = 4; i >= 0; i--) {
             const d = new Date();
             d.setMonth(d.getMonth() - i);
@@ -465,7 +469,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
                 }
             }
         });
-        
+
         rentPayments.forEach(r => {
             if (r.createdAt) {
                 const date = new Date(r.createdAt);
@@ -502,13 +506,42 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             ownerPayout: m.ownerPayout || 0
         }));
 
-        const hasRent = revenueChartData.some(d => d.tenantRent > 0);
-        if (!hasRent) {
-            revenueChartData.forEach((d, idx) => {
-                d.tenantRent = [124000, 138000, 151000, 168000, 185000][idx] || 0;
-                d.ownerPayout = [114000, 126900, 138900, 154500, 168000][idx] || 0;
+        // 7. Dynamic Collection Breakdown
+        let penaltyCollected = 0;
+        let electricityCollected = 0;
+
+        let rentCollected = 0;
+
+        const RentInvoiceModel = require('../models/RentInvoice');
+        const paidInvoices = await RentInvoiceModel.find({
+            ownerId: properties.length > 0 ? (properties[0].ownerLoginId || properties[0].ownerId) : null, // Not strictly constrained, let's use the owner string
+            tenantName: { $exists: true } // or just no filter, since we map over invoices or use tenants array
+        }).lean();
+
+        // Better cross-reference using the tenants generated above
+        if (tenants && tenants.length > 0) {
+            const paidInvFiltered = await RentInvoiceModel.find({
+                tenantId: { $in: tenants.map(t => t._id) },
+                status: { $in: ['PAID', 'PARTIAL'] }
+            }).lean();
+
+            paidInvFiltered.forEach(inv => {
+                penaltyCollected += (inv.penaltyPaidAmount || inv.totalPenalty || 0); // Fines portion
+                rentCollected += (inv.rentPaidAmount || inv.rentAmount || 0);         // Rent portion
+                if (inv.status === 'PAID') {
+                    electricityCollected += (inv.electricityBill || 0);               // Utilities portion
+                }
             });
         }
+
+        rentCollected += txTotal + enquiriesTotal;
+        const totalCat = (rentCollected + penaltyCollected + electricityCollected) || 1; // prevent div/0
+
+        const collectionBreakdown = {
+            rent: { amount: rentCollected, percent: Math.round((rentCollected / totalCat) * 100) },
+            penalty: { amount: penaltyCollected, percent: Math.round((penaltyCollected / totalCat) * 100) },
+            electricity: { amount: electricityCollected, percent: Math.round((electricityCollected / totalCat) * 100) }
+        };
 
         return res.json({
             success: true,
@@ -520,7 +553,8 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             },
             recentPayments: formattedPayments.slice(0, 10),
             recentPayouts: formattedPayouts.slice(0, 10),
-            revenueChartData
+            revenueChartData,
+            collectionBreakdown
         });
     } catch (err) {
         console.error('❌ Error in /revenue-dashboard:', err.message);
@@ -535,13 +569,13 @@ router.get('/:loginId/tenants', async (req, res) => {
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id');
         const propertyIds = properties.map((p) => p._id);
         const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
-        
+
         let tenantsWithDues = tenants;
         if (req.query.nodues !== 'true') {
             const { enrichTenantsWithDues } = require('../services/tenantDuesService');
             tenantsWithDues = await enrichTenantsWithDues(tenants);
         }
-        
+
         return res.json({ tenants: tenantsWithDues });
     } catch (err) {
         console.error('❌ Error fetching owner tenants:', err.message);

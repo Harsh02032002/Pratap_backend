@@ -13,7 +13,7 @@
     "seed:users": "node scripts/seedAllUsers.js",
     "seed:cities": "node seeds/cityAreaSeed.js",
     "seed:tenants_duration": "node scratch/seed_tenants_duration.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",

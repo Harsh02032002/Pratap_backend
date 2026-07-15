@@ -1,29 +1,72 @@
 const express = require('express');
 const router = express.Router();
 const complaintController = require('../controllers/complaintController');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
-// Get all complaints for a specific tenant
-router.get('/tenant/:tenantId', complaintController.getTenantComplaints);
+// Tenant reads their own complaints.
+// Owner/admin may also query by tenantId from their management panels.
+router.get(
+  '/tenant/:tenantId',
+  protect,
+  authorize('tenant', 'superadmin', 'areamanager', 'owner'),
+  complaintController.getTenantComplaints
+);
 
-// Get all complaints for a specific owner
-router.get('/owner/:ownerLoginId', complaintController.getOwnerComplaints);
+// Owner/admin reads complaints for a specific owner's properties.
+router.get(
+  '/owner/:ownerLoginId',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner', 'employee'),
+  complaintController.getOwnerComplaints
+);
 
-// Create a new complaint
-router.post('/', complaintController.createComplaint);
+// Only authenticated tenants can raise a complaint.
+router.post(
+  '/',
+  protect,
+  authorize('tenant'),
+  complaintController.createComplaint
+);
 
-// Update complaint status
-router.put('/:id/status', complaintController.updateComplaintStatus);
+// Owner/admin updates complaint status (Resolved, In Progress, etc.).
+// Employee (area admin panel) also uses this to manage complaints.
+router.put(
+  '/:id/status',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner', 'employee'),
+  complaintController.updateComplaintStatus
+);
 
-// Assign complaint to staff
-router.patch('/:id/assign', complaintController.assignStaff);
+// Owner/admin assigns a staff member to a complaint.
+router.patch(
+  '/:id/assign',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner'),
+  complaintController.assignStaff
+);
 
-// Get all complaints
-router.get('/', complaintController.getAllComplaints);
+// All complaints list — superadmin/areamanager (no filter) or owner (with ?ownerLoginId= query).
+router.get(
+  '/',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner', 'employee'),
+  complaintController.getAllComplaints
+);
 
-// Delete a complaint
-router.delete('/:id', complaintController.deleteComplaint);
+// Delete a complaint — restricted to admin roles only; owners must not delete complaints.
+router.delete(
+  '/:id',
+  protect,
+  authorize('superadmin', 'areamanager'),
+  complaintController.deleteComplaint
+);
 
-//response router by pratap
-router.put('/:id/response', complaintController.updateOwnerResponse);
+// Owner/admin posts a response visible to the tenant.
+router.put(
+  '/:id/response',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner'),
+  complaintController.updateOwnerResponse
+);
 
 module.exports = router;

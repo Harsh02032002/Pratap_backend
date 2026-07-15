@@ -1,12 +1,48 @@
 const express = require('express');
 const router = express.Router();
 const Task = require('../models/Task');
+const { protect, authorize } = require('../middleware/authMiddleware');
+
+// ─── Scope guard ─────────────────────────────────────────────────────────────
+// Same pattern already used in routes/employeeRoutes.js: owner/employee scope
+// filters are forced to the caller's own identity, ignoring client-supplied values.
+// areamanager/superadmin pass through unrestricted.
+const scopeTaskQuery = (req, res, next) => {
+    if (req.user.role === 'owner') {
+        req.query.ownerLoginId = req.user.loginId;
+    } else if (req.user.role === 'employee' || req.user.role === 'manager') {
+        req.query.assignedStaffLoginId = req.user.loginId;
+    }
+    next();
+};
+
+// Loads the task and checks the caller is allowed to act on it (owner of the task,
+// or the employee it's assigned to). areamanager/superadmin bypass the check.
+const loadTaskAndAuthorize = async (req, res, next) => {
+    try {
+        const task = await Task.findById(req.params.id);
+        if (!task) return res.status(404).json({ error: 'Task not found' });
+
+        if (req.user.role === 'owner' && String(task.ownerLoginId || '').toUpperCase() !== String(req.user.loginId || '').toUpperCase()) {
+            return res.status(403).json({ error: 'Forbidden: not your task' });
+        }
+        if ((req.user.role === 'employee' || req.user.role === 'manager') &&
+            String(task.assignedStaffLoginId || '').toUpperCase() !== String(req.user.loginId || '').toUpperCase()) {
+            return res.status(403).json({ error: 'Forbidden: not assigned to you' });
+        }
+
+        req.task = task;
+        next();
+    } catch (err) {
+        return res.status(500).json({ error: 'Failed to load task', details: err.message });
+    }
+};
 
 /**
  * GET /api/tasks
  * Query: ownerLoginId, assignedStaffLoginId, status, priority, category
  */
-router.get('/', async (req, res) => {
+router.get('/', protect, authorize('owner', 'employee', 'manager', 'areamanager', 'superadmin'), scopeTaskQuery, async (req, res) => {
     try {
         const { ownerLoginId, assignedStaffLoginId, status, priority, category } = req.query;
         const filter = {};
@@ -27,7 +63,12 @@ router.get('/', async (req, res) => {
  * GET /api/tasks/stats/:ownerLoginId
  * Returns task counts by status
  */
-router.get('/stats/:ownerLoginId', async (req, res) => {
+router.get('/stats/:ownerLoginId', protect, authorize('owner', 'areamanager', 'superadmin'), (req, res, next) => {
+    if (req.user.role === 'owner' && String(req.params.ownerLoginId).toUpperCase() !== String(req.user.loginId).toUpperCase()) {
+        return res.status(403).json({ error: 'Forbidden: not your data' });
+    }
+    next();
+}, async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
         const [pending, inProgress, completed, total] = await Promise.all([
@@ -45,24 +86,21 @@ router.get('/stats/:ownerLoginId', async (req, res) => {
 /**
  * GET /api/tasks/:id
  */
-router.get('/:id', async (req, res) => {
-    try {
-        const task = await Task.findById(req.params.id);
-        if (!task) return res.status(404).json({ error: 'Task not found' });
-        return res.status(200).json({ success: true, data: task });
-    } catch (err) {
-        return res.status(500).json({ error: 'Failed to fetch task', details: err.message });
-    }
+router.get('/:id', protect, authorize('owner', 'employee', 'manager', 'areamanager', 'superadmin'), loadTaskAndAuthorize, async (req, res) => {
+    return res.status(200).json({ success: true, data: req.task });
 });
 
 /**
  * POST /api/tasks
+ * Only owner/areamanager/superadmin create and assign tasks.
  */
-router.post('/', async (req, res) => {
+router.post('/', protect, authorize('owner', 'areamanager', 'superadmin'), async (req, res) => {
     try {
-        const { ownerLoginId, title, description, propertyId, propertyName, roomNo,
+        const { title, description, propertyId, propertyName, roomNo,
             assignedStaffId, assignedStaffName, assignedStaffLoginId,
             priority, category, dueDate, notes, createdBy } = req.body;
+
+        const ownerLoginId = req.user.role === 'owner' ? req.user.loginId : req.body.ownerLoginId;
 
         if (!ownerLoginId || !title) {
             return res.status(400).json({ error: 'Missing required fields: ownerLoginId, title' });
@@ -82,9 +120,9 @@ router.post('/', async (req, res) => {
 
 /**
  * PATCH /api/tasks/:id
- * Update task fields
+ * Full field update — restricted to management roles.
  */
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', protect, authorize('owner', 'areamanager', 'superadmin'), loadTaskAndAuthorize, async (req, res) => {
     try {
         const updates = req.body;
         if (updates.status === 'Completed' && !updates.completedAt) {
@@ -100,9 +138,9 @@ router.patch('/:id', async (req, res) => {
 
 /**
  * PATCH /api/tasks/:id/status
- * Quick status update
+ * Quick status update — the assigned staff member or task owner can update status.
  */
-router.patch('/:id/status', async (req, res) => {
+router.patch('/:id/status', protect, authorize('owner', 'employee', 'manager', 'areamanager', 'superadmin'), loadTaskAndAuthorize, async (req, res) => {
     try {
         const { status, notes } = req.body;
         const updates = { status };
@@ -118,8 +156,9 @@ router.patch('/:id/status', async (req, res) => {
 
 /**
  * DELETE /api/tasks/:id
+ * Only owner/areamanager/superadmin delete tasks.
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', protect, authorize('owner', 'areamanager', 'superadmin'), loadTaskAndAuthorize, async (req, res) => {
     try {
         const task = await Task.findByIdAndDelete(req.params.id);
         if (!task) return res.status(404).json({ error: 'Task not found' });

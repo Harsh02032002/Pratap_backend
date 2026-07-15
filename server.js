@@ -9,6 +9,7 @@ const path = require('path');
 const dns = require('dns');
 const { startCronJobs } = require('./services/cronJobs');
 const { registerAllCronJobs } = require('./jobs/dailyRentEvaluator');
+const { registerAutoMarkAbsentJob } = require('./jobs/autoMarkAbsentJob');
 const { startEscalationJob } = require('./controllers/complaintController');
 let escalationJobStarted = false;
 const initChatSocket = require('./socket/chatSocket');
@@ -530,6 +531,7 @@ function startServer() {
         try {
             startCronJobs();
             registerAllCronJobs();
+            registerAutoMarkAbsentJob();
         } catch (err) {
             console.warn('⚠️  Cron jobs failed to start:', err.message);
         }

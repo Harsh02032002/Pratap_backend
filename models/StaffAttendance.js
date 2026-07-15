@@ -15,4 +15,6 @@ const staffAttendanceSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
+staffAttendanceSchema.index({ employeeId: 1, date: 1 });
+
 module.exports = mongoose.model('StaffAttendance', staffAttendanceSchema);

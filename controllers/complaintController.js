@@ -5,6 +5,31 @@ const Complaint = require('../models/Complaint');
 exports.getTenantComplaints = async (req, res) => {
     try {
         const { tenantId } = req.params;
+
+        // Ownership enforcement for tenants.
+        //
+        // req.user is a User document (set by protect middleware via JWT).
+        // The Tenant collection is separate — there is no req.user.tenantId.
+        // We resolve the caller's Tenant record by loginId (indexed, single-row read)
+        // and compare its _id against the URL parameter.
+        //
+        // Admin roles bypass this check and can access any tenant's complaints.
+        if (req.user.role === 'tenant') {
+            const Tenant = require('../models/Tenant');
+            const authTenant = await Tenant.findOne(
+                { loginId: req.user.loginId },
+                { _id: 1 }   // projection — only _id needed
+            );
+
+            if (!authTenant) {
+                return res.status(403).json({ success: false, message: 'Forbidden' });
+            }
+
+            if (String(authTenant._id) !== String(tenantId)) {
+                return res.status(403).json({ success: false, message: 'Forbidden' });
+            }
+        }
+
         const complaints = await Complaint.find({ tenantId }).sort({ createdAt: -1 });
         res.json({ success: true, complaints });
     } catch (err) {
@@ -19,6 +44,15 @@ exports.getOwnerComplaints = async (req, res) => {
         const { ownerLoginId } = req.params;
         // Use exact uppercase match — all loginIds stored uppercase, so this hits the index
         const normalizedId = String(ownerLoginId || '').trim().toUpperCase();
+
+        // Ownership enforcement: owners may only access their own complaints.
+        // superadmin and areamanager have unrestricted cross-owner visibility.
+        if (req.user.role === 'owner') {
+            const callerLoginId = String(req.user.loginId || '').trim().toUpperCase();
+            if (callerLoginId !== normalizedId) {
+                return res.status(403).json({ success: false, message: 'Forbidden' });
+            }
+        }
 
         // Primary: complaints tagged with this owner's loginId (index scan, not collection scan)
         const byOwner = await Complaint.find({ ownerLoginId: normalizedId }).sort({ createdAt: -1 });
@@ -53,56 +87,50 @@ exports.getOwnerComplaints = async (req, res) => {
 // Create a new complaint
 exports.createComplaint = async (req, res) => {
     try {
-        let { 
-            tenantId, 
-            tenantLoginId,
-            tenantName, 
-            tenantPhone, 
-            tenantEmail,
-            property, 
-            propertyId,
-            roomNo, 
-            bedNo, 
-            category, 
-            issueType,
-            description, 
-            priority, 
-            type, 
-            ownerLoginId, 
-            escalated, 
-            imageStr 
-        } = req.body;
+        // Resolve the authenticated tenant from the DB using the verified JWT identity.
+        // Never read tenantId, tenantLoginId, tenantName, or any other identity field
+        // from req.body — the caller controls the body and can impersonate any tenant.
+        const Tenant = require('../models/Tenant');
+        const authTenant = await Tenant.findOne(
+            { loginId: req.user.loginId },
+            { _id: 1, loginId: 1, name: 1, phone: 1, email: 1,
+              propertyTitle: 1, property: 1, roomNo: 1, bedNo: 1, ownerLoginId: 1 }
+        );
+        if (!authTenant) {
+            return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
 
-        // Auto-resolve ownerLoginId if missing
-        if ((!ownerLoginId || ownerLoginId.trim() === '') && tenantId) {
-            const Tenant = require('../models/Tenant');
-            const t = await Tenant.findById(tenantId);
-            if (t) {
-                if (t.ownerLoginId) {
-                    // Fastest path: ownerLoginId stored directly on tenant
-                    ownerLoginId = t.ownerLoginId;
-                } else if (t.propertyId) {
-                    const Property = require('../models/Property');
-                    const p = await Property.findById(t.propertyId);
-                    if (p && p.ownerLoginId) {
-                        ownerLoginId = p.ownerLoginId;
-                    }
-                }
+        // Complaint content fields are legitimate user input — read from req.body.
+        // Identity and property fields are derived exclusively from the DB record above.
+        const { category, issueType, description, priority, type, escalated, imageStr } = req.body;
+
+        // Resolve ownerLoginId from the trusted DB tenant record.
+        // Fall back to a Property lookup if the tenant record doesn't carry it directly.
+        let ownerLoginId = authTenant.ownerLoginId || '';
+        if (!ownerLoginId && authTenant.property) {
+            try {
+                const Property = require('../models/Property');
+                const p = await Property.findById(authTenant.property, { ownerLoginId: 1 });
+                if (p?.ownerLoginId) ownerLoginId = p.ownerLoginId;
+            } catch {
+                // Non-fatal — complaint proceeds without ownerLoginId
             }
         }
 
         const complaint = new Complaint({
-            tenantId,
-            tenantLoginId: tenantLoginId || '',
-            tenantEmail: tenantEmail || '',
-            type: type || 'Tenant',
+            // Identity and property — always from DB, never from req.body
+            tenantId: String(authTenant._id),
+            tenantLoginId: authTenant.loginId || '',
+            tenantName: authTenant.name || 'Unknown',
+            tenantPhone: authTenant.phone || 'N/A',
+            tenantEmail: authTenant.email || '',
+            property: authTenant.propertyTitle || 'N/A',
+            propertyId: String(authTenant.property || ''),
+            roomNo: authTenant.roomNo || 'N/A',
+            bedNo: authTenant.bedNo || 'N/A',
             ownerLoginId: ownerLoginId ? String(ownerLoginId).toUpperCase() : '',
-            tenantName: tenantName || 'Unknown',
-            tenantPhone: tenantPhone || 'N/A',
-            property: property || 'N/A',
-            propertyId: propertyId || '',
-            roomNo: roomNo || 'N/A',
-            bedNo: bedNo || 'N/A',
+            // Complaint content — from req.body
+            type: type || 'Tenant',
             category: category || 'Other',
             issueType: issueType || '',
             description,

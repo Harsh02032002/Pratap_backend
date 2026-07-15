@@ -50,3 +50,23 @@ exports.authorize = (...roles) => {
         next();
     };
 };
+
+// Validates a short-lived password-reset token issued at login (purpose: 'password_reset').
+// Sets req.resetLoginId so the route can confirm the token matches the target employee.
+exports.protectPasswordReset = (req, res, next) => {
+    let token = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+        token = req.headers.authorization.split(' ')[1];
+    }
+    if (!token) return res.status(401).json({ message: 'Not authorized, token missing' });
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded.purpose !== 'password_reset') {
+            return res.status(403).json({ message: 'Invalid token: not a password-reset token' });
+        }
+        req.resetLoginId = decoded.loginId;
+        next();
+    } catch (err) {
+        return res.status(401).json({ message: 'Not authorized, token invalid or expired' });
+    }
+};

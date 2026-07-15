@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const rentController = require('../controllers/rentController');
+// new added 
+const rentCollectionController = require('../controllers/rentCollectionController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Secure all endpoints with authentication
@@ -20,10 +22,15 @@ router.delete('/:rentId', authorize('superadmin'), rentController.deleteRent);
 
 // Owner-only or staff endpoints
 router.get('/owner/:ownerLoginId', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.getRentsByOwner);
-router.post('/cash/owner-received', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.markCashReceivedByOwner);
-router.post('/cash/verify-otp', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.verifyCashPaymentOtp);
+router.get('/cash/requests', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.listCashRequests);
+router.post('/cash/:requestId/approve', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.approveCashRequest);
+router.post('/cash/:requestId/reject', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.rejectCashRequest);
+router.post('/cash/owner-received', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.approveCashRequest);
+router.post('/cash/verify-otp', authorize('superadmin', 'areamanager', 'employee', 'tenant', 'owner'), rentController.verifyCashPaymentOtp);
 
 // Tenant, Owner, or Staff endpoints
+// router.get('/tenant/me', authorize('tenant'), rentController.getTenantInvoiceSummary);
+router.get('/tenant/me', authorize('tenant'), rentCollectionController.getTenantInvoiceSummary);
 router.get('/tenant/:tenantLoginId', authorize('superadmin', 'areamanager', 'employee', 'tenant', 'owner'), rentController.getRentsByTenant);
 router.post('/create-order', authorize('superadmin', 'areamanager', 'employee', 'tenant'), rentController.createRazorpayOrder);
 router.post('/record-payment', authorize('superadmin', 'areamanager', 'employee', 'tenant', 'owner'), rentController.recordPaymentByTenant);

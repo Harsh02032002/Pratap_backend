@@ -7,6 +7,7 @@ const { sendMail } = require('../utils/mailer');
 const { sendDocumentToResolvedUser, sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { otpLimiter } = require('../middleware/security');
 const { requestAadhaarOtp, verifyAadhaarOtp, aadhaarOcr } = require('../services/cashfreeKycService');
+const { verhoeffCheck, extractAadhaarNumber } = require('../utils/aadhaarUtils');
 const { generateAgreementPdfBuffer } = require('../utils/generateAgreementPdf');
 const cloudinary = require('../utils/cloudinary');
 const {
@@ -23,57 +24,6 @@ const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || ADMIN_URL;
 const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'https://api.roomhy.com';
 
 const otpStore = new Map();
-
-// Verhoeff checksum tables — used by UIDAI for all 12-digit Aadhaar numbers
-const _VD = [
-    [0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
-    [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
-    [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],
-    [9,8,7,6,5,4,3,2,1,0]
-];
-const _VP = [
-    [0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],
-    [8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
-    [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]
-];
-
-function verhoeffCheck(number) {
-    const digits = String(number).replace(/\D/g, '').split('').reverse().map(Number);
-    if (digits.length !== 12) return false;
-    let c = 0;
-    for (let i = 0; i < digits.length; i++) c = _VD[c][_VP[i % 8][digits[i]]];
-    return c === 0;
-}
-
-function extractAadhaarNumber(value) {
-    if (!value) return '';
-    if (typeof value === 'string') {
-        const digits = value.replace(/\D/g, '');
-        return digits.length === 12 ? digits : '';
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const extracted = extractAadhaarNumber(item);
-            if (extracted) return extracted;
-        }
-        return '';
-    }
-    if (typeof value === 'object') {
-        const priorityKeys = [
-            'aadhaar_number','aadhaarNumber','aadhar_number','aadharNumber',
-            'document_number','documentNumber','id_number','idNumber','uid','number','value'
-        ];
-        for (const key of priorityKeys) {
-            const extracted = extractAadhaarNumber(value[key]);
-            if (extracted) return extracted;
-        }
-        for (const nested of Object.values(value)) {
-            const extracted = extractAadhaarNumber(nested);
-            if (extracted) return extracted;
-        }
-    }
-    return '';
-}
 
 function keyFor(role, loginId, aadhaarNumber) {
     return `${role}:${String(loginId || '').toUpperCase()}:${String(aadhaarNumber || '')}`;
@@ -1285,13 +1235,23 @@ router.post('/tenant/profile', async (req, res) => {
 
 router.post('/tenant/kyc/send-otp', otpLimiter, async (req, res) => {
     try {
-        const { loginId, aadhaarLinkedPhone, aadhaarNumber, aadhaarFront, aadhaarBack } = req.body || {};
+        const { loginId, aadhaarLinkedPhone, aadhaarNumber } = req.body || {};
         if (!loginId || !aadhaarLinkedPhone || !aadhaarNumber) {
             return res.status(400).json({ success: false, message: 'Missing tenant KYC fields' });
         }
         const normalizedLoginId = String(loginId).toUpperCase();
+
+        // Verhoeff checksum — reject obviously invalid Aadhaar numbers before sending OTP
+        if (!/^\d{12}$/.test(aadhaarNumber) || !/^[2-9]/.test(aadhaarNumber)) {
+            return res.status(400).json({ success: false, message: 'Invalid Aadhaar number format' });
+        }
+        if (!verhoeffCheck(aadhaarNumber)) {
+            return res.status(400).json({ success: false, message: 'Aadhaar number failed checksum validation. Please re-enter.' });
+        }
+
+        // Images are NOT accepted here — they are uploaded separately via POST /tenant/documents
         await upsertRecord(normalizedLoginId, 'tenant', {
-            tenantKyc: { aadhaarLinkedPhone, aadhaarNumber, aadhaarFront, aadhaarBack, otpVerified: false }
+            tenantKyc: { aadhaarLinkedPhone, aadhaarNumber, otpVerified: false }
         });
 
         const tenant = await Tenant.findOne({ loginId: normalizedLoginId });
@@ -1303,8 +1263,6 @@ router.post('/tenant/kyc/send-otp', otpLimiter, async (req, res) => {
         tenant.kyc.aadhaarNumber = aadhaarNumber;
         tenant.kyc.aadhar = aadhaarNumber;
         tenant.kyc.aadhaarLinkedPhone = aadhaarLinkedPhone;
-        tenant.kyc.aadhaarFront = aadhaarFront || tenant.kyc.aadhaarFront || null;
-        tenant.kyc.aadhaarBack = aadhaarBack || tenant.kyc.aadhaarBack || null;
         tenant.kyc.otpVerified = false;
         tenant.kyc.uploadedAt = new Date();
         const isFirstKycSubmission = !tenant.kycStatus || !['submitted', 'verified'].includes(tenant.kycStatus);
@@ -1315,8 +1273,6 @@ router.post('/tenant/kyc/send-otp', otpLimiter, async (req, res) => {
             ...(tenant.digitalCheckin.kyc || {}),
             aadhaarLinkedPhone,
             aadhaarNumber,
-            aadhaarFront: aadhaarFront || tenant.digitalCheckin?.kyc?.aadhaarFront || null,
-            aadhaarBack: aadhaarBack || tenant.digitalCheckin?.kyc?.aadhaarBack || null,
             otpVerified: false
         };
         tenant.updatedAt = new Date();
@@ -1822,6 +1778,81 @@ router.post('/owner/documents', async (req, res) => {
         return res.json({ success: true, ...result });
     } catch (err) {
         console.error('owner/documents error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// POST /tenant/documents — upload tenant Aadhaar images + photo to Cloudinary, run OCR on front
+router.post('/tenant/documents', async (req, res) => {
+    try {
+        const { loginId, aadhaarFront, aadhaarBack, tenantPhoto } = req.body || {};
+        if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
+
+        const upper = String(loginId).toUpperCase();
+        const update = {};
+        const result = {};
+
+        const uploadDoc = async (dataUrl, folder) => {
+            const uploaded = await cloudinary.uploader.upload(dataUrl, { folder, resource_type: 'image' });
+            return uploaded.secure_url;
+        };
+
+        const toDataUrl = (v) => (typeof v === 'object' && v?.dataUrl ? v.dataUrl : typeof v === 'string' ? v : null);
+
+        // Upload Aadhaar front + run OCR to extract number
+        const frontDataUrl = toDataUrl(aadhaarFront);
+        if (frontDataUrl) {
+            const url = await uploadDoc(frontDataUrl, 'tenant_documents/aadhaar');
+            update['kyc.aadhaarFront'] = url;
+            update['digitalCheckin.kyc.aadhaarFront'] = url;
+            result.aadhaarFrontUrl = url;
+
+            try {
+                const base64Only = frontDataUrl.replace(/^data:[^;]+;base64,/, '');
+                const ocrData = await aadhaarOcr(base64Only);
+                result.ocrFrontResult = ocrData;
+                if (ocrData && !ocrData.sandbox) {
+                    const extractedNum = extractAadhaarNumber(ocrData);
+                    if (extractedNum) {
+                        result.ocrExtractedAadhaar = extractedNum;
+                        update['kyc.aadhaarNumber'] = extractedNum;
+                        update['kyc.aadhar'] = extractedNum;
+                    }
+                }
+            } catch (ocrErr) {
+                console.warn('[tenant/documents] Aadhaar front OCR failed:', ocrErr.message);
+                result.ocrError = ocrErr.message;
+            }
+        }
+
+        // Upload Aadhaar back
+        const backDataUrl = toDataUrl(aadhaarBack);
+        if (backDataUrl) {
+            const url = await uploadDoc(backDataUrl, 'tenant_documents/aadhaar');
+            update['kyc.aadhaarBack'] = url;
+            update['digitalCheckin.kyc.aadhaarBack'] = url;
+            result.aadhaarBackUrl = url;
+        }
+
+        // Upload tenant photo
+        const photoDataUrl = toDataUrl(tenantPhoto);
+        if (photoDataUrl) {
+            const url = await uploadDoc(photoDataUrl, 'tenant_documents/photos');
+            update.photo = url;
+            result.tenantPhotoUrl = url;
+        }
+
+        if (Object.keys(update).length > 0) {
+            await Tenant.findOneAndUpdate(
+                { loginId: upper },
+                { $set: update },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+        }
+
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        console.error('tenant/documents error:', err);
         return res.status(500).json({ success: false, message: err.message });
     }
 });

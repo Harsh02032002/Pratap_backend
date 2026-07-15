@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const Employee = require('../models/Employee');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const jwt = require('jsonwebtoken');
+const { protect, authorize, protectPasswordReset } = require('../middleware/authMiddleware');
 
 /**
  * POST /api/employees/login
@@ -28,9 +29,10 @@ router.post('/login', async (req, res) => {
         }
         if (!passwordMatch) return res.status(401).json({ success: false, error: 'Invalid Staff ID or Password' });
 
-        return res.json({
+        const requirePasswordReset = emp.requirePasswordReset === true;
+        const responsePayload = {
             success: true,
-            requirePasswordReset: emp.requirePasswordReset === true,
+            requirePasswordReset,
             data: {
                 _id: emp._id,
                 loginId: emp.loginId,
@@ -40,9 +42,28 @@ router.post('/login', async (req, res) => {
                 permissions: emp.permissions || [],
                 assignedPropertyName: emp.assignedPropertyName || '',
                 photoDataUrl: emp.photoDataUrl || '',
-                requirePasswordReset: emp.requirePasswordReset === true,
+                requirePasswordReset,
             }
-        });
+        };
+
+        if (requirePasswordReset) {
+            responsePayload.resetToken = jwt.sign(
+                { loginId: emp.loginId, purpose: 'password_reset' },
+                process.env.JWT_SECRET,
+                { expiresIn: '15m' }
+            );
+        } else {
+            // Auth token for protect-guarded routes (e.g. /api/tenants/owner, /api/complaints/owner).
+            // protect() looks up the user by decoded.id and derives role from the DB record,
+            // so the payload only needs the employee's _id.
+            responsePayload.token = jwt.sign(
+                { id: emp._id },
+                process.env.JWT_SECRET,
+                { expiresIn: '7d' }
+            );
+        }
+
+        return res.json(responsePayload);
     } catch (err) {
         console.error('Staff login error:', err);
         return res.status(500).json({ success: false, error: 'Login failed' });
@@ -53,48 +74,28 @@ router.post('/login', async (req, res) => {
  * POST /api/employees/:loginId/reset-password
  * Staff one-time password reset
  */
-router.post('/:loginId/reset-password', protect, authorize('superadmin', 'areamanager', 'owner', 'employee', 'manager'), async (req, res) => {
+router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) => {
     try {
         const { loginId } = req.params;
-        const { newPassword, currentPassword } = req.body;
+        const { newPassword } = req.body;
         if (!newPassword) return res.status(400).json({ success: false, error: 'newPassword required' });
+
+        // Token must belong to the same employee being reset
+        if (String(req.resetLoginId || '').toUpperCase() !== String(loginId).toUpperCase()) {
+            return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
+        }
 
         const emp = await Employee.findOne({ loginId });
         if (!emp) return res.status(404).json({ success: false, error: 'Employee not found' });
-
-        // Areamanager/Owner scope check: can only reset passwords for employees they manage
-        if (req.user.role === 'areamanager' || req.user.role === 'owner') {
-            const managerLoginId = String(req.user.loginId || '').toUpperCase();
-            const empParent = String(emp.parentLoginId || '').toUpperCase();
-            if (!managerLoginId || empParent !== managerLoginId) {
-                return res.status(403).json({ success: false, error: 'Forbidden: You can only reset passwords for employees under your management' });
-            }
-        }
-
-        // Employee/Manager check: can only reset their own password
-        if (req.user.role === 'employee' || req.user.role === 'manager') {
-            if (String(req.user.loginId || '').toUpperCase() !== String(loginId || '').toUpperCase()) {
-                return res.status(403).json({ success: false, error: 'Forbidden: You can only reset your own password' });
-            }
-        }
-
-        // Verify current password
-        let currentMatch = false;
-        if (emp.password === currentPassword) {
-            currentMatch = true;
-        } else {
-            try {
-                const bcrypt = require('bcryptjs');
-                currentMatch = await bcrypt.compare(currentPassword, emp.password);
-            } catch (_) {}
-        }
-        if (!currentMatch) return res.status(401).json({ success: false, error: 'Current password incorrect' });
 
         emp.password = newPassword; // Model may hash on save
         emp.requirePasswordReset = false;
         await emp.save();
 
-        return res.json({ success: true, message: 'Password reset successfully' });
+        // Issue a real auth token so the client is fully signed in after setting a password.
+        const token = jwt.sign({ id: emp._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+        return res.json({ success: true, message: 'Password reset successfully', token });
     } catch (err) {
         console.error('Reset password error:', err);
         return res.status(500).json({ success: false, error: 'Reset failed' });
