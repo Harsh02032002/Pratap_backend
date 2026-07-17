@@ -9,6 +9,8 @@ const maintenanceTaskSchema = new mongoose.Schema({
     assignedStaffId: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee' },
     assignedStaffName: { type: String },
     status: { type: String, enum: ['Scheduled', 'In Progress', 'Completed', 'Cancelled'], default: 'Scheduled' },
+    createdByRole: { type: String, default: 'owner' },
+    createdById: { type: String },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }
 });

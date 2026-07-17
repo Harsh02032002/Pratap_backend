@@ -1,12 +1,12 @@
 'use strict';
 const mongoose = require('mongoose');
-const RentInvoice  = require('../models/RentInvoice');
-const RentPayment  = require('../models/RentPayment');
+const RentInvoice = require('../models/RentInvoice');
+const RentPayment = require('../models/RentPayment');
 const PenaltyConfig = require('../models/PenaltyConfig');
-const RentAuditLog  = require('../models/RentAuditLog');
-const Tenant           = require('../models/Tenant');
+const RentAuditLog = require('../models/RentAuditLog');
+const Tenant = require('../models/Tenant');
 const ElectricityMeter = require('../models/ElectricityMeter');
-const globalConfig     = require('../config/rentCollectionConfig');
+const globalConfig = require('../config/rentCollectionConfig');
 const { calculatePenalties, determinePhase, calcDaysSinceDue } = require('../engine/penaltyEngine');
 
 // ─── Config priority: unit → property → owner-default → .env global ──────────
@@ -30,10 +30,10 @@ async function getEffectiveConfig(ownerId, propertyId, unitId) {
 
 function mergeWithGlobal(cfg) {
   return {
-    mode:                        globalConfig.mode,
-    gracePeriodDays:             cfg.gracePeriodDays             ?? globalConfig.gracePeriodDays,
-    minorPenaltyDay:             cfg.minorPenaltyDay             ?? globalConfig.minorPenaltyDay,
-    majorPenaltyDay:             cfg.majorPenaltyDay             ?? globalConfig.majorPenaltyDay,
+    mode: globalConfig.mode,
+    gracePeriodDays: cfg.gracePeriodDays ?? globalConfig.gracePeriodDays,
+    minorPenaltyDay: cfg.minorPenaltyDay ?? globalConfig.minorPenaltyDay,
+    majorPenaltyDay: cfg.majorPenaltyDay ?? globalConfig.majorPenaltyDay,
     phase1ReminderFrequencyDays: cfg.phase1ReminderFrequencyDays ?? globalConfig.phase1ReminderFrequencyDays,
     minorPenalty: cfg.minorPenalty || { enabled: false },
     majorPenalty: cfg.majorPenalty || { enabled: false },
@@ -43,10 +43,10 @@ function mergeWithGlobal(cfg) {
 
 function buildGlobalConfig() {
   return {
-    mode:                        globalConfig.mode,
-    gracePeriodDays:             globalConfig.gracePeriodDays,
-    minorPenaltyDay:             globalConfig.minorPenaltyDay,
-    majorPenaltyDay:             globalConfig.majorPenaltyDay,
+    mode: globalConfig.mode,
+    gracePeriodDays: globalConfig.gracePeriodDays,
+    minorPenaltyDay: globalConfig.minorPenaltyDay,
+    majorPenaltyDay: globalConfig.majorPenaltyDay,
     phase1ReminderFrequencyDays: globalConfig.phase1ReminderFrequencyDays,
     minorPenalty: { enabled: false, type: 'fixed', value: 0 },
     majorPenalty: { enabled: false, type: 'fixed', value: 0 },
@@ -76,11 +76,11 @@ async function attachPendingElectricity(invoice, tenantId) {
 
   if (!meter?.totalBill) return;
 
-  invoice.electricityBill          = meter.totalBill;
+  invoice.electricityBill = meter.totalBill;
   invoice.electricityUnitsConsumed = meter.unitsConsumed || 0;
-  invoice.electricityPrevReading     = meter.previousReading || 0;
-  invoice.electricityCurrReading     = meter.currentReading || 0;
-  invoice.electricityReadingAdded    = true;
+  invoice.electricityPrevReading = meter.previousReading || 0;
+  invoice.electricityCurrReading = meter.currentReading || 0;
+  invoice.electricityReadingAdded = true;
 
   const { updates } = await evaluateInvoice(invoice);
   Object.assign(invoice, updates);
@@ -100,11 +100,11 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
       });
       if (existing) { results.skipped++; continue; }
 
-      const config    = await getEffectiveConfig(ownerId, tenant.propertyId, tenant.unitId);
-      const dueYear   = parseInt(billingMonth.split('-')[0], 10);
-      const dueMonth  = parseInt(billingMonth.split('-')[1], 10) - 1; // 0-indexed
-      const dueDay    = config.rentDueDay || 1;
-      const dueDate   = new Date(dueYear, dueMonth, dueDay);
+      const config = await getEffectiveConfig(ownerId, tenant.propertyId, tenant.unitId);
+      const dueYear = parseInt(billingMonth.split('-')[0], 10);
+      const dueMonth = parseInt(billingMonth.split('-')[1], 10) - 1; // 0-indexed
+      const dueDay = config.rentDueDay || 1;
+      const dueDate = new Date(dueYear, dueMonth, dueDay);
 
       const invoiceNumber = `INV-${billingMonth}-${String(tenant.tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
 
@@ -113,16 +113,16 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
       const invoice = new RentInvoice({
         invoiceNumber,
         ownerId,
-        propertyId:  tenant.propertyId,
-        unitId:      tenant.unitId,
-        tenantId:    tenant.tenantId,
-        tenantName:  tenantDoc?.name  || '',
+        propertyId: tenant.propertyId,
+        unitId: tenant.unitId,
+        tenantId: tenant.tenantId,
+        tenantName: tenantDoc?.name || '',
         tenantEmail: tenantDoc?.email || '',
         tenantPhone: tenantDoc?.phone || '',
         billingMonth,
-        rentAmount:  tenant.rentAmount,
+        rentAmount: tenant.rentAmount,
         dueDate,
-        totalDue:    tenant.rentAmount,
+        totalDue: tenant.rentAmount,
         outstandingAmount: tenant.rentAmount,
         penaltyConfigSnapshot: config,
       });
@@ -130,12 +130,12 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
       await attachPendingElectricity(invoice, tenant.tenantId);
       await invoice.save();
       await RentAuditLog.create({
-        action:     'INVOICE_CREATED',
-        invoiceId:  invoice._id,
-        tenantId:   tenant.tenantId,
+        action: 'INVOICE_CREATED',
+        invoiceId: invoice._id,
+        tenantId: tenant.tenantId,
         ownerId,
         propertyId: tenant.propertyId,
-        meta:       { billingMonth, rentAmount: tenant.rentAmount },
+        meta: { billingMonth, rentAmount: tenant.rentAmount },
       });
 
       results.created++;
@@ -170,11 +170,11 @@ async function evaluateInvoice(invoice, asOfDate = null) {
       config = {
         ...config,
         majorPenalty: {
-          enabled:        true,
-          type:           'per_day',
-          value:          tenantLateFee,
+          enabled: true,
+          type: 'per_day',
+          value: tenantLateFee,
           incrementValue: 0,
-          maxCap:         0,
+          maxCap: 0,
         },
       };
     }
@@ -185,15 +185,19 @@ async function evaluateInvoice(invoice, asOfDate = null) {
 
   const electricityBill = invoice.electricityBill || 0;
 
+  // `penalties.totalDue` is actually the remaining unpaid portion of the base.
+  // We need `totalDue` to represent the GROSS total invoice amount, and `outstandingAmount` for the unpaid portion.
+  const rentPaid = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
+
   const updates = {
-    daysSinceDue:       penalties.daysSinceDue,
-    currentPhase:       penalties.phase,
+    daysSinceDue: penalties.daysSinceDue,
+    currentPhase: penalties.phase,
     minorPenaltyAmount: penalties.minorPenalty,
     majorPenaltyAmount: penalties.majorPenalty,
-    totalPenalty:       penalties.totalPenalty,
-    outstandingAmount:  penalties.outstandingAmount + electricityBill,
-    totalDue:           penalties.totalDue + electricityBill,
-    lastEvaluatedAt:    new Date(),
+    totalPenalty: penalties.totalPenalty,
+    outstandingAmount: Math.max(0, (invoice.rentAmount || 0) - rentPaid) + penalties.totalPenalty + electricityBill - Math.max(0, (invoice.paidAmount || 0) - rentPaid),
+    totalDue: (invoice.rentAmount || 0) + penalties.totalPenalty + electricityBill,
+    lastEvaluatedAt: new Date(),
   };
 
   const newPenalties = [];
@@ -236,57 +240,57 @@ async function recordPayment(invoiceId, paymentData, performedBy) {
     const { amount, paymentMethod = 'cash', transactionId, notes } = paymentData;
     if (!amount || amount <= 0) throw new Error('Invalid payment amount');
 
-    const config   = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+    const config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
     const penalties = calculatePenalties(invoice, config);
 
     // Use rent-specific tracker as ceiling so penalty payments don't reduce rent capacity
     const alreadyRentPaid = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
 
     let penaltyPaid = 0;
-    let rentPaid    = 0;
-    let remaining   = amount;
+    let rentPaid = 0;
+    let remaining = amount;
 
     if (penalties.totalPenalty > 0 && remaining > 0) {
       penaltyPaid = Math.min(remaining, penalties.totalPenalty);
-      remaining  -= penaltyPaid;
+      remaining -= penaltyPaid;
     }
     if (remaining > 0) {
-      rentPaid  = Math.min(remaining, invoice.rentAmount - alreadyRentPaid);
+      rentPaid = Math.min(remaining, invoice.rentAmount - alreadyRentPaid);
       remaining -= rentPaid;
     }
 
-    const newTotalPaid   = (invoice.paidAmount || 0) + rentPaid + penaltyPaid;
+    const newTotalPaid = (invoice.paidAmount || 0) + rentPaid + penaltyPaid;
     const newOutstanding = Math.max(0, invoice.totalDue - newTotalPaid);
-    const isFullyPaid    = newOutstanding <= 0;
-    const isPartial      = !isFullyPaid && newTotalPaid > 0;
+    const isFullyPaid = newOutstanding <= 0;
+    const isPartial = !isFullyPaid && newTotalPaid > 0;
 
     const paymentRecord = await RentPayment.create([{
       invoiceId,
-      tenantId:          invoice.tenantId,
-      propertyId:        invoice.propertyId,
-      ownerId:           invoice.ownerId,
+      tenantId: invoice.tenantId,
+      propertyId: invoice.propertyId,
+      ownerId: invoice.ownerId,
       amount,
       paymentMethod,
       transactionId,
       isPartial,
-      remainingAfter:    newOutstanding,
-      rentPaidAmount:    rentPaid,
+      remainingAfter: newOutstanding,
+      rentPaidAmount: rentPaid,
       penaltyPaidAmount: penaltyPaid,
-      paymentDate:       new Date(),
-      recordedBy:        performedBy,
+      paymentDate: new Date(),
+      recordedBy: performedBy,
       notes,
     }], { session });
 
     await RentInvoice.findByIdAndUpdate(invoiceId, {
       $inc: {
-        paidAmount:        rentPaid + penaltyPaid, // total paid (display)
-        rentPaidAmount:    rentPaid,               // rent-only tracker
+        paidAmount: rentPaid + penaltyPaid, // total paid (display)
+        rentPaidAmount: rentPaid,               // rent-only tracker
         penaltyPaidAmount: penaltyPaid,            // penalty-only tracker
       },
       $set: {
         outstandingAmount: newOutstanding,
-        status:            isFullyPaid ? 'PAID' : isPartial ? 'PARTIAL' : 'PENDING',
-        lastEvaluatedAt:   new Date(),
+        status: isFullyPaid ? 'PAID' : isPartial ? 'PARTIAL' : 'PENDING',
+        lastEvaluatedAt: new Date(),
       },
     }, { session });
 
@@ -294,14 +298,14 @@ async function recordPayment(invoiceId, paymentData, performedBy) {
 
     // Audit log written AFTER commit — never create a record for a failed transaction
     await RentAuditLog.create({
-      action:     'PAYMENT_RECORDED',
+      action: 'PAYMENT_RECORDED',
       invoiceId,
-      tenantId:   invoice.tenantId,
-      ownerId:    invoice.ownerId,
+      tenantId: invoice.tenantId,
+      ownerId: invoice.ownerId,
       propertyId: invoice.propertyId,
       performedBy,
-      meta:       { amount, paymentMethod, isFullyPaid, newOutstanding, rentPaid, penaltyPaid },
-    }).catch(() => {});
+      meta: { amount, paymentMethod, isFullyPaid, newOutstanding, rentPaid, penaltyPaid },
+    }).catch(() => { });
 
     return { payment: paymentRecord[0], isFullyPaid, newOutstanding };
   } catch (err) {
@@ -324,24 +328,24 @@ async function waivePenalty(invoiceId, waiverData, performedBy) {
   const waiver = {
     waivedAmount: waivedAmount || invoice.totalPenalty,
     reason,
-    waivedBy:    performedBy,
-    waivedAt:    new Date(),
+    waivedBy: performedBy,
+    waivedAt: new Date(),
   };
 
   // Use rent-specific tracker so penalty payments don't pollute the rent-paid check
-  const rentPaidSoFar   = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
-  const rentFullyPaid   = rentPaidSoFar >= invoice.rentAmount;
-  const anyRentPaid     = rentPaidSoFar > 0;
-  const newOutstanding  = Math.max(0, invoice.rentAmount - rentPaidSoFar);
+  const rentPaidSoFar = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
+  const rentFullyPaid = rentPaidSoFar >= invoice.rentAmount;
+  const anyRentPaid = rentPaidSoFar > 0;
+  const newOutstanding = Math.max(0, invoice.rentAmount - rentPaidSoFar);
 
   await RentInvoice.findByIdAndUpdate(invoiceId, {
     $set: {
       waiver,
-      totalPenalty:       0,
+      totalPenalty: 0,
       minorPenaltyAmount: 0,
       majorPenaltyAmount: 0,
-      totalDue:           newOutstanding,
-      outstandingAmount:  newOutstanding,
+      totalDue: newOutstanding,
+      outstandingAmount: newOutstanding,
       // WAIVED only when rent is also fully paid; otherwise keep collecting rent
       status: rentFullyPaid ? 'PAID' : anyRentPaid ? 'PARTIAL' : 'PENDING',
     },
@@ -350,12 +354,12 @@ async function waivePenalty(invoiceId, waiverData, performedBy) {
   await RentAuditLog.create({
     action: 'PENALTY_WAIVED',
     invoiceId,
-    tenantId:   invoice.tenantId,
-    ownerId:    invoice.ownerId,
+    tenantId: invoice.tenantId,
+    ownerId: invoice.ownerId,
     propertyId: invoice.propertyId,
     performedBy,
     meta: waiver,
-  }).catch(() => {});
+  }).catch(() => { });
 
   return { success: true, waiver };
 }

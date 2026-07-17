@@ -1,10 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const enquiryController = require('../controllers/enquiryController');
-// Enquiry API: create, list for owner, update status
-router.post('/:ownerLoginId/enquiries', enquiryController.createEnquiry); // create
-router.get('/:ownerLoginId/enquiries', enquiryController.listEnquiries); // list for owner
-router.patch('/enquiries/:id', enquiryController.updateEnquiry); // update status
+const { sseStream } = require('../controllers/ownercontroller');
 const Owner = require('../models/Owner');
 const Message = require('../models/Message');
 const Property = require('../models/Property');
@@ -12,9 +9,17 @@ const Room = require('../models/Room');
 const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
-const ownerController = require('../controllers/ownercontroller');
 const { auditTrail } = require('../middleware/auditTrail');
-const mailer = require('../utils/mailer');
+const ownerController = require('../controllers/ownercontroller');
+
+// --- SSE Endpoint ---
+router.get('/:loginId/stream', sseStream);
+
+// Enquiry API: create, list for owner, update status
+router.post('/:ownerLoginId/enquiries', enquiryController.createEnquiry); // create
+router.get('/:ownerLoginId/enquiries', enquiryController.listEnquiries); // list for owner
+router.patch('/enquiries/:id', enquiryController.updateEnquiry); // update status
+
 
 // 1. Create new owner (Preserved from original - used by enquiry approval/import)
 router.post('/', auditTrail('owners'), async (req, res) => {
@@ -319,17 +324,29 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
 
+        // ── Month filter ─────────────────────────────────────────────────────────
+        // Default to current month. Frontend sends ?month=YYYY-MM
+        const now = new Date();
+        const rawMonth = req.query.month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        const [mYear, mMon] = rawMonth.split('-').map(Number);
+        const monthStart = new Date(mYear, mMon - 1, 1, 0, 0, 0, 0);
+        const monthEnd = new Date(mYear, mMon, 0, 23, 59, 59, 999); // last day of month
+        const billingMonth = rawMonth; // e.g. "2026-07"
+        // ─────────────────────────────────────────────────────────────────────────
+
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
         const propertyIds = properties.map(p => p._id);
 
-        // 1. Fetch Tenant Payments (gross)
+        // 1. Fetch Tenant Payments (gross) — scoped to selected month
         // a. From PaymentTransaction
         const PaymentTransaction = require('../models/PaymentTransaction');
-        const transactions = await PaymentTransaction.find({ owner_id: loginId }).sort({ payment_date: -1 }).lean();
+        const transactions = await PaymentTransaction.find({
+            owner_id: loginId,
+            payment_date: { $gte: monthStart, $lte: monthEnd }
+        }).sort({ payment_date: -1 }).lean();
         const txTotal = transactions.reduce((sum, t) => sum + (t.booking_amount || t.owner_amount || 0), 0);
 
-        // b. From RentPayment
-        // First map all active and historical tenants for these properties
+        // b. From RentPayment — scoped to selected month via billingMonth on invoice
         const Tenant = require('../models/Tenant');
         const tenants = await Tenant.find({ property: { $in: propertyIds } }).select('_id').lean();
         const RentInvoice = require('../models/RentInvoice');
@@ -338,29 +355,39 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         let rentPayments = [];
 
         if (tenants.length > 0) {
-            const allInvoices = await RentInvoice.find({ tenantId: { $in: tenants.map(t => t._id) } }).select('_id').lean();
+            // Get invoices for this specific billing month only
+            const monthInvoices = await RentInvoice.find({
+                tenantId: { $in: tenants.map(t => t._id) },
+                billingMonth
+            }).select('_id').lean();
             const RentPayment = require('../models/RentPayment');
 
-            rentPayments = await RentPayment.find({ invoiceId: { $in: allInvoices.map(i => i._id) } }).sort({ createdAt: -1 }).lean();
+            rentPayments = await RentPayment.find({
+                invoiceId: { $in: monthInvoices.map(i => i._id) }
+            }).sort({ createdAt: -1 }).lean();
             rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
         }
 
-        // c. From Enquiry (accepted/approved)
+        // c. From Enquiry — scoped to selected month
         const Enquiry = require('../models/Enquiry');
         const enquiries = await Enquiry.find({
             $or: [
                 { propertyId: { $in: propertyIds } },
                 { ownerLoginId: loginId }
             ],
-            status: { $in: ['accepted', 'approved', 'active'] }
+            status: { $in: ['accepted', 'approved', 'active'] },
+            createdAt: { $gte: monthStart, $lte: monthEnd }
         }).sort({ createdAt: -1 }).lean();
         const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
 
         const tenantCollected = txTotal + rentPaymentsTotal + enquiriesTotal;
 
-        // 2. Fetch Payouts
+        // 2. Fetch Payouts — scoped to selected month
         const PayoutLog = require('../models/PayoutLog');
-        const payouts = await PayoutLog.find({ owner_id: loginId }).sort({ created_at: -1 }).lean();
+        const payouts = await PayoutLog.find({
+            owner_id: loginId,
+            created_at: { $gte: monthStart, $lte: monthEnd }
+        }).sort({ created_at: -1 }).lean();
 
         const ownerPayouts = payouts
             .filter(p => ['processed', 'sandbox_success'].includes(p.status))
@@ -370,11 +397,12 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             .filter(p => ['initiated', 'contact_created', 'fund_account_created', 'queued', 'processing'].includes(p.status))
             .reduce((sum, p) => sum + (p.amount || 0), 0);
 
-        // 3. Fetch Tenant Dues (Direct optimized query to prevent dashboard hanging)
+        // 3. Tenant Dues — always live (current outstanding, not month-filtered)
         let tenantDues = 0;
         if (tenants.length > 0) {
             const unpaidInvoices = await RentInvoice.find({
                 tenantId: { $in: tenants.map(t => t._id) },
+                billingMonth,
                 status: { $in: ['PENDING', 'PARTIAL'] }
             }).select('outstandingAmount rentAmount rentPaidAmount paidAmount totalPenalty electricityBill').lean();
 
@@ -506,40 +534,41 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             ownerPayout: m.ownerPayout || 0
         }));
 
-        // 7. Dynamic Collection Breakdown
-        let penaltyCollected = 0;
-        let electricityCollected = 0;
-
-        let rentCollected = 0;
-
+        // 7. Collection Breakdown — scoped to selected billing month only
+        // Fetch ALL invoices for this billingMonth (any status) to compute complete picture
         const RentInvoiceModel = require('../models/RentInvoice');
-        const paidInvoices = await RentInvoiceModel.find({
-            ownerId: properties.length > 0 ? (properties[0].ownerLoginId || properties[0].ownerId) : null, // Not strictly constrained, let's use the owner string
-            tenantName: { $exists: true } // or just no filter, since we map over invoices or use tenants array
-        }).lean();
+        let rentCollected = 0;
+        let electricityCollected = 0;
+        let penaltyAccrued = 0; // total penalties GENERATED this month (accrued = generated, not just paid)
 
-        // Better cross-reference using the tenants generated above
         if (tenants && tenants.length > 0) {
-            const paidInvFiltered = await RentInvoiceModel.find({
+            const allMonthInvoices = await RentInvoiceModel.find({
                 tenantId: { $in: tenants.map(t => t._id) },
-                status: { $in: ['PAID', 'PARTIAL'] }
+                billingMonth
             }).lean();
 
-            paidInvFiltered.forEach(inv => {
-                penaltyCollected += (inv.penaltyPaidAmount || inv.totalPenalty || 0); // Fines portion
-                rentCollected += (inv.rentPaidAmount || inv.rentAmount || 0);         // Rent portion
-                if (inv.status === 'PAID') {
-                    electricityCollected += (inv.electricityBill || 0);               // Utilities portion
+            allMonthInvoices.forEach(inv => {
+                // Rent actually collected = what was physically paid
+                rentCollected += (inv.rentPaidAmount || 0);
+
+                // Electricity collected = billed amount on invoices where payment was received
+                if (['PAID', 'PARTIAL'].includes(inv.status)) {
+                    electricityCollected += (inv.electricityBill || 0);
                 }
+
+                // Penalties accrued = total penalty GENERATED this month (whether paid or not)
+                penaltyAccrued += (inv.totalPenalty || 0);
             });
         }
 
+        // Add online booking/enquiry collections to rent bucket
         rentCollected += txTotal + enquiriesTotal;
-        const totalCat = (rentCollected + penaltyCollected + electricityCollected) || 1; // prevent div/0
+
+        const totalCat = (rentCollected + penaltyAccrued + electricityCollected) || 1; // prevent div/0
 
         const collectionBreakdown = {
             rent: { amount: rentCollected, percent: Math.round((rentCollected / totalCat) * 100) },
-            penalty: { amount: penaltyCollected, percent: Math.round((penaltyCollected / totalCat) * 100) },
+            penalty: { amount: penaltyAccrued, percent: Math.round((penaltyAccrued / totalCat) * 100) },
             electricity: { amount: electricityCollected, percent: Math.round((electricityCollected / totalCat) * 100) }
         };
 

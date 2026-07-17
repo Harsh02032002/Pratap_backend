@@ -39,7 +39,7 @@ exports.assignTenant = async (req, res) => {
         const normalizedBedNo = bedNo != null
             ? String(bedNo).trim().replace(/^[Bb]ed\s*/i, '') || null
             : null;
-        
+
         let assignedPropertyTitle = String(propertyTitle || '').trim();
 
         const normalizedOwnerLoginId = String(ownerLoginId || '').toUpperCase();
@@ -86,7 +86,7 @@ exports.assignTenant = async (req, res) => {
 
         // Additional validation for emergency contact (optional for owner panel)
         const hasEmergencyInfo = additional && additional.emergencyName && additional.emergencyPhone && additional.relationship;
-        
+
         // If it's a superadmin request (usually has building/floor), we can be stricter, 
         // but for now let's just make it optional to avoid breaking the owner flow.
 
@@ -247,18 +247,18 @@ exports.assignTenant = async (req, res) => {
             kycStatus: idProof?.file ? 'submitted' : 'pending',
             digitalCheckin: {
                 agreementDetails: {
-                    ...(accommodationType    && { accommodationType }),
-                    ...(minStay              && { minimumStayDuration: `${minStay} Months` }),
-                    ...(noticePeriod         && { noticePeriodDays: noticePeriod }),
-                    ...(rentDueDate          && { licenseFeeDueDate: rentDueDate }),
-                    ...(lateFee              && { lateFee }),
-                    ...(licenseDuration      && { licenseDuration: `${licenseDuration} months` }),
-                    ...(moveOutCharges       != null && { moveOutCharges }),
-                    ...(noticePeriodCharges  != null && { noticePeriodCharges }),
-                    ...(inclusions           && { inclusions }),
-                    ...(gstCharges           != null && { gstCharges }),
-                    ...(propertyAddress      && { propertyAddress }),
-                    ...(permanentAddress     && { permanentAddress }),
+                    ...(accommodationType && { accommodationType }),
+                    ...(minStay && { minimumStayDuration: `${minStay} Months` }),
+                    ...(noticePeriod && { noticePeriodDays: noticePeriod }),
+                    ...(rentDueDate && { licenseFeeDueDate: rentDueDate }),
+                    ...(lateFee && { lateFee }),
+                    ...(licenseDuration && { licenseDuration: `${licenseDuration} months` }),
+                    ...(moveOutCharges != null && { moveOutCharges }),
+                    ...(noticePeriodCharges != null && { noticePeriodCharges }),
+                    ...(inclusions && { inclusions }),
+                    ...(gstCharges != null && { gstCharges }),
+                    ...(propertyAddress && { propertyAddress }),
+                    ...(permanentAddress && { permanentAddress }),
                     securityDeposit: depositTotal || 0
                 }
             }
@@ -283,26 +283,35 @@ exports.assignTenant = async (req, res) => {
         // Create Rent record for this tenant
         const rentAmount = parseInt(agreedRent);
         const rentPropertyName = assignedPropertyTitle || property.title || 'Property';
-        const rent = await Rent.create({
-            propertyName: rentPropertyName,
-            roomNumber: roomNo,
-            area: property.area || '-',
-            tenantName: name,
-            tenantEmail: email,
-            tenantPhone: phone,
-            tenantLoginId: loginId,
-            rentAmount: rentAmount,
-            totalDue: rentAmount,
-            paidAmount: 0,
-            paymentStatus: 'pending',
-            moveInDate: moveInDate ? new Date(moveInDate) : new Date(),
-            dueDate: moveInDate ? new Date(moveInDate) : new Date(),
-            createdAt: new Date()
-        });
+        const collectionMonth = new Date().toISOString().slice(0, 7);
+
+        let rent = await Rent.findOne({ tenantLoginId: loginId, collectionMonth });
+
+        if (!rent) {
+            rent = await Rent.create({
+                propertyName: rentPropertyName,
+                roomNumber: roomNo,
+                area: property.area || '-',
+                tenantName: name,
+                tenantEmail: email,
+                tenantPhone: phone,
+                tenantLoginId: loginId,
+                rentAmount: rentAmount,
+                totalDue: rentAmount,
+                paidAmount: 0,
+                paymentStatus: 'pending',
+                moveInDate: moveInDate ? new Date(moveInDate) : new Date(),
+                dueDate: moveInDate ? new Date(moveInDate) : new Date(),
+                collectionMonth: collectionMonth,
+                createdAt: new Date()
+            });
+            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount}`);
+        } else {
+            console.log(`[RENT ALREADY EXISTS] Skipped duplicate rent generation for ${loginId} in ${collectionMonth}`);
+        }
 
         // Log notification for super admin
         console.log(`[TENANT ASSIGNED] ${name} (${loginId}) assigned to ${rentPropertyName}, Room ${roomNo}`);
-        console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount}`);
 
         // Send email to tenant with loginId, tempPassword and digital check-in link (non-blocking)
         const baseWebUrl = process.env.DIGITAL_CHECKIN_URL || process.env.APP_BASE_URL || process.env.APP_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
@@ -418,7 +427,7 @@ exports.assignTenant = async (req, res) => {
 </html>
                 `;
                 const text = `Tenant account created.\nProperty: ${assignedPropertyTitle || property.title || '-'}\nRoom Number: ${roomNo || '-'}\nBed Number: ${bedNo || '-'}\nRent: INR ${parseInt(agreedRent || 0, 10)}\nSecurity Deposit Total: INR ${depositTotal}\nSecurity Deposit Paid: INR ${depositPaid}\nSecurity Deposit Balance: INR ${depositBalance}\nLogin ID: ${tenant.loginId}\nPassword: ${tenant.tempPassword}\nDigital Check-In: ${tenantCheckinLink}`;
-                
+
                 await mailer.sendMail(tenant.email, subject, text, html);
                 console.log(`[MAIL] Email sent successfully to ${tenant.email}`);
             }
@@ -616,11 +625,11 @@ exports.getTenantsByOwner = async (req, res) => {
                 ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : [])
             ]
         })
-        .select(ALWAYS_EXCLUDED_PROJECTION)
-        .populate('property', 'title roomType locationCode owner ownerLoginId')
-        .populate('user', 'name email phone')
-        .sort({ createdAt: -1 })
-        .lean();
+            .select(ALWAYS_EXCLUDED_PROJECTION)
+            .populate('property', 'title roomType locationCode owner ownerLoginId')
+            .populate('user', 'name email phone')
+            .sort({ createdAt: -1 })
+            .lean();
 
         // Reproduce the original ordering (direct matches first, then legacy-only matches).
         // Each bucket is a subsequence of an already createdAt-desc-sorted array, so it

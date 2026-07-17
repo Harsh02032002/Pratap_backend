@@ -1341,6 +1341,13 @@ exports.requestCashPayment = async (req, res) => {
       console.warn("cash request owner email failed:", e.message);
     }
 
+    try {
+      const sseManager = require('../utils/sseManager');
+      sseManager.notifyOwner(ownerId, 'CASH_REQUEST_NEW', { rentId: rent._id, tenantLoginId: loginId, tenantName: rent.tenantName });
+    } catch (e) {
+      console.warn("sse push failed:", e.message);
+    }
+
     return res.json({
       success: true,
       message: "Cash payment request sent to owner",

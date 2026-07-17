@@ -521,7 +521,7 @@ async function listPaymentsHandler(req, res) {
       .sort({ paymentDate: -1 })
       .limit(limit)
       .populate('tenantId', 'name roomNo phone email propertyId')
-      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount electricityBill totalPenalty totalDue')
+      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
     const shaped = payments.map(p => ({
@@ -545,6 +545,7 @@ async function listPaymentsHandler(req, res) {
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
+      invoiceStatus: p.invoiceId?.status || '',   // actual DB status: PAID / PARTIAL / PENDING
       status: 'received',
     }));
 

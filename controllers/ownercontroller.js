@@ -121,7 +121,7 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
 
         // 1. Get rooms count and total beds from Room collection
         let rooms = await Room.find({ property: propertyId, isDeleted: { $ne: true } }).lean();
-        
+
         // Auto-generate rooms if none exist in the database for this property
         if (rooms.length === 0 && property.roomTypes && property.roomTypes.length > 0) {
             console.log(`🏠 Auto-Generating rooms for property "${property.title}" from roomTypes...`);
@@ -131,7 +131,7 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
                 const numRooms = parseInt(rt.totalRooms || 0, 10);
                 const occupancy = parseInt(rt.occupancy || 1, 10);
                 const price = Number(rt.pricePerBed || rt.pricePerRoom || 0);
-                
+
                 for (let i = 0; i < numRooms; i++) {
                     const title = String(100 + roomIndex);
                     newRooms.push({
@@ -155,7 +155,7 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
                 console.log(`✅ Successfully generated ${rooms.length} rooms for property "${property.title}"`);
             }
         }
-        
+
         let totalRooms = 0;
         let totalBeds = 0;
 
@@ -173,8 +173,8 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
         }
 
         // 2. Get active/pending tenants count from Tenant collection
-        const tenants = await Tenant.find({ 
-            property: propertyId, 
+        const tenants = await Tenant.find({
+            property: propertyId,
             status: { $in: ['active', 'pending'] },
             isDeleted: { $ne: true }
         }).lean();
@@ -200,7 +200,7 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
         // 3. Update Property document
         await Property.updateOne(
             { _id: propertyId },
-            { 
+            {
                 $set: {
                     roomCount: totalRooms,
                     bedCount: totalBeds,
@@ -252,7 +252,7 @@ exports.getOwnerProperties = async (req, res) => {
         const ownerLoginId = req.params.loginId;
         await exports.healOwnerProperties(ownerLoginId);
         const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } });
-        
+
         const syncedProperties = [];
         for (const prop of properties) {
             // Use existing stored occupancy fields; avoid blocking sync on each request.
@@ -332,7 +332,7 @@ exports.getOwnerTenants = async (req, res) => {
 exports.getOwnerRent = async (req, res) => {
     try {
         const ownerLoginId = String(req.params.loginId || '').trim().toUpperCase();
-        
+
         // Find properties owned by this owner
         const Property = require('../models/Property');
         const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).select('_id');
@@ -480,58 +480,58 @@ exports.getAllOwners = async (req, res) => {
                 Owner.updateOne(
                     { loginId: o.loginId },
                     { $set: { isActive: true, 'kyc.status': 'verified', 'kyc.verifiedAt': o.kyc?.verifiedAt || new Date() } }
-                ).catch(() => {});
+                ).catch(() => { });
             }
 
             return {
-            ...o,
-            isActive: shouldBeActive,
-            propertyTitle: primaryPropertyMap[o.loginId]?.title || '',
-            propertyName: primaryPropertyMap[o.loginId]?.title || '',
-            propertyLocationCode: primaryPropertyMap[o.loginId]?.locationCode || '',
-            checkinDob: o.checkinDob || checkinMap[o.loginId]?.ownerProfile?.dob || '',
-            checkinEmail: o.checkinEmail || checkinMap[o.loginId]?.ownerProfile?.email || o.email || '',
-            checkinPhone: o.checkinPhone || checkinMap[o.loginId]?.ownerProfile?.phone || o.phone || '',
-            checkinAddress: o.checkinAddress || checkinMap[o.loginId]?.ownerProfile?.address || o.address || '',
-            checkinArea: o.checkinArea || checkinMap[o.loginId]?.ownerProfile?.area || o.locationCode || o.profile?.locationCode || '',
-            checkinPassword: o.checkinPassword || o.credentials?.password || '',
-            checkinAccountHolderName: o.checkinAccountHolderName || checkinMap[o.loginId]?.ownerProfile?.payment?.accountHolderName || o.profile?.accountHolderName || '',
-            checkinBankAccountNumber: o.checkinBankAccountNumber || checkinMap[o.loginId]?.ownerProfile?.payment?.bankAccountNumber || o.accountNumber || o.profile?.accountNumber || '',
-            checkinIfscCode: o.checkinIfscCode || checkinMap[o.loginId]?.ownerProfile?.payment?.ifscCode || o.ifscCode || o.profile?.ifscCode || '',
-            checkinBankName: o.checkinBankName || checkinMap[o.loginId]?.ownerProfile?.payment?.bankName || o.bankName || o.profile?.bankName || '',
-            checkinBranchName: o.checkinBranchName || checkinMap[o.loginId]?.ownerProfile?.payment?.branchName || o.branchName || o.profile?.branchName || '',
-            checkinUpiId: o.checkinUpiId || checkinMap[o.loginId]?.ownerProfile?.payment?.upiId || o.profile?.upiId || '',
-            checkinAadhaarLinkedPhone: o.checkinAadhaarLinkedPhone || checkinMap[o.loginId]?.ownerKyc?.aadhaarLinkedPhone || o.kyc?.aadhaarLinkedPhone || '',
-            checkinAadhaarNumber: o.checkinAadhaarNumber || checkinMap[o.loginId]?.ownerKyc?.aadhaarNumber || o.kyc?.aadharNumber || o.kyc?.aadhaarNumber || '',
-            checkinOtpVerified: !!checkinMap[o.loginId]?.ownerKyc?.otpVerified,
-            checkinSubmittedAt: checkinMap[o.loginId]?.ownerSubmittedAt || null,
-            // Merge profile data to top level (profile takes priority, then top-level field)
-            name: o.profile?.name || o.name || 'Unknown',
-            email: o.profile?.email || o.email || o.checkinEmail || (checkinMap[o.loginId]?.ownerProfile?.email || ''),
-            phone: o.profile?.phone || o.phone || o.checkinPhone || (checkinMap[o.loginId]?.ownerProfile?.phone || ''),
-            address: o.profile?.address || o.address || o.checkinAddress || (checkinMap[o.loginId]?.ownerProfile?.address || ''),
-            locationCode: o.profile?.locationCode || o.locationCode || o.checkinArea || (checkinMap[o.loginId]?.ownerProfile?.area || ''),
-            bankName: o.profile?.bankName || o.checkinBankName || '',
-            accountNumber: o.profile?.accountNumber || o.accountNumber || o.checkinBankAccountNumber || (checkinMap[o.loginId]?.ownerProfile?.payment?.bankAccountNumber || ''),
-            ifscCode: o.profile?.ifscCode || o.ifscCode || o.checkinIfscCode || (checkinMap[o.loginId]?.ownerProfile?.payment?.ifscCode || ''),
-            branchName: o.profile?.branchName || o.branchName || o.checkinBranchName || '',
-            aadharNumber: o.kyc?.aadharNumber || o.kyc?.aadhaarNumber || o.checkinAadhaarNumber || '',
-            kycStatus: kycComplete ? 'verified' : (o.kyc?.status || 'pending'),
-            documentImage: o.kyc?.documentImage || '',
-            profileFilled: !!o.profileFilled,
-            password: o.credentials?.password || o.checkinPassword || '',
-            bankLockedByVisit: !!o.bankLockedByVisit,
-            roomCount: Number(o.roomCount ?? primaryPropertyMap[o.loginId]?.roomCount ?? 0),
-            bedCount: Number(o.bedCount ?? primaryPropertyMap[o.loginId]?.bedCount ?? 0),
-            vacantRooms: Number(o.vacantRooms ?? primaryPropertyMap[o.loginId]?.vacantRooms ?? 0),
-            vacantBeds: Number(o.vacantBeds ?? primaryPropertyMap[o.loginId]?.vacantBeds ?? 0),
-            occupiedRooms: Number(o.occupiedRooms ?? primaryPropertyMap[o.loginId]?.occupiedRooms ?? 0),
-            occupiedBeds: Number(o.occupiedBeds ?? primaryPropertyMap[o.loginId]?.occupiedBeds ?? 0),
-            roomInventory: Array.isArray(o.roomInventory) ? o.roomInventory : [],
-            approvedVisitId: approvedPropertyMap[o.loginId]?.visitId || '',
-            isLiveOnWebsite: Boolean(approvedPropertyMap[o.loginId]?.isLiveOnWebsite),
-            websiteStatus: approvedPropertyMap[o.loginId]?.status || '',
-            city: o.profile?.city || o.city || primaryPropertyMap[o.loginId]?.city || ''
+                ...o,
+                isActive: shouldBeActive,
+                propertyTitle: primaryPropertyMap[o.loginId]?.title || '',
+                propertyName: primaryPropertyMap[o.loginId]?.title || '',
+                propertyLocationCode: primaryPropertyMap[o.loginId]?.locationCode || '',
+                checkinDob: o.checkinDob || checkinMap[o.loginId]?.ownerProfile?.dob || '',
+                checkinEmail: o.checkinEmail || checkinMap[o.loginId]?.ownerProfile?.email || o.email || '',
+                checkinPhone: o.checkinPhone || checkinMap[o.loginId]?.ownerProfile?.phone || o.phone || '',
+                checkinAddress: o.checkinAddress || checkinMap[o.loginId]?.ownerProfile?.address || o.address || '',
+                checkinArea: o.checkinArea || checkinMap[o.loginId]?.ownerProfile?.area || o.locationCode || o.profile?.locationCode || '',
+                checkinPassword: o.checkinPassword || o.credentials?.password || '',
+                checkinAccountHolderName: o.checkinAccountHolderName || checkinMap[o.loginId]?.ownerProfile?.payment?.accountHolderName || o.profile?.accountHolderName || '',
+                checkinBankAccountNumber: o.checkinBankAccountNumber || checkinMap[o.loginId]?.ownerProfile?.payment?.bankAccountNumber || o.accountNumber || o.profile?.accountNumber || '',
+                checkinIfscCode: o.checkinIfscCode || checkinMap[o.loginId]?.ownerProfile?.payment?.ifscCode || o.ifscCode || o.profile?.ifscCode || '',
+                checkinBankName: o.checkinBankName || checkinMap[o.loginId]?.ownerProfile?.payment?.bankName || o.bankName || o.profile?.bankName || '',
+                checkinBranchName: o.checkinBranchName || checkinMap[o.loginId]?.ownerProfile?.payment?.branchName || o.branchName || o.profile?.branchName || '',
+                checkinUpiId: o.checkinUpiId || checkinMap[o.loginId]?.ownerProfile?.payment?.upiId || o.profile?.upiId || '',
+                checkinAadhaarLinkedPhone: o.checkinAadhaarLinkedPhone || checkinMap[o.loginId]?.ownerKyc?.aadhaarLinkedPhone || o.kyc?.aadhaarLinkedPhone || '',
+                checkinAadhaarNumber: o.checkinAadhaarNumber || checkinMap[o.loginId]?.ownerKyc?.aadhaarNumber || o.kyc?.aadharNumber || o.kyc?.aadhaarNumber || '',
+                checkinOtpVerified: !!checkinMap[o.loginId]?.ownerKyc?.otpVerified,
+                checkinSubmittedAt: checkinMap[o.loginId]?.ownerSubmittedAt || null,
+                // Merge profile data to top level (profile takes priority, then top-level field)
+                name: o.profile?.name || o.name || 'Unknown',
+                email: o.profile?.email || o.email || o.checkinEmail || (checkinMap[o.loginId]?.ownerProfile?.email || ''),
+                phone: o.profile?.phone || o.phone || o.checkinPhone || (checkinMap[o.loginId]?.ownerProfile?.phone || ''),
+                address: o.profile?.address || o.address || o.checkinAddress || (checkinMap[o.loginId]?.ownerProfile?.address || ''),
+                locationCode: o.profile?.locationCode || o.locationCode || o.checkinArea || (checkinMap[o.loginId]?.ownerProfile?.area || ''),
+                bankName: o.profile?.bankName || o.checkinBankName || '',
+                accountNumber: o.profile?.accountNumber || o.accountNumber || o.checkinBankAccountNumber || (checkinMap[o.loginId]?.ownerProfile?.payment?.bankAccountNumber || ''),
+                ifscCode: o.profile?.ifscCode || o.ifscCode || o.checkinIfscCode || (checkinMap[o.loginId]?.ownerProfile?.payment?.ifscCode || ''),
+                branchName: o.profile?.branchName || o.branchName || o.checkinBranchName || '',
+                aadharNumber: o.kyc?.aadharNumber || o.kyc?.aadhaarNumber || o.checkinAadhaarNumber || '',
+                kycStatus: kycComplete ? 'verified' : (o.kyc?.status || 'pending'),
+                documentImage: o.kyc?.documentImage || '',
+                profileFilled: !!o.profileFilled,
+                password: o.credentials?.password || o.checkinPassword || '',
+                bankLockedByVisit: !!o.bankLockedByVisit,
+                roomCount: Number(o.roomCount ?? primaryPropertyMap[o.loginId]?.roomCount ?? 0),
+                bedCount: Number(o.bedCount ?? primaryPropertyMap[o.loginId]?.bedCount ?? 0),
+                vacantRooms: Number(o.vacantRooms ?? primaryPropertyMap[o.loginId]?.vacantRooms ?? 0),
+                vacantBeds: Number(o.vacantBeds ?? primaryPropertyMap[o.loginId]?.vacantBeds ?? 0),
+                occupiedRooms: Number(o.occupiedRooms ?? primaryPropertyMap[o.loginId]?.occupiedRooms ?? 0),
+                occupiedBeds: Number(o.occupiedBeds ?? primaryPropertyMap[o.loginId]?.occupiedBeds ?? 0),
+                roomInventory: Array.isArray(o.roomInventory) ? o.roomInventory : [],
+                approvedVisitId: approvedPropertyMap[o.loginId]?.visitId || '',
+                isLiveOnWebsite: Boolean(approvedPropertyMap[o.loginId]?.isLiveOnWebsite),
+                websiteStatus: approvedPropertyMap[o.loginId]?.status || '',
+                city: o.profile?.city || o.city || primaryPropertyMap[o.loginId]?.city || ''
             };
         });
 
@@ -659,9 +659,9 @@ exports.approveOwner = async (req, res) => {
                 const mailer = require('../utils/mailer');
                 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
                 const area = owner.locationCode || owner.area || '';
-                
+
                 const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(password)}`;
-                
+
                 await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
                 console.log(`✉️ Direct KYC link sent to ${owner.email} for newly approved Owner ${owner.loginId}`);
             } catch (mailErr) {
@@ -782,7 +782,7 @@ exports.addTenantToProperty = async (req, res) => {
         const { ownerLoginId, propertyId } = req.params;
         const {
             name, phone, email, roomNo, bedNo, moveInDate, agreedRent,
-            dob, gender, building, floor, rentAgreementType, paymentFrequency, 
+            dob, gender, building, floor, rentAgreementType, paymentFrequency,
             additional, idProof,
             securityDepositTotal, securityDepositPaid, securityDepositBalance,
             electricityCharge, maintenanceCharge, electricityUnitCost
@@ -847,11 +847,11 @@ exports.addTenantToProperty = async (req, res) => {
         let tenantError = null;
 
         const mockRes = {
-            status: function(code) {
+            status: function (code) {
                 this.statusCode = code;
                 return this;
             },
-            json: function(data) {
+            json: function (data) {
                 tenantResponse = { statusCode: this.statusCode || 200, data };
                 return this;
             }
@@ -859,16 +859,16 @@ exports.addTenantToProperty = async (req, res) => {
 
         // Import and call tenant assignment
         const tenantController = require('./tenantController');
-        
+
         // Create a custom response handler
         await new Promise((resolve, reject) => {
             const originalJson = mockRes.json;
-            mockRes.json = function(data) {
+            mockRes.json = function (data) {
                 tenantResponse = { statusCode: this.statusCode || 200, data };
                 resolve();
                 return this;
             };
-            mockRes.status = function(code) {
+            mockRes.status = function (code) {
                 this.statusCode = code;
                 return this;
             };
@@ -962,3 +962,14 @@ exports.getPropertyTenants = async (req, res) => {
         });
     }
 };
+
+// --- SSE handler ---
+const sseManager = require('../utils/sseManager');
+exports.sseStream = (req, res) => {
+    const { loginId } = req.params;
+    if (!loginId) {
+        return res.status(400).end();
+    }
+    sseManager.addClient(req, res, loginId);
+};
+
