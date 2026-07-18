@@ -243,23 +243,29 @@ async function recordPayment(invoiceId, paymentData, performedBy) {
     const config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
     const penalties = calculatePenalties(invoice, config);
 
-    // Use rent-specific tracker as ceiling so penalty payments don't reduce rent capacity
+    // Safe tracker metrics
     const alreadyRentPaid = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
+    const alreadyPenaltyPaid = invoice.penaltyPaidAmount ?? 0;
 
     let penaltyPaid = 0;
     let rentPaid = 0;
     let remaining = amount;
 
+    // 1. Pay off remaining penalties first
     if (penalties.totalPenalty > 0 && remaining > 0) {
-      penaltyPaid = Math.min(remaining, penalties.totalPenalty);
+      penaltyPaid = Math.max(0, Math.min(remaining, penalties.totalPenalty - alreadyPenaltyPaid));
       remaining -= penaltyPaid;
     }
+
+    // 2. Pay off remaining rent
     if (remaining > 0) {
-      rentPaid = Math.min(remaining, invoice.rentAmount - alreadyRentPaid);
+      rentPaid = Math.max(0, Math.min(remaining, invoice.rentAmount - alreadyRentPaid));
       remaining -= rentPaid;
     }
 
-    const newTotalPaid = (invoice.paidAmount || 0) + rentPaid + penaltyPaid;
+    // Whatever `remaining` cash is left (e.g. Electricity cash) MUST be included in the total!
+    // The master tracker perfectly absorbs Rent + Penalty + Electricity cash.
+    const newTotalPaid = (invoice.paidAmount || 0) + rentPaid + penaltyPaid + remaining;
     const newOutstanding = Math.max(0, invoice.totalDue - newTotalPaid);
     const isFullyPaid = newOutstanding <= 0;
     const isPartial = !isFullyPaid && newTotalPaid > 0;
@@ -283,9 +289,9 @@ async function recordPayment(invoiceId, paymentData, performedBy) {
 
     await RentInvoice.findByIdAndUpdate(invoiceId, {
       $inc: {
-        paidAmount: rentPaid + penaltyPaid, // total paid (display)
-        rentPaidAmount: rentPaid,               // rent-only tracker
-        penaltyPaidAmount: penaltyPaid,            // penalty-only tracker
+        paidAmount: amount, // definitively add ALL physical cash directly to the master tracker!
+        rentPaidAmount: rentPaid,
+        penaltyPaidAmount: penaltyPaid,
       },
       $set: {
         outstandingAmount: newOutstanding,
