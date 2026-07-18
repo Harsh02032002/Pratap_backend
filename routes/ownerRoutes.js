@@ -537,9 +537,9 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         // 7. Collection Breakdown — scoped to selected billing month only
         // Fetch ALL invoices for this billingMonth (any status) to compute complete picture
         const RentInvoiceModel = require('../models/RentInvoice');
-        let rentCollected = 0;
+        let rentCollected = txTotal + enquiriesTotal; // include initial bookings
         let electricityCollected = 0;
-        let penaltyAccrued = 0; // total penalties GENERATED this month (accrued = generated, not just paid)
+        let penaltyCollected = 0;
 
         if (tenants && tenants.length > 0) {
             const allMonthInvoices = await RentInvoiceModel.find({
@@ -548,34 +548,34 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             }).lean();
 
             allMonthInvoices.forEach(inv => {
-                // Rent actually collected = what was physically paid
                 rentCollected += (inv.rentPaidAmount || 0);
 
-                // Electricity collected = billed amount on invoices where payment was received
-                if (['PAID', 'PARTIAL'].includes(inv.status)) {
+                if (['PAID', 'PARTIAL'].includes(String(inv.status).toUpperCase())) {
+                    // Electricity strictly tied to billed utilities of paid invoices
                     electricityCollected += (inv.electricityBill || 0);
-                }
 
-                // Penalties accrued = total penalty GENERATED this month (whether paid or not)
-                penaltyAccrued += (inv.totalPenalty || 0);
+                    // Option B Implementation:
+                    // Using totalPenalty directly (since penaltyPaidAmount numbers are corrupted in the system)
+                    // but safely wrapped in this PAID check so unpaid tenant debt does not inflate the revenue!
+                    penaltyCollected += (inv.totalPenalty || 0);
+                }
             });
         }
 
-        // Add online booking/enquiry collections to rent bucket
-        rentCollected += txTotal + enquiriesTotal;
-
-        const totalCat = (rentCollected + penaltyAccrued + electricityCollected) || 1; // prevent div/0
+        // The absolute strict total cash collected this month derived directly from ledger state
+        const exactTenantCollected = rentCollected + penaltyCollected + electricityCollected;
+        const totalCat = exactTenantCollected || 1; // prevent div/0
 
         const collectionBreakdown = {
             rent: { amount: rentCollected, percent: Math.round((rentCollected / totalCat) * 100) },
-            penalty: { amount: penaltyAccrued, percent: Math.round((penaltyAccrued / totalCat) * 100) },
+            penalty: { amount: penaltyCollected, percent: Math.round((penaltyCollected / totalCat) * 100) },
             electricity: { amount: electricityCollected, percent: Math.round((electricityCollected / totalCat) * 100) }
         };
 
         return res.json({
             success: true,
             summaryMetrics: {
-                tenantCollected,
+                tenantCollected: exactTenantCollected,
                 ownerPayouts,
                 pendingPayouts,
                 tenantDues

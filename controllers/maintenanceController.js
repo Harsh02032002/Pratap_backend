@@ -55,7 +55,13 @@ exports.updateTaskStatus = async (req, res) => {
 exports.assignStaff = async (req, res) => {
     try {
         const { id } = req.params;
-        const { assignedStaffId, assignedStaffName } = req.body;
+        let { assignedStaffId, assignedStaffName } = req.body;
+
+        // Prevent MongoDB CastError when UI sends empty string to unassign
+        if (assignedStaffId === "" || !assignedStaffId) {
+            assignedStaffId = null;
+        }
+
         const task = await MaintenanceTask.findByIdAndUpdate(
             id,
             {
