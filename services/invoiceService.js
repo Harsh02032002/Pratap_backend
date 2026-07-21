@@ -93,6 +93,22 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
 
   for (const tenant of tenants) {
     try {
+      const tenantDoc = await Tenant.findById(tenant.tenantId).select('name email phone moveInDate').lean();
+      if (tenantDoc) {
+        const moveInDateRaw = tenantDoc.moveInDate || tenantDoc.createdAt;
+        if (moveInDateRaw) {
+          const d = new Date(moveInDateRaw);
+          if (!isNaN(d.getTime())) {
+            const utcMonth = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+            const localMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            if (utcMonth === billingMonth || localMonth === billingMonth || String(moveInDateRaw).startsWith(billingMonth)) {
+              results.skipped++;
+              continue;
+            }
+          }
+        }
+      }
+
       const existing = await RentInvoice.findOne({
         ownerId,
         tenantId: tenant.tenantId,
@@ -107,8 +123,6 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
       const dueDate = new Date(dueYear, dueMonth, dueDay);
 
       const invoiceNumber = `INV-${billingMonth}-${String(tenant.tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-
-      const tenantDoc = await Tenant.findById(tenant.tenantId).select('name email phone').lean();
 
       const invoice = new RentInvoice({
         invoiceNumber,

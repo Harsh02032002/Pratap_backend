@@ -768,32 +768,44 @@ async function getTenantInvoiceSummary(req, res) {
     // ─── NEW: Sync cash payment status from Rent model ───────────────────────
     // The RentInvoice model doesn't have cashRequestStatus, but Rent model does.
     // We need to pull the cash state from Rent to show accurate status in tenant UI.
-    // In getTenantInvoiceSummary, replace ye section:
+    const Rent = require('../models/Rent');
+    const allRents = await Rent.find({ tenantLoginId: tenantLoginId })
+      .select('collectionMonth cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
+      .lean();
+
+    const rentMap = {};
+    for (const r of allRents) {
+      if (r.collectionMonth) rentMap[r.collectionMonth] = r;
+    }
+
+    // Hydrate ALL invoices
+    for (const inv of invoices) {
+      const r = rentMap[inv.billingMonth];
+      if (r) {
+        inv.cashRequestStatus = r.cashRequestStatus || 'none';
+        inv.cashOtpHash = r.cashOtpHash;
+        inv.cashOtpExpiry = r.cashOtpExpiry;
+        inv.cashRejectedAt = r.cashRejectedAt;
+        inv.cashRejectedReason = r.cashRejectedReason;
+        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+        // VERY IMPORTANT: Ensure frontend `targetRentObj._id` maps back to Rent `_id` 
+        // if this was requested by cash endpoints which expect `Rent.findById()`.
+        inv._id = r._id;
+      } else {
+        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+      }
+    }
 
     if (liveInvoice) {
-      const Rent = require('../models/Rent');
-
-      // Try current month first
-      let rentRecord = await Rent.findOne({
-        tenantLoginId: tenantLoginId,
-        collectionMonth: liveInvoice.billingMonth
-      }).select('cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason').lean();
-
-      // If not found, get latest Rent record for this tenant
-      if (!rentRecord) {
-        rentRecord = await Rent.findOne({ tenantLoginId: tenantLoginId })
-          .sort({ collectionMonth: -1 })
-          .select('cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason').lean();
-      }
-
-      if (rentRecord) {
-        liveInvoice.cashRequestStatus = rentRecord.cashRequestStatus || 'none';
-        liveInvoice.cashOtpHash = rentRecord.cashOtpHash;
-        liveInvoice.cashOtpExpiry = rentRecord.cashOtpExpiry;
-        liveInvoice.cashRejectedAt = rentRecord.cashRejectedAt;
-        liveInvoice.cashRejectedReason = rentRecord.cashRejectedReason;
-        // Map paymentStatus for frontend backward-compatibility
-        liveInvoice.paymentStatus = rentRecord.paymentStatus || (String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending');
+      const lr = rentMap[liveInvoice.billingMonth];
+      if (lr) {
+        liveInvoice.cashRequestStatus = lr.cashRequestStatus || 'none';
+        liveInvoice.cashOtpHash = lr.cashOtpHash;
+        liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
+        liveInvoice.cashRejectedAt = lr.cashRejectedAt;
+        liveInvoice.cashRejectedReason = lr.cashRejectedReason;
+        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+        liveInvoice._id = lr._id;
       } else {
         liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
       }

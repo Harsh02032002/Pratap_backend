@@ -1179,6 +1179,7 @@ exports.requestCashPayment = async (req, res) => {
       tenantName,
       tenantEmail,
       tenantPhone,
+      rentId
     } = req.body || {};
 
     if (!tenantLoginId || !ownerLoginId || !amount) {
@@ -1203,11 +1204,16 @@ exports.requestCashPayment = async (req, res) => {
 
     const tenantProfile = await getTenantProfileByLoginId(loginId);
 
-    let rent = await Rent.findOne({
-      tenantLoginId: loginId,
-      ownerLoginId: ownerId,
-      collectionMonth: month,
-    }).sort({ createdAt: -1 });
+    let rent;
+    if (rentId) {
+      rent = await Rent.findById(rentId);
+    } else {
+      rent = await Rent.findOne({
+        tenantLoginId: loginId,
+        ownerLoginId: ownerId,
+        collectionMonth: month,
+      }).sort({ createdAt: -1 });
+    }
 
     if (!rent) {
       rent = await Rent.create({
@@ -1294,13 +1300,18 @@ exports.requestCashPayment = async (req, res) => {
       loginId,
     );
 
+    const isPendingPast = rent.collectionMonth && rent.collectionMonth !== new Date().toISOString().slice(0, 7);
+    const monthUi = rent.collectionMonth ? new Date(`${rent.collectionMonth}-01`).toLocaleString('en-US', { month: 'long', year: 'numeric' }) : "Rent";
+    const notificationTitle = isPendingPast ? `Pending Rent Cash Payment Request (${monthUi})` : "Cash Payment Request";
+    const emailSubject = isPendingPast ? `RoomHy Pending Rent Cash Payment Request (${monthUi})` : "RoomHy Cash Payment Request";
+
     await Notification.create({
       toLoginId: ownerId,
       from: loginId,
       type: "cash_payment_requested",
       meta: {
-        title: "Cash Payment Request",
-        message: `${tenantName || loginId} requested cash payment collection`,
+        title: notificationTitle,
+        message: `${tenantName || loginId} requested cash payment collection for ${monthUi}`,
         rentId: String(rent._id),
         tenantLoginId: loginId,
         amount: rentAmount,
@@ -1542,9 +1553,13 @@ exports.approveCashRequest = async (req, res) => {
         .json({ success: false, message: "Owner email missing in profile" });
     }
 
+    const isPendingPast = rent.collectionMonth && rent.collectionMonth !== new Date().toISOString().slice(0, 7);
+    const monthUi = rent.collectionMonth ? new Date(`${rent.collectionMonth}-01`).toLocaleString('en-US', { month: 'long', year: 'numeric' }) : "Rent";
+    const emailSubject = isPendingPast ? `RoomHy Pending Cash Payment Verification OTP (${monthUi})` : "RoomHy Cash Payment Verification OTP";
+
     const html = `
             <div style="font-family:Arial,sans-serif;">
-                <h3>RoomHy Cash Payment Verification OTP</h3>
+                <h3>${emailSubject}</h3>
                 <p>Share this OTP with the tenant after receiving cash.</p>
                 <p style="font-size:26px;font-weight:700;letter-spacing:3px;">${otp}</p>
                 <p style="font-size:12px;color:#666;">Expires in 5 minutes. Single use only.</p>
@@ -1552,7 +1567,7 @@ exports.approveCashRequest = async (req, res) => {
         `;
     await sendMail(
       ownerEmail,
-      "RoomHy Cash Payment Verification OTP",
+      emailSubject,
       "",
       html,
     );
@@ -1642,11 +1657,15 @@ exports.rejectCashRequest = async (req, res) => {
         )?.email ||
         "";
       if (tenantEmail) {
+        const isPendingPast = rent.collectionMonth && rent.collectionMonth !== new Date().toISOString().slice(0, 7);
+        const monthUi = rent.collectionMonth ? new Date(`${rent.collectionMonth}-01`).toLocaleString('en-US', { month: 'long', year: 'numeric' }) : "Rent";
+        const emailSubject = isPendingPast ? `RoomHy Pending Cash Payment Request Rejected (${monthUi})` : "RoomHy Cash Payment Request Rejected";
+
         await sendMail(
           tenantEmail,
-          "RoomHy Cash Payment Request Rejected",
+          emailSubject,
           reason || "Your cash payment request was rejected by the owner.",
-          `<div style="font-family:Arial,sans-serif;"><h3>Cash Payment Request Rejected</h3><p>${reason || "Your cash payment request was rejected by the owner."}</p></div>`,
+          `<div style="font-family:Arial,sans-serif;"><h3>${emailSubject}</h3><p>${reason || "Your cash payment request was rejected by the owner."}</p></div>`,
         );
       }
     } catch (_) { }
@@ -1673,7 +1692,7 @@ exports.rejectCashRequest = async (req, res) => {
 // Tenant verifies cash OTP -> mark payment paid
 exports.verifyCashPaymentOtp = async (req, res) => {
   try {
-    const { tenantLoginId, otp } = req.body || {};
+    const { tenantLoginId, otp, rentId } = req.body || {};
     if (!tenantLoginId || !otp) {
       return res
         .status(400)
@@ -1683,10 +1702,19 @@ exports.verifyCashPaymentOtp = async (req, res) => {
         });
     }
     const loginId = String(tenantLoginId).trim().toUpperCase();
-    const rent = await Rent.findOne({
-      tenantLoginId: loginId,
-      cashRequestStatus: { $in: ["owner_approved", "otp_sent"] },
-    }).sort({ updatedAt: -1 });
+
+    let rent;
+    if (rentId) {
+      rent = await Rent.findById(rentId);
+      if (rent && !["owner_approved", "otp_sent"].includes(String(rent.cashRequestStatus).toLowerCase())) {
+        rent = null;
+      }
+    } else {
+      rent = await Rent.findOne({
+        tenantLoginId: loginId,
+        cashRequestStatus: { $in: ["owner_approved", "otp_sent"] },
+      }).sort({ updatedAt: -1 });
+    }
 
     if (!rent)
       return res
@@ -1755,8 +1783,9 @@ exports.verifyCashPaymentOtp = async (req, res) => {
         const invoiceRentAmount = Number(
           invoice.rentAmount || rent.rentAmount || 1500,
         );
-        // Correctly split out the penalty based on what was actually paid
-        const truePenaltyAmount = Math.max(0, invoicePaidAmount - invoiceRentAmount);
+        const invoiceElectricity = Number(invoice.electricityBill || 0);
+        // Correctly split out the penalty based on what was actually paid, discounting the electricity bill
+        const truePenaltyAmount = Math.max(0, invoicePaidAmount - invoiceRentAmount - invoiceElectricity);
 
         await RentInvoice.findByIdAndUpdate(invoice._id, {
           $set: {
@@ -1822,9 +1851,13 @@ exports.verifyCashPaymentOtp = async (req, res) => {
         (await Tenant.findOne({ loginId }).select("email").lean())?.email ||
         "";
       if (tenantEmail) {
+        const isPendingPast = rent.collectionMonth && rent.collectionMonth !== new Date().toISOString().slice(0, 7);
+        const monthUi = rent.collectionMonth ? new Date(`${rent.collectionMonth}-01`).toLocaleString('en-US', { month: 'long', year: 'numeric' }) : "Rent";
+        const emailSubject = isPendingPast ? `RoomHy Pending Cash Payment Verified (${monthUi})` : "RoomHy Cash Payment Verified";
+
         await sendMail(
           tenantEmail,
-          "RoomHy Cash Payment Verified",
+          emailSubject,
           "Your cash rent payment has been verified successfully.",
           `<div style="font-family:Arial,sans-serif;"><h3>Your cash rent payment has been verified successfully.</h3></div>`,
         );
