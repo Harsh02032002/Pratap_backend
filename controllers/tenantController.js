@@ -183,6 +183,8 @@ exports.assignTenant = async (req, res) => {
         // Generate unique tenant login ID
         const loginId = await generateTenantId();
 
+        // DEPRECATED — moved to generateTenantCredentials (Phase 1), gated post-payment (Phase 6)
+        /*
         // Generate temporary password (8 chars: mix of alphanumeric)
         const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
 
@@ -198,6 +200,10 @@ exports.assignTenant = async (req, res) => {
             status: 'active',
             requirePasswordReset: true
         });
+        */
+
+        // Generate temporary password (8 chars hex) so the owner can see it at onboarding
+        const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
 
         // Create Tenant record
         const tenant = await Tenant.create({
@@ -226,8 +232,7 @@ exports.assignTenant = async (req, res) => {
             },
             remarks: additional?.remarks,
             loginId,
-            tempPassword, // Store for now; will be displayed once, then forgotten
-            user: user._id,
+            tempPassword, // Store plain-text so owner can view it once at onboarding
             securityDepositTotal: depositTotal,
             securityDepositPaid: depositPaid,
             securityDepositBalance: depositBalance,
@@ -245,6 +250,8 @@ exports.assignTenant = async (req, res) => {
             assignedBy: req.user ? req.user.id : (property.owner && property.owner._id ? property.owner._id : undefined),
             status: 'pending',
             kycStatus: idProof?.file ? 'submitted' : 'pending',
+            paymentLinkStatus: 'pending',
+            assignmentLocationCode: req.body.locationCode || '',
             digitalCheckin: {
                 agreementDetails: {
                     ...(accommodationType && { accommodationType }),
@@ -273,7 +280,7 @@ exports.assignTenant = async (req, res) => {
             roomObj.bedAssignments[bIndex] = {
                 tenantId: tenant._id,
                 tenantName: tenant.name,
-                tenantLoginId: tenant.loginId,
+                tenantLoginId: loginId,
                 assignedAt: new Date()
             };
             roomObj.markModified('bedAssignments');
@@ -296,6 +303,7 @@ exports.assignTenant = async (req, res) => {
                 tenantEmail: email,
                 tenantPhone: phone,
                 tenantLoginId: loginId,
+                ownerLoginId: String(ownerLoginId || property.ownerLoginId || '').toUpperCase() || undefined,
                 rentAmount: rentAmount,
                 totalDue: rentAmount,
                 paidAmount: 0,
@@ -305,7 +313,7 @@ exports.assignTenant = async (req, res) => {
                 collectionMonth: collectionMonth,
                 createdAt: new Date()
             });
-            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount}`);
+            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount} (Owner: ${rent.ownerLoginId})`);
         } else {
             console.log(`[RENT ALREADY EXISTS] Skipped duplicate rent generation for ${loginId} in ${collectionMonth}`);
         }
@@ -340,8 +348,6 @@ exports.assignTenant = async (req, res) => {
         .bill-row { display: flex; justify-content: space-between; margin-bottom: 8px; }
         .bill-label { color: #94a3b8; }
         .bill-value { font-weight: 600; color: #f8fafc; }
-        .creds-section { border-top: 1px dashed #e2e8f0; padding-top: 20px; margin-top: 20px; }
-        .login-box { background: #f1f5f9; padding: 16px; border-radius: 8px; margin: 12px 0; border: 1px solid #e2e8f0; }
         .cta-button { display: block; background: #7c3aed; color: white !important; text-align: center; padding: 14px; border-radius: 8px; text-decoration: none; font-weight: 700; margin-top: 24px; box-shadow: 0 4px 14px 0 rgba(124, 58, 237, 0.39); }
         .footer { text-align: center; margin-top: 24px; color: #94a3b8; font-size: 12px; }
     </style>
@@ -393,20 +399,6 @@ exports.assignTenant = async (req, res) => {
                 </div>
             </div>
 
-            <div class="creds-section">
-                <p style="margin-bottom: 8px; font-weight: 600; color: #1e293b;">Access Credentials:</p>
-                <div class="login-box">
-                    <div style="margin-bottom: 8px;">
-                        <span class="detail-label">Login ID:</span>
-                        <span style="font-family: monospace; font-size: 16px; font-weight: 700; margin-left: 8px; color: #1e293b;">${tenant.loginId}</span>
-                    </div>
-                    <div>
-                        <span class="detail-label">Password:</span>
-                        <span style="font-family: monospace; font-size: 16px; font-weight: 700; margin-left: 8px; color: #1e293b;">${tenant.tempPassword}</span>
-                    </div>
-                </div>
-            </div>
-
             <p style="margin-top: 20px; font-size: 13px; color: #64748b; line-height: 1.5;">
                 Please complete your profile, upload KYC documents, and e-sign the agreement to finalize your check-in:
             </p>
@@ -426,7 +418,7 @@ exports.assignTenant = async (req, res) => {
 </body>
 </html>
                 `;
-                const text = `Tenant account created.\nProperty: ${assignedPropertyTitle || property.title || '-'}\nRoom Number: ${roomNo || '-'}\nBed Number: ${bedNo || '-'}\nRent: INR ${parseInt(agreedRent || 0, 10)}\nSecurity Deposit Total: INR ${depositTotal}\nSecurity Deposit Paid: INR ${depositPaid}\nSecurity Deposit Balance: INR ${depositBalance}\nLogin ID: ${tenant.loginId}\nPassword: ${tenant.tempPassword}\nDigital Check-In: ${tenantCheckinLink}`;
+                const text = `Tenant account created.\nProperty: ${assignedPropertyTitle || property.title || '-'}\nRoom Number: ${roomNo || '-'}\nBed Number: ${bedNo || '-'}\nRent: INR ${parseInt(agreedRent || 0, 10)}\nSecurity Deposit Total: INR ${depositTotal}\nSecurity Deposit Paid: INR ${depositPaid}\nSecurity Deposit Balance: INR ${depositBalance}\nDigital Check-In: ${tenantCheckinLink}`;
 
                 await mailer.sendMail(tenant.email, subject, text, html);
                 console.log(`[MAIL] Email sent successfully to ${tenant.email}`);
@@ -451,14 +443,18 @@ exports.assignTenant = async (req, res) => {
                 console.warn('[TENANT ALLOTMENT] No phone — skipping WhatsApp');
             }
 
-            // Also send a copy to owner email (if available)
-            const ownerEmail =
-                (property.owner && property.owner.email) ||
-                (property.owner && property.owner.profile && property.owner.profile.email) ||
-                '';
-            if (ownerEmail) {
-                console.log(`[MAIL] Sending owner copy to ${ownerEmail}`);
-                await mailer.sendCredentials(ownerEmail, tenant.loginId, tenant.tempPassword, 'Tenant (Owner Copy)');
+            // Also send an assignment notification to the owner email (if available) - DEPRECATED credentials, now informational only
+            try {
+                const ownerEmail =
+                    (property.owner && property.owner.email) ||
+                    (property.owner && property.owner.profile && property.owner.profile.email) ||
+                    '';
+                if (ownerEmail) {
+                    console.log(`[MAIL] Sending owner notification to ${ownerEmail}`);
+                    await mailer.sendAssignmentNotification(ownerEmail, tenant.name, roomNo, assignedPropertyTitle || property.title);
+                }
+            } catch (ownerMailErr) {
+                console.error('[MAIL ERROR] Failed to send owner assignment notification:', ownerMailErr && ownerMailErr.message);
             }
         } catch (err) {
             console.error('[MAIL ERROR] Failed to send tenant credentials:', err && err.message);
@@ -473,7 +469,7 @@ exports.assignTenant = async (req, res) => {
                 id: tenant._id,
                 name: tenant.name,
                 loginId: tenant.loginId,
-                tempPassword: tenant.tempPassword, // Return once for display
+                tempPassword: tempPassword, // Show once to owner at onboarding time
                 phone: tenant.phone,
                 email: tenant.email,
                 property: tenant.property,
@@ -590,12 +586,63 @@ exports.getAllTenants = async (req, res) => {
             .lean();
 
         const tenantsWithDues = await enrichTenantsWithDues(tenants);
-        res.json({ success: true, tenants: tenantsWithDues });
+        res.json({ success: true, message: 'All unread notifications marked as read.' });
     } catch (error) {
-        console.error('getAllTenants error:', error);
+        console.error('markAllNotificationsRead error:', error);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
+
+/**
+ * Generate Tenant Credentials (Phase 1 extracted helper)
+ * This function handles the generation and persistence of a tenant's login ID,
+ * temporary password, and associated User record, completely decoupled from assignment.
+ * Safe to be fired later after checking payment gating.
+ * 
+ * @param {string|mongoose.Types.ObjectId} tenantId - The MongoDB _id of the Tenant
+ * @param {string} [fallbackLocationCode] - Optional fallback code preserved during initial assignment
+ * @param {Object} [opts] - Optional options
+ * @param {mongoose.ClientSession} [opts.session] - Mongoose session for transaction support
+ */
+exports.generateTenantCredentials = async (tenantId, fallbackLocationCode = '', opts = {}) => {
+    const { session } = opts;
+    const tenant = await Tenant.findById(tenantId).populate('property').session(session || null);
+    if (!tenant) throw new Error('Tenant not found');
+
+    // Idempotency check: abort if this tenant is already fully credentialed
+    if (tenant.user && tenant.loginId) {
+        return { tenant, user: tenant.user, loginId: tenant.loginId, tempPassword: tenant.tempPassword };
+    }
+
+    // Pre-existing loginId from assignment, or generate anew if legacy UI bypassed it
+    const loginId = tenant.loginId || await generateTenantId();
+    const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
+
+    // Exact parity prioritizing dynamically populated property code, then explicit param, then saved DB fallback
+    const propCode = tenant.property ? tenant.property.locationCode : '';
+    const effectiveLocationCode = propCode || String(fallbackLocationCode || tenant.assignmentLocationCode || '').toUpperCase() || 'GEN';
+
+    // User.create with array form returns array — required for session support
+    const [user] = await User.create([{
+        name: tenant.name,
+        email: tenant.email,
+        phone: tenant.phone,
+        password: tempPassword, // Hashed by User model pre-save hook
+        role: 'tenant',
+        loginId,
+        locationCode: effectiveLocationCode,
+        status: 'active',
+        requirePasswordReset: true
+    }], session ? { session } : {});
+
+    tenant.loginId = loginId;
+    tenant.tempPassword = tempPassword;
+    tenant.user = user._id;
+    await tenant.save(session ? { session } : {});
+
+    return { tenant, user, loginId, tempPassword };
+};
+
 
 /**
  * Get tenants for owner (owned properties)
@@ -744,5 +791,196 @@ exports.updateTenantKyc = async (req, res) => {
     } catch (error) {
         console.error('updateTenantKyc error:', error);
         res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+/**
+ * [PHASE 6] Transaction-safe onboarding finalization.
+ * 
+ * Transaction block (atomic, no network I/O):
+ *   1. Sets paymentLinkStatus → 'paid' + stores onboardingRentId
+ *   2. Generates User credentials via generateTenantCredentials
+ *   If anything fails → session.abortTransaction() → no orphaned state
+ * 
+ * Post-commit side effects (each independently try/caught):
+ *   1. Sends credentials email to tenant
+ *   2. Sends receipt email to tenant + owner
+ *   Email failures NEVER roll back the committed transaction.
+ * 
+ * @param {string} loginId - Tenant loginId from JWT
+ * @param {string|ObjectId} rentRecordId - Exact Rent._id from JWT
+ */
+exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
+    if (!loginId) return false;
+
+    const mongoose = require('mongoose');
+    const Rent = require('../models/Rent');
+    const { sendCredentials, sendOnboardingReceipt } = require('../utils/mailer');
+    const { buildOnboardingReceipt, resolveOwnerEmail } = require('../utils/onboardingUtils');
+
+    // NOTE: mongoose.startSession() can throw if DB connectivity is lost.
+    // This is intentionally NOT wrapped — the caller's try/catch (webhook handler)
+    // will return 500, and Razorpay/Cash retry will re-attempt.
+    const session = await mongoose.startSession();
+    let credentialResult = null;
+    let updatedTenant = null;
+
+    // ── TRANSACTION BLOCK ──────────────────────────────────────────────
+    try {
+        session.startTransaction();
+
+        updatedTenant = await Tenant.findOneAndUpdate(
+            { loginId, paymentLinkStatus: { $ne: 'paid' } },
+            { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId } },
+            { new: true, session }
+        );
+
+        if (!updatedTenant) {
+            await session.abortTransaction();
+            session.endSession();
+            return false;
+        }
+
+        console.log(`[ONBOARDING FINALIZATION] Triggering credentials for ${updatedTenant.loginId}`);
+        credentialResult = await exports.generateTenantCredentials(updatedTenant._id, updatedTenant.assignmentLocationCode, { session });
+
+        await session.commitTransaction();
+    } catch (txError) {
+        console.error('[ONBOARDING FINALIZATION] Transaction failed, rolling back:', txError.message);
+        try { await session.abortTransaction(); } catch (_) { }
+        session.endSession();
+        // NOTE: Concurrent duplicate webhooks (Razorpay retry) can cause a
+        // TransientTransactionError/WriteConflict here. This is safe: the caller
+        // returns 500, Razorpay retries, and the idempotency guard (paymentLinkStatus
+        // $ne 'paid') makes the retry a no-op once the first call commits.
+        throw txError; // Propagate — caller returns 500
+    }
+    session.endSession();
+
+    // ── POST-COMMIT EMAIL DISPATCH ─────────────────────────────────────
+    // Each email is independently try/caught. Failures update *EmailStatus
+    // but never affect the already-committed payment/credentials.
+
+    const { loginId: credLoginId, tempPassword } = credentialResult;
+
+    // Email 1: Credentials
+    try {
+        await sendCredentials(updatedTenant.email, credLoginId, tempPassword, 'Tenant');
+        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'sent' } });
+        console.log(`[ONBOARDING EMAIL] Credentials sent to ${updatedTenant.email}`);
+    } catch (credEmailErr) {
+        console.error(`[ONBOARDING EMAIL] Credentials FAILED for ${updatedTenant.email}:`, credEmailErr.message);
+        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed' } });
+    }
+
+    // Email 2: Receipt (to tenant + owner)
+    try {
+        const rent = rentRecordId ? await Rent.findById(rentRecordId).lean() : null;
+        if (rent && rent.tenantLoginId !== loginId) {
+            console.error(`[ONBOARDING RECEIPT] Rent/tenant mismatch! rent.tenantLoginId=${rent.tenantLoginId}, expected=${loginId}`);
+            throw new Error('Rent-tenant ownership mismatch cross-leakage prevented');
+        }
+        const receipt = buildOnboardingReceipt({ rent });
+        const ownerEmail = await resolveOwnerEmail(updatedTenant.ownerLoginId);
+
+        await sendOnboardingReceipt(updatedTenant.email, receipt);
+        if (ownerEmail) await sendOnboardingReceipt(ownerEmail, receipt);
+
+        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { receiptEmailStatus: 'sent' } });
+        console.log(`[ONBOARDING EMAIL] Receipt sent to tenant=${updatedTenant.email}, owner=${ownerEmail || 'N/A'}`);
+    } catch (receiptEmailErr) {
+        console.error(`[ONBOARDING EMAIL] Receipt FAILED for ${updatedTenant.email}:`, receiptEmailErr.message);
+        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { receiptEmailStatus: 'failed' } });
+    }
+
+    return true;
+};
+
+/**
+ * [PHASE 6] Retry sweep for failed onboarding emails.
+ * Does NOT call finalizeOnboardingPayment — the transaction is already committed.
+ * Directly re-invokes only the specific failed email function(s) using data
+ * already persisted on the Tenant + linked Rent record.
+ * 
+ * Can be called manually via admin endpoint or one-off script.
+ */
+exports.retryFailedOnboardingEmails = async (req, res) => {
+    const Rent = require('../models/Rent');
+    const { sendCredentials, sendOnboardingReceipt } = require('../utils/mailer');
+    const { buildOnboardingReceipt, resolveOwnerEmail } = require('../utils/onboardingUtils');
+
+    try {
+        // Owner-scoped filter: owners can only retry emails for their own tenants.
+        // superadmin/areamanager see all failed tenants (system-wide sweep).
+        const filter = {
+            paymentLinkStatus: 'paid',
+            $or: [
+                { credentialsEmailStatus: 'failed' },
+                { receiptEmailStatus: 'failed' }
+            ]
+        };
+        if (req && req.user && req.user.role === 'owner') {
+            filter.ownerLoginId = String(req.user.loginId || '').toUpperCase();
+        }
+
+        const failedTenants = await Tenant.find(filter).lean();
+
+        console.log(`[RETRY SWEEP] Found ${failedTenants.length} tenant(s) with failed emails`);
+        const results = [];
+
+        for (const tenant of failedTenants) {
+            const result = { loginId: tenant.loginId, retried: [] };
+
+            // Retry credentials email
+            if (tenant.credentialsEmailStatus === 'failed') {
+                try {
+                    await sendCredentials(tenant.email, tenant.loginId, tenant.tempPassword, 'Tenant');
+                    await Tenant.updateOne({ _id: tenant._id }, { $set: { credentialsEmailStatus: 'sent' } });
+                    result.retried.push('credentials:sent');
+                    console.log(`[RETRY SWEEP] Credentials re-sent for ${tenant.loginId}`);
+                } catch (err) {
+                    result.retried.push(`credentials:failed(${err.message})`);
+                    console.error(`[RETRY SWEEP] Credentials still failing for ${tenant.loginId}:`, err.message);
+                }
+            }
+
+            // Retry receipt email
+            if (tenant.receiptEmailStatus === 'failed') {
+                try {
+                    const rent = tenant.onboardingRentId
+                        ? await Rent.findById(tenant.onboardingRentId).lean()
+                        : null;
+                    if (rent && rent.tenantLoginId !== tenant.loginId) {
+                        console.error(`[RETRY SWEEP] Rent mismatch! rent.tenantLoginId=${rent.tenantLoginId}, expected=${tenant.loginId}`);
+                        throw new Error('Rent-tenant ownership mismatch prevented in sweep');
+                    }
+                    const receipt = buildOnboardingReceipt({ rent });
+                    const ownerEmail = await resolveOwnerEmail(tenant.ownerLoginId);
+
+                    await sendOnboardingReceipt(tenant.email, receipt);
+                    if (ownerEmail) await sendOnboardingReceipt(ownerEmail, receipt);
+
+                    await Tenant.updateOne({ _id: tenant._id }, { $set: { receiptEmailStatus: 'sent' } });
+                    result.retried.push('receipt:sent');
+                    console.log(`[RETRY SWEEP] Receipt re-sent for ${tenant.loginId}`);
+                } catch (err) {
+                    result.retried.push(`receipt:failed(${err.message})`);
+                    console.error(`[RETRY SWEEP] Receipt still failing for ${tenant.loginId}:`, err.message);
+                }
+            }
+
+            results.push(result);
+        }
+
+        if (res) {
+            return res.json({ success: true, processed: results.length, results });
+        }
+        return results;
+    } catch (error) {
+        console.error('[RETRY SWEEP] Error:', error);
+        if (res) {
+            return res.status(500).json({ success: false, error: 'Retry sweep failed' });
+        }
+        throw error;
     }
 };
