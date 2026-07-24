@@ -3,6 +3,8 @@ const router = express.Router();
 const Tenant = require('../models/Tenant');
 const Room = require('../models/Room');
 const Property = require('../models/Property');
+const jwt = require('jsonwebtoken');
+const { sendMail } = require('../utils/mailer');
 const LedgerEntry = require('../models/LedgerEntry');
 const TenantFeedback = require('../models/TenantFeedback');
 const Rent = require('../models/Rent');
@@ -113,9 +115,9 @@ router.get(
                 ownerLoginId,
                 'moveoutRequest.status': { $in: ['pending', 'approved', 'rejected'] }
             })
-            .select(ALWAYS_EXCLUDED)
-            .populate('property', 'title roomType locationCode ownerLoginId')
-            .sort({ 'moveoutRequest.submittedAt': -1 });
+                .select(ALWAYS_EXCLUDED)
+                .populate('property', 'title roomType locationCode ownerLoginId')
+                .sort({ 'moveoutRequest.submittedAt': -1 });
             res.json({ success: true, requests: tenants });
         } catch (err) {
             console.error('Get owner moveout requests error:', err);
@@ -173,15 +175,15 @@ router.post(
 
             if (!tenant.kyc) tenant.kyc = {};
             tenant.kyc.aadhaarNumber = aadhaarNumber || tenant.kyc.aadhaarNumber;
-            tenant.kyc.aadhar        = aadhaarNumber || tenant.kyc.aadhar;
-            tenant.kyc.aadharFile    = aadharFile    || tenant.kyc.aadharFile;
-            tenant.kyc.aadhaarFront  = aadhaarFront  || tenant.kyc.aadhaarFront;
-            tenant.kyc.aadhaarBack   = aadhaarBack   || tenant.kyc.aadhaarBack;
+            tenant.kyc.aadhar = aadhaarNumber || tenant.kyc.aadhar;
+            tenant.kyc.aadharFile = aadharFile || tenant.kyc.aadharFile;
+            tenant.kyc.aadhaarFront = aadhaarFront || tenant.kyc.aadhaarFront;
+            tenant.kyc.aadhaarBack = aadhaarBack || tenant.kyc.aadhaarBack;
             tenant.kyc.addressProofFile = addressProofFile || tenant.kyc.addressProofFile;
-            tenant.kyc.idProof       = panNumber ? 'PAN Card' : 'Aadhaar Card';
-            tenant.kyc.idProofFile   = panNumber || tenant.kyc.idProofFile;
-            tenant.kyc.uploadedAt    = new Date();
-            tenant.kycStatus         = 'submitted';
+            tenant.kyc.idProof = panNumber ? 'PAN Card' : 'Aadhaar Card';
+            tenant.kyc.idProofFile = panNumber || tenant.kyc.idProofFile;
+            tenant.kyc.uploadedAt = new Date();
+            tenant.kycStatus = 'submitted';
 
             await tenant.save();
             // Never reflect back sensitive document data in the response
@@ -205,6 +207,54 @@ router.post(
             if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
             tenant.kycStatus = 'verified';
             await tenant.save();
+
+            // [PHASE 3 HOOK 3: Admin Approval -> Payment Link]
+            try {
+                if (tenant.paymentLinkStatus !== 'sent' && tenant.paymentLinkStatus !== 'paid') {
+                    let rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+                    if (!rent) {
+                        rent = new Rent({
+                            tenantId: tenant._id,
+                            tenantLoginId: tenant.loginId,
+                            tenantName: tenant.name,
+                            tenantEmail: tenant.email,
+                            tenantPhone: tenant.phone,
+                            ownerLoginId: tenant.ownerLoginId,
+                            propertyName: tenant.propertyTitle || 'RoomHy Property',
+                            roomNumber: tenant.roomNo || '',
+                            rentAmount: tenant.agreedRent || 0,
+                            totalDue: tenant.agreedRent || 0,
+                            paymentStatus: 'pending'
+                        });
+                        await rent.save();
+                    }
+                    const rentRecordId = rent._id;
+                    const jwtSecret = process.env.JWT_SECRET;
+                    if (!jwtSecret) throw new Error('JWT_SECRET environment variable is missing');
+
+                    const token = jwt.sign(
+                        { loginId: tenant.loginId, rentRecordId, purpose: 'onboarding_payment' },
+                        jwtSecret,
+                        { expiresIn: '72h' }
+                    );
+                    let appBase = process.env.APP_URL || 'http://localhost:5173';
+                    if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
+                    const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
+
+                    const subject = `Payment Required: Secure your booking for ${tenant.propertyTitle || 'RoomHy'}`;
+                    const text = `Hello ${tenant.name},\n\nYour KYC is verified! Please complete your pending onboarding payment to secure your booking.\n\nPay here: ${paymentUrl}\n\nThis link expires in 72 hours.\n\n© RoomHy`;
+                    const html = `<p>Hello ${tenant.name},</p><p>Your KYC is verified! Please complete your pending onboarding payment to secure your booking.</p><p><a href="${paymentUrl}">Click here to Pay</a></p><p><i>Link expires in 72 hours.</i></p>`;
+
+                    await sendMail(tenant.email, subject, text, html);
+
+                    tenant.paymentLinkStatus = 'sent';
+                    await tenant.save();
+                    console.log(`[PAYMENT LINK] Hook 3 (admin approve) sent for ${tenant.loginId}`);
+                }
+            } catch (hookErr) {
+                console.error('[PAYMENT LINK ERROR] Hook 3 Failed:', hookErr.message);
+            }
+
             res.json({ success: true, tenant });
         } catch (err) {
             res.status(500).json({ message: err.message });
@@ -489,6 +539,14 @@ router.post(
     }
 );
 
+// ══ PHASE 6: ADMIN RETRY FOR FAILED ONBOARDING EMAILS ═══════════════════════
+router.post(
+    '/retry-failed-emails',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    tenantController.retryFailedOnboardingEmails
+);
+
 // ══ 15. TENANT SELF-SERVICE: FEEDBACK ════════════════════════════════════════
 // IDOR FIX: tenantLoginId from body ignored; JWT identity used exclusively.
 router.post(
@@ -654,7 +712,7 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         if (req.body.name || req.body.phone || req.body.email) {
             const User = require('../models/user');
             const userUpdate = {};
-            if (req.body.name)  userUpdate.name  = req.body.name;
+            if (req.body.name) userUpdate.name = req.body.name;
             if (req.body.phone) userUpdate.phone = req.body.phone;
             if (req.body.email) userUpdate.email = req.body.email;
 
@@ -666,7 +724,7 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         }
 
         const roomNoChanged = req.body.roomNo !== undefined && req.body.roomNo !== tenant.roomNo;
-        const bedNoChanged  = req.body.bedNo  !== undefined && req.body.bedNo  !== tenant.bedNo;
+        const bedNoChanged = req.body.bedNo !== undefined && req.body.bedNo !== tenant.bedNo;
 
         if (roomNoChanged || bedNoChanged) {
             if (tenant.room && tenant.bedNo) {
@@ -683,9 +741,9 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
                 }
             }
 
-            const targetRoomNo    = req.body.roomNo !== undefined ? req.body.roomNo : tenant.roomNo;
-            const targetBedNoRaw  = req.body.bedNo  !== undefined ? req.body.bedNo  : tenant.bedNo;
-            const targetBedNoStr  = String(targetBedNoRaw).trim().replace(/^[Bb]ed\s*/i, '');
+            const targetRoomNo = req.body.roomNo !== undefined ? req.body.roomNo : tenant.roomNo;
+            const targetBedNoRaw = req.body.bedNo !== undefined ? req.body.bedNo : tenant.bedNo;
+            const targetBedNoStr = String(targetBedNoRaw).trim().replace(/^[Bb]ed\s*/i, '');
 
             let newRoomObj = null;
             if (targetRoomNo) {
@@ -738,13 +796,13 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
 
         if (tenant.loginId) {
             const rentUpdate = {};
-            if (req.body.name)                         rentUpdate.tenantName  = req.body.name;
-            if (req.body.phone)                        rentUpdate.tenantPhone = req.body.phone;
-            if (req.body.email)                        rentUpdate.tenantEmail = req.body.email;
-            if (req.body.roomNo !== undefined)         rentUpdate.roomNumber  = req.body.roomNo;
+            if (req.body.name) rentUpdate.tenantName = req.body.name;
+            if (req.body.phone) rentUpdate.tenantPhone = req.body.phone;
+            if (req.body.email) rentUpdate.tenantEmail = req.body.email;
+            if (req.body.roomNo !== undefined) rentUpdate.roomNumber = req.body.roomNo;
             if (req.body.agreedRent !== undefined) {
                 rentUpdate.rentAmount = Number(req.body.agreedRent);
-                rentUpdate.totalDue   = Number(req.body.agreedRent);
+                rentUpdate.totalDue = Number(req.body.agreedRent);
             }
             if (Object.keys(rentUpdate).length > 0) {
                 await Rent.updateMany({ tenantLoginId: tenant.loginId, paymentStatus: 'pending' }, { $set: rentUpdate });
@@ -761,10 +819,10 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         });
 
         if (tenant.digitalCheckin && tenant.digitalCheckin.profile) {
-            if (req.body.name)                 tenant.digitalCheckin.profile.name        = req.body.name;
-            if (req.body.phone)                tenant.digitalCheckin.profile.phone       = req.body.phone;
-            if (req.body.email)                tenant.digitalCheckin.profile.email       = req.body.email;
-            if (req.body.roomNo !== undefined)  tenant.digitalCheckin.profile.roomNo     = req.body.roomNo;
+            if (req.body.name) tenant.digitalCheckin.profile.name = req.body.name;
+            if (req.body.phone) tenant.digitalCheckin.profile.phone = req.body.phone;
+            if (req.body.email) tenant.digitalCheckin.profile.email = req.body.email;
+            if (req.body.roomNo !== undefined) tenant.digitalCheckin.profile.roomNo = req.body.roomNo;
             if (req.body.agreedRent !== undefined) tenant.digitalCheckin.profile.agreedRent = Number(req.body.agreedRent);
             tenant.markModified('digitalCheckin');
         }
@@ -800,12 +858,12 @@ router.delete('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), 
         }
 
         const User = require('../models/user');
-        if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
+        if (tenant.user) await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
         if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
 
-        tenant.status    = 'inactive';
+        tenant.status = 'inactive';
         tenant.isDeleted = true;
-        tenant.room      = undefined;
+        tenant.room = undefined;
         await tenant.save();
         res.json({ message: 'Tenant deleted' });
     } catch (err) {
@@ -820,7 +878,7 @@ router.post('/:id/deactivate', protect, authorize('superadmin', 'areamanager', '
         if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
 
         const User = require('../models/user');
-        if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isActive: false } });
+        if (tenant.user) await User.findByIdAndUpdate(tenant.user, { $set: { isActive: false } });
         if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: false } });
 
         return res.json({ success: true, message: 'Tenant account deactivated successfully', data: tenant });
@@ -835,7 +893,7 @@ router.post('/:id/reactivate', protect, authorize('superadmin', 'areamanager', '
         if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
 
         const User = require('../models/user');
-        if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isActive: true } });
+        if (tenant.user) await User.findByIdAndUpdate(tenant.user, { $set: { isActive: true } });
         if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: true } });
 
         return res.json({ success: true, message: 'Tenant account reactivated successfully', data: tenant });

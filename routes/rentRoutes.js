@@ -5,7 +5,15 @@ const rentController = require('../controllers/rentController');
 const rentCollectionController = require('../controllers/rentCollectionController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
-// Secure all endpoints with authentication
+// 0. Standalone Public Onboarding Payment Actions (Phase 4 / 5 / 6.5)
+// These routes DO NOT use the global protect middleware because they rely on localized JWTs from email links
+router.post('/payment-page/verify-identity', rentController.verifyPaymentPageIdentity);
+router.post('/razorpay-onboarding/verify', rentController.verifyRazorpayOnboardingPayment);
+router.post('/cash-otp/generate', rentController.generateCashOtp);
+router.post('/cash-otp/verify', rentController.verifyAuthCashOtp);
+router.get('/checkout', rentController.createOnboardingRazorpayOrder);
+
+// Secure all endpoints with session authentication
 router.use(protect);
 
 // Staff-only endpoints
