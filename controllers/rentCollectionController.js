@@ -581,15 +581,54 @@ async function listPaymentsHandler(req, res) {
         invoiceId: null,
         billingMonth: t.payment_date ? new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '',
         invoiceNumber: t.razorpay_payment_id || '—',
-        rentAmount: t.owner_amount,
-        electricityBill: 0,
-        totalPenalty: 0,
-        totalDue: t.owner_amount,
-        status: t.payout_status === 'Paid' ? 'received' : 'pending_payout',
       };
     });
 
-    const merged = [...shaped, ...shapedTxs]
+    // ─── Phase 7: MERGE Month 1 Onboarding Rent seamlessly ────────────────────
+    const Rent = require('../models/Rent');
+    const Tenant = require('../models/Tenant');
+
+    // Strict scoping constraints: only surface Rents safely tracked as Onboarding anchors
+    const scopedTenants = await Tenant.find({
+      ownerLoginId: ownerLoginId ? ownerLoginId.toUpperCase() : '',
+      onboardingRentId: { $ne: null }
+    }).select('onboardingRentId').lean();
+
+    const validRentIds = scopedTenants.map(t => t.onboardingRentId);
+
+    const onbRents = await Rent.find({
+      _id: { $in: validRentIds },
+      paymentStatus: { $in: ['paid', 'completed'] }
+    }).populate('tenantId', 'name phone email propertyId roomNo').lean();
+
+    // We must ensure the `Rent` isn't a duplicate of a `RentPayment` just in case 
+    // an admin ran repairMissingPayments over it, though it usually targets RentInvoices.
+    const shapedRents = onbRents.map(r => ({
+      _id: r._id,
+      transactionId: r.razorpayOrderId || r._id.toString().slice(-8).toUpperCase(),
+      tenantName: r.tenantName || r.tenantId?.name || '—',
+      roomNo: r.roomNumber || r.tenantId?.roomNo || '—',
+      tenantPhone: r.tenantEmail || r.tenantId?.phone || '', // Note: using tenantEmail field as fallback phone is typo in old db but handled
+      tenantEmail: r.tenantEmail || r.tenantId?.email || '',
+      propertyId: r.propertyId || r.tenantId?.propertyId || '',
+      amount: r.paidAmount || r.totalDue || r.rentAmount || 0,
+      paymentMethod: r.paymentMethod || 'online',
+      paymentDate: r.paymentDate || r.updatedAt,
+      isPartial: false,
+      remainingAfter: 0,
+      notes: 'Onboarding Payment',
+      invoiceId: null,
+      billingMonth: r.collectionMonth ? r.collectionMonth : (r.paymentDate ? new Date(r.paymentDate).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : ''),
+      invoiceNumber: `ONB-${new Date(r.createdAt || Date.now()).getTime()}`,
+      rentAmount: r.rentAmount || r.totalDue || 0,
+      electricityBill: 0,
+      totalPenalty: 0,
+      totalDue: r.totalDue || r.rentAmount || 0,
+      status: 'received',
+      isOnboarding: true // Tells frontend this is phase 1
+    }));
+
+    const merged = [...shaped, ...shapedTxs, ...shapedRents]
       .sort((a, b) => new Date(b.paymentDate) - new Date(a.paymentDate))
       .slice(0, limit);
 
@@ -710,7 +749,7 @@ async function getTenantInvoiceSummary(req, res) {
 
     // Find tenant record
     const tenant = await Tenant.findOne({ loginId: tenantLoginId })
-      .select('_id loginId ownerLoginId')
+      .select('_id loginId ownerLoginId onboardingRentId')
       .lean();
 
     if (!tenant) {
@@ -722,15 +761,67 @@ async function getTenantInvoiceSummary(req, res) {
       .sort({ billingMonth: -1, dueDate: -1, createdAt: -1 })
       .lean();
 
-    // Get current month's invoice (or latest active one).
-    // IMPORTANT: always check ALL invoices (including PAID) for the current month first
-    // so a freshly-paid invoice is still shown correctly in the tenant dashboard.
-    const currentMonth = new Date().toISOString().slice(0, 7);
+    // ─── Phase 7: MERGE Month 1 Onboarding Rent seamlessly ────────────────────
+    // Pure Rent records without matching RentInvoices must be surfaced as invoices
+    // SCOPE LIMIT: Strictly limited to Rent objects associated with tenant's onboardingRentId
+    const Rent = require('../models/Rent');
+    let allRents = [];
+    if (tenant.onboardingRentId) {
+      const onbRecord = await Rent.findById(tenant.onboardingRentId).lean();
+      if (onbRecord) allRents.push(onbRecord);
+    }
 
-    // 1. Prefer current billing month — regardless of paid/unpaid status
+    // Map existing invoices by billingMonth
+    const invoiceMap = new Map(invoices.map(inv => [inv.billingMonth, inv]));
+
+    for (const r of allRents) {
+      if (!r.collectionMonth) continue;
+
+      if (invoiceMap.has(r.collectionMonth)) {
+        // Hydrate the existing invoice with Cash state
+        const inv = invoiceMap.get(r.collectionMonth);
+        inv.cashRequestStatus = r.cashRequestStatus || 'none';
+        inv.cashOtpHash = r.cashOtpHash;
+        inv.cashOtpExpiry = r.cashOtpExpiry;
+        inv.cashRejectedAt = r.cashRejectedAt;
+        inv.cashRejectedReason = r.cashRejectedReason;
+        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : (r.paymentStatus || 'pending');
+        inv._id = r._id; // Provide Rent _id for Cash endpoints fallback
+      } else {
+        // Synthesize virtual RentInvoice for Month 1 Onboarding
+        const virtualInvoice = {
+          _id: r._id,
+          invoiceNumber: `ONB-${new Date(r.createdAt || Date.now()).getTime()}`,
+          billingMonth: r.collectionMonth,
+          rentAmount: r.rentAmount || r.totalDue || 0,
+          totalDue: r.totalDue || r.rentAmount || 0,
+          outstandingAmount: r.paymentStatus === 'paid' ? 0 : (r.totalDue || r.rentAmount || 0),
+          dueDate: r.createdAt || new Date(),
+          status: String(r.paymentStatus).toUpperCase() === 'PAID' ? 'PAID' : 'PENDING',
+          paymentStatus: r.paymentStatus || 'pending',
+          cashRequestStatus: r.cashRequestStatus || 'none',
+          cashOtpHash: r.cashOtpHash,
+          cashOtpExpiry: r.cashOtpExpiry,
+          cashRejectedAt: r.cashRejectedAt,
+          cashRejectedReason: r.cashRejectedReason,
+          isVirtualOnboarding: true // Flags UI if needed
+        };
+        invoices.push(virtualInvoice);
+      }
+    }
+
+    // Fallback paymentStatus mapping for raw invoices with no matching pure Rent
+    for (const inv of invoices) {
+      if (!inv.paymentStatus) inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+    }
+
+    // Re-sort invoices now that virtual ones are injected
+    invoices.sort((a, b) => b.billingMonth.localeCompare(a.billingMonth) || new Date(b.dueDate) - new Date(a.dueDate));
+
+    // Get current month's invoice (or latest active one).
+    const currentMonth = new Date().toISOString().slice(0, 7);
     const currentMonthInvoice = invoices.find((inv) => inv.billingMonth === currentMonth);
 
-    // 2. Fall back: highest-phase unpaid invoice (for months where no invoice yet exists for current month)
     const activeInvoices = invoices.filter((inv) =>
       !['PAID', 'WAIVED', 'CANCELLED'].includes(String(inv.status || '').toUpperCase())
     );
@@ -749,11 +840,10 @@ async function getTenantInvoiceSummary(req, res) {
 
     const currentInvoice = currentMonthInvoice || fallbackInvoice;
 
-    // Evaluate invoice to get LIVE penalties.
-    // Skip re-evaluation for already-PAID invoices — their amounts are already final.
+    // Evaluate live invoice (skips virtual seamlessly due to status check)
     let liveInvoice = currentInvoice;
     const invoiceIsPaid = ['PAID', 'WAIVED'].includes(String(currentInvoice?.status || '').toUpperCase());
-    if (currentInvoice && !invoiceIsPaid) {
+    if (currentInvoice && !invoiceIsPaid && !currentInvoice.isVirtualOnboarding) {
       try {
         const evaluated = await evaluateInvoice(currentInvoice);
         liveInvoice = {
@@ -762,52 +852,6 @@ async function getTenantInvoiceSummary(req, res) {
         };
       } catch (evalErr) {
         console.warn('getTenantInvoiceSummary: evaluateInvoice failed:', evalErr.message);
-      }
-    }
-
-    // ─── NEW: Sync cash payment status from Rent model ───────────────────────
-    // The RentInvoice model doesn't have cashRequestStatus, but Rent model does.
-    // We need to pull the cash state from Rent to show accurate status in tenant UI.
-    const Rent = require('../models/Rent');
-    const allRents = await Rent.find({ tenantLoginId: tenantLoginId })
-      .select('collectionMonth cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
-      .lean();
-
-    const rentMap = {};
-    for (const r of allRents) {
-      if (r.collectionMonth) rentMap[r.collectionMonth] = r;
-    }
-
-    // Hydrate ALL invoices
-    for (const inv of invoices) {
-      const r = rentMap[inv.billingMonth];
-      if (r) {
-        inv.cashRequestStatus = r.cashRequestStatus || 'none';
-        inv.cashOtpHash = r.cashOtpHash;
-        inv.cashOtpExpiry = r.cashOtpExpiry;
-        inv.cashRejectedAt = r.cashRejectedAt;
-        inv.cashRejectedReason = r.cashRejectedReason;
-        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
-        // VERY IMPORTANT: Ensure frontend `targetRentObj._id` maps back to Rent `_id` 
-        // if this was requested by cash endpoints which expect `Rent.findById()`.
-        inv._id = r._id;
-      } else {
-        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
-      }
-    }
-
-    if (liveInvoice) {
-      const lr = rentMap[liveInvoice.billingMonth];
-      if (lr) {
-        liveInvoice.cashRequestStatus = lr.cashRequestStatus || 'none';
-        liveInvoice.cashOtpHash = lr.cashOtpHash;
-        liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
-        liveInvoice.cashRejectedAt = lr.cashRejectedAt;
-        liveInvoice.cashRejectedReason = lr.cashRejectedReason;
-        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
-        liveInvoice._id = lr._id;
-      } else {
-        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
       }
     }
 

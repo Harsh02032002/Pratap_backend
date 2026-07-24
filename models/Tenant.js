@@ -8,7 +8,7 @@ const TenantSchema = new mongoose.Schema({
     dob: { type: String },
     gender: { type: String },
     guardianNumber: { type: String },
-    
+
     // Reference to assigned property & room
     property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
     room: { type: mongoose.Schema.Types.ObjectId, ref: 'Room' },
@@ -16,14 +16,14 @@ const TenantSchema = new mongoose.Schema({
     building: { type: String },
     floor: { type: String },
     bedNo: { type: String }, // Specific bed in room (e.g., "A", "B")
-    
+
     // Rental Details
     moveInDate: { type: Date },
     baseRoomRent: { type: Number },
     agreedRent: { type: Number },
     rentAgreementType: { type: String },
     paymentFrequency: { type: String },
-    
+
     // Tenant Photo
     photo: { type: mongoose.Schema.Types.Mixed },
 
@@ -36,7 +36,7 @@ const TenantSchema = new mongoose.Schema({
         relationship: { type: String }
     },
     remarks: { type: String },
-    
+
     // Login Credentials (generated during assignment)
     loginId: { type: String, unique: true, sparse: true }, // e.g., ROOMHYTNT4821
     tempPassword: { type: String }, // Stored temporarily; user will set own password
@@ -49,10 +49,10 @@ const TenantSchema = new mongoose.Schema({
     securityDepositBalance: { type: Number, default: 0 },
     electricityCharge: { type: Number, default: 0 },
     maintenanceCharge: { type: Number, default: 0 },
-    
+
     // User Reference
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    
+
     // KYC Information
     kyc: {
         aadhar: { type: String },
@@ -69,7 +69,7 @@ const TenantSchema = new mongoose.Schema({
         addressProofFile: { type: String },
         uploadedAt: { type: Date }
     },
-    
+
     // Rental Agreement
     agreementSigned: { type: Boolean, default: false },
     agreementSignedAt: { type: Date },
@@ -114,7 +114,7 @@ const TenantSchema = new mongoose.Schema({
         agreementDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
         submittedAt: { type: Date }
     },
-    
+
     // Move-out Request (submitted by tenant)
     moveoutRequest: {
         status: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
@@ -138,14 +138,23 @@ const TenantSchema = new mongoose.Schema({
         enum: ['pending', 'submitted', 'verified', 'rejected'],
         default: 'pending'
     },
-    
+    paymentLinkStatus: {
+        type: String,
+        enum: ['pending', 'sent', 'paid']
+        // Intentionally no default value. undefined means legacy/grandfathered tenant
+    },
+    assignmentLocationCode: { type: String, default: '' },
+    onboardingRentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Rent' },
+    credentialsEmailStatus: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+    receiptEmailStatus: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+
     // Owner who assigned
     assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    
+
     // Verification by Super Admin
     verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     verifiedAt: { type: Date },
-    
+
     // Timestamps
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }

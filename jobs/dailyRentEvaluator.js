@@ -1,17 +1,17 @@
 'use strict';
-const cron        = require('node-cron');
-const mongoose    = require('mongoose');
+const cron = require('node-cron');
+const mongoose = require('mongoose');
 const RentInvoice = require('../models/RentInvoice');
 const RentAuditLog = require('../models/RentAuditLog');
-const CronHealth  = require('../models/CronHealth');
+const CronHealth = require('../models/CronHealth');
 const globalConfig = require('../config/rentCollectionConfig');
 const { evaluateInvoice, generateMonthlyInvoices } = require('../services/invoiceService');
 const { queueNotification, dispatchNotification, retryFailedNotifications } = require('../services/notificationService');
 const { shouldSendPhase1Reminder } = require('../engine/penaltyEngine');
 const { acquireLock, releaseLock } = require('../services/cronLockService');
 const Tenant = require('../models/Tenant');
-const Owner  = require('../models/Owner');
-const User   = require('../models/user');
+const Owner = require('../models/Owner');
+const User = require('../models/user');
 const CheckinRecord = require('../models/CheckinRecord');
 
 // ─── Date helpers for WhatsApp template variables ────────────────────────────
@@ -47,13 +47,13 @@ async function runDailyRentEvaluator() {
   }
 
   // ── Create RUNNING health record ─────────────────────────────────────────────
-  const startedAt    = new Date();
-  let   healthRecord = null;
+  const startedAt = new Date();
+  let healthRecord = null;
   try {
     healthRecord = await CronHealth.create({
-      jobName:   'dailyRentEvaluator',
+      jobName: 'dailyRentEvaluator',
       startedAt,
-      status:    'RUNNING',
+      status: 'RUNNING',
     });
   } catch (_) {
     // Health tracking failure must never prevent the evaluator from running
@@ -64,10 +64,10 @@ async function runDailyRentEvaluator() {
 
   // Metrics accumulated across all batches
   let totalProcessed = 0;
-  let totalErrors    = 0;
-  let totalQueued    = 0;
-  let totalSent      = 0;
-  let totalFailed    = 0;
+  let totalErrors = 0;
+  let totalQueued = 0;
+  let totalSent = 0;
+  let totalFailed = 0;
 
   console.log('[DailyEvaluator] Starting evaluation run...');
 
@@ -79,7 +79,7 @@ async function runDailyRentEvaluator() {
 
       if (!invoices.length) break;
 
-      const bulkOps  = [];
+      const bulkOps = [];
       const auditOps = [];
 
       for (const invoice of invoices) {
@@ -108,27 +108,27 @@ async function runDailyRentEvaluator() {
           // Stage audit log entries (written after bulkWrite)
           if (phaseHistoryAddition.length) {
             auditOps.push({
-              action:    'PHASE_TRANSITION',
+              action: 'PHASE_TRANSITION',
               invoiceId,
-              ownerId:   invoice.ownerId,
-              tenantId:  invoice.tenantId,
-              meta:      { oldPhase: invoice.currentPhase, newPhase: penalties.phase, daysSinceDue: penalties.daysSinceDue },
+              ownerId: invoice.ownerId,
+              tenantId: invoice.tenantId,
+              meta: { oldPhase: invoice.currentPhase, newPhase: penalties.phase, daysSinceDue: penalties.daysSinceDue },
             });
           }
           for (const p of newPenalties) {
             auditOps.push({
-              action:    'PENALTY_APPLIED',
+              action: 'PENALTY_APPLIED',
               invoiceId,
-              ownerId:   invoice.ownerId,
-              tenantId:  invoice.tenantId,
-              meta:      { type: p.type, amount: p.amount, daysSinceDue: p.daysSinceDue },
+              ownerId: invoice.ownerId,
+              tenantId: invoice.tenantId,
+              meta: { type: p.type, amount: p.amount, daysSinceDue: p.daysSinceDue },
             });
           }
 
           const notifStats = await queueNotificationsForInvoice(invoice, penalties, config);
-          totalQueued  += notifStats.queued;
-          totalSent    += notifStats.sent;
-          totalFailed  += notifStats.failed;
+          totalQueued += notifStats.queued;
+          totalSent += notifStats.sent;
+          totalFailed += notifStats.failed;
 
           totalProcessed++;
         } catch (err) {
@@ -167,15 +167,15 @@ async function runDailyRentEvaluator() {
       const completedAt = new Date();
       await CronHealth.findByIdAndUpdate(healthRecord._id, {
         $set: {
-          status:              'SUCCESS',
+          status: 'SUCCESS',
           completedAt,
-          durationMs:          completedAt - startedAt,
-          invoicesProcessed:   totalProcessed,
+          durationMs: completedAt - startedAt,
+          invoicesProcessed: totalProcessed,
           notificationsQueued: totalQueued,
-          notificationsSent:   totalSent,
+          notificationsSent: totalSent,
           notificationsFailed: totalFailed,
         },
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
   } catch (err) {
@@ -185,20 +185,20 @@ async function runDailyRentEvaluator() {
       const completedAt = new Date();
       await CronHealth.findByIdAndUpdate(healthRecord._id, {
         $set: {
-          status:              'FAILED',
+          status: 'FAILED',
           completedAt,
-          durationMs:          completedAt - startedAt,
-          invoicesProcessed:   totalProcessed,
+          durationMs: completedAt - startedAt,
+          invoicesProcessed: totalProcessed,
           notificationsQueued: totalQueued,
-          notificationsSent:   totalSent,
+          notificationsSent: totalSent,
           notificationsFailed: totalFailed,
-          errorMessage:        err.message,
+          errorMessage: err.message,
         },
-      }).catch(() => {});
+      }).catch(() => { });
     }
   } finally {
     // Always release — even if we crashed halfway through
-    await releaseLock('dailyRentEvaluator').catch(() => {});
+    await releaseLock('dailyRentEvaluator').catch(() => { });
   }
 }
 
@@ -207,18 +207,18 @@ async function runDailyRentEvaluator() {
 
 async function queueNotificationsForInvoice(invoice, penalties, config) {
   const { phase, daysSinceDue } = penalties;
-  const notifs   = config.notifications || {};
+  const notifs = config.notifications || {};
   const channels = {
-    email:     notifs.email     !== false,
+    email: notifs.email !== false,
     dashboard: notifs.dashboard !== false,
-    whatsapp:  Boolean(notifs.whatsapp),
+    whatsapp: Boolean(notifs.whatsapp),
   };
 
   const phaseKey = phase === 1
     ? `phase1-${daysSinceDue}`
     : phase === 2
-    ? 'phase2'
-    : `phase3-${Math.floor(daysSinceDue / 3)}`;
+      ? 'phase2'
+      : `phase3-${Math.floor(daysSinceDue / 3)}`;
 
   const shouldNotify = phase === 1
     ? shouldSendPhase1Reminder(daysSinceDue, phase, config)
@@ -239,43 +239,43 @@ async function queueNotificationsForInvoice(invoice, penalties, config) {
       .lean(),
     CheckinRecord.findOne({ role: 'owner', loginId: ownerLoginId }).lean(),
   ]) : [null, null];
-  const _cp        = checkinDoc?.ownerProfile?.payment || {};
-  const _ownerUpi    = ownerDoc?.checkinUpiId             || _cp.upiId             || '';
-  const _ownerAccNum = ownerDoc?.checkinBankAccountNumber || _cp.bankAccountNumber  || '';
-  const _ownerIfsc   = ownerDoc?.checkinIfscCode          || _cp.ifscCode           || '';
-  const _ownerBank   = ownerDoc?.checkinBankName          || '';
-  const _ownerHolder = ownerDoc?.checkinAccountHolderName || _cp.accountHolderName  || '';
+  const _cp = checkinDoc?.ownerProfile?.payment || {};
+  const _ownerUpi = ownerDoc?.checkinUpiId || _cp.upiId || '';
+  const _ownerAccNum = ownerDoc?.checkinBankAccountNumber || _cp.bankAccountNumber || '';
+  const _ownerIfsc = ownerDoc?.checkinIfscCode || _cp.ifscCode || '';
+  const _ownerBank = ownerDoc?.checkinBankName || '';
+  const _ownerHolder = ownerDoc?.checkinAccountHolderName || _cp.accountHolderName || '';
 
-  const electricityBill         = invoice.electricityBill || 0;
+  const electricityBill = invoice.electricityBill || 0;
   const electricityUnitsConsumed = invoice.electricityUnitsConsumed || 0;
 
   const payload = {
-    tenantEmail:  tenantDoc?.email || invoice.tenantEmail || '',
-    tenantName:   tenantDoc?.name  || invoice.tenantName  || '',
-    tenantPhone:  tenantDoc?.phone || invoice.tenantPhone || '',
+    tenantEmail: tenantDoc?.email || invoice.tenantEmail || '',
+    tenantName: tenantDoc?.name || invoice.tenantName || '',
+    tenantPhone: tenantDoc?.phone || invoice.tenantPhone || '',
     billingMonth: invoice.billingMonth,
     billingMonthFormatted: formatBillingMonth(invoice.billingMonth),
-    dueDate:      formatDate(invoice.dueDate),
-    rentAmount:   invoice.rentAmount,
+    dueDate: formatDate(invoice.dueDate),
+    rentAmount: invoice.rentAmount,
     totalPenalty: penalties.totalPenalty,
-    totalDue:     penalties.totalDue + electricityBill,
+    totalDue: penalties.totalDue + electricityBill,
     daysSinceDue,
     electricityBill,
     electricityUnitsConsumed,
     electricityUnitCost: electricityBill > 0 && electricityUnitsConsumed > 0
       ? Math.round(electricityBill / electricityUnitsConsumed) : 0,
     subject: `Rent ${phase === 1 ? 'Reminder' : phase === 2 ? 'Penalty Notice' : 'Final Notice'} — ${invoice.billingMonth}`,
-    ownerUpiId:         _ownerUpi,
-    ownerBankName:      _ownerBank,
+    ownerUpiId: _ownerUpi,
+    ownerBankName: _ownerBank,
     ownerAccountHolder: _ownerHolder,
     ownerAccountNumber: _ownerAccNum,
-    ownerIfscCode:      _ownerIfsc,
+    ownerIfscCode: _ownerIfsc,
   };
 
   const notifBase = {
-    invoiceId:  invoice._id,
-    tenantId:   invoice.tenantId,
-    ownerId:    invoice.ownerId,
+    invoiceId: invoice._id,
+    tenantId: invoice.tenantId,
+    ownerId: invoice.ownerId,
     propertyId: invoice.propertyId,
     phase,
     phaseKey,
@@ -292,17 +292,17 @@ async function queueNotificationsForInvoice(invoice, penalties, config) {
     if (channel === 'email' && !payload.tenantEmail) {
       if (phase >= 2) {
         await RentAuditLog.create({
-          action:    'CONTACT_INFO_MISSING',
+          action: 'CONTACT_INFO_MISSING',
           invoiceId: invoice._id,
-          tenantId:  invoice.tenantId,
-          ownerId:   invoice.ownerId,
+          tenantId: invoice.tenantId,
+          ownerId: invoice.ownerId,
           meta: {
-            reason:       'tenant_email_missing',
-            channel:      'email',
+            reason: 'tenant_email_missing',
+            channel: 'email',
             phase,
             billingMonth: invoice.billingMonth,
           },
-        }).catch(() => {});
+        }).catch(() => { });
       }
       continue;
     }
@@ -311,7 +311,7 @@ async function queueNotificationsForInvoice(invoice, penalties, config) {
     if (log) {
       stats.queued++;
       const result = await dispatchNotification(log._id);
-      if (result === 'sent')   stats.sent++;
+      if (result === 'sent') stats.sent++;
       if (result === 'failed') stats.failed++;
     }
   }
@@ -324,7 +324,7 @@ async function queueNotificationsForInvoice(invoice, penalties, config) {
 async function runMonthlyInvoiceGenerator() {
   if (mongoose.connection.readyState !== 1) return;
 
-  const now          = new Date();
+  const now = new Date();
   const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
   console.log(`[InvoiceGenerator] Generating invoices for ${billingMonth}...`);
@@ -333,6 +333,10 @@ async function runMonthlyInvoiceGenerator() {
     const Property = require('../models/Property');
     const tenants = await Tenant.find({
       status: { $in: ['active', 'pending'] },
+      $or: [
+        { paymentLinkStatus: 'paid' },
+        { paymentLinkStatus: { $exists: false } }
+      ],
       isDeleted: { $ne: true },
       agreedRent: { $gt: 0 },
     }).lean();
@@ -356,9 +360,9 @@ async function runMonthlyInvoiceGenerator() {
       const key = String(ownerUserId);
       if (!grouped[key]) grouped[key] = [];
       grouped[key].push({
-        tenantId:   t._id,
+        tenantId: t._id,
         propertyId: t.property,
-        unitId:     t.room,
+        unitId: t.room,
         rentAmount: t.agreedRent || 0,
       });
     }

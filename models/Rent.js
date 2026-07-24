@@ -6,7 +6,7 @@ const rentSchema = new mongoose.Schema({
     propertyName: String,
     ownerLoginId: String,
     ownerName: String,
-    
+
     // Tenant Info
     tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tenant' },
     tenantLoginId: String, // Store tenant login ID as string for query flexibility
@@ -15,20 +15,20 @@ const rentSchema = new mongoose.Schema({
     tenantPhone: String,
     roomNumber: String,
     area: String, // Room area in sq. ft
-    
+
     // Rent Details
     rentAmount: Number,
     deposit: Number,
     totalDue: Number, // rent + any additional charges
-    
+
     // Collection Period
     collectionMonth: { type: String, default: new Date().toISOString().slice(0, 7) }, // YYYY-MM
     collectionStartDate: { type: Number, default: 10 }, // 10th of month
     collectionEndDate: { type: Number, default: 15 }, // 15th of month
-    
+
     // Payment Status
-    paymentStatus: { 
-        type: String, 
+    paymentStatus: {
+        type: String,
         enum: ['pending', 'partially_paid', 'paid', 'completed', 'overdue', 'defaulted'],
         default: 'pending'
     },
@@ -66,8 +66,12 @@ const rentSchema = new mongoose.Schema({
     cashRejectedReason: String,
     cashRejectedAt: Date,
     cashOtpAttempts: { type: Number, default: 0 },
+    cashOtpCode: String,
+    cashOtpExpiresAt: Date,
+    cashOtpLastSentAt: Date,
+    loginAttempts: { type: Number, default: 0 },
     cashOtpMaxAttempts: { type: Number, default: 5 },
-    
+
     // Reminder Tracking
     reminders: [
         {
@@ -82,7 +86,7 @@ const rentSchema = new mongoose.Schema({
     autoReminderEnabled: { type: Boolean, default: false },
     autoReminderStartedAt: Date,
     autoReminderLastSentAt: Date,
-    
+
     // Timestamps
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },

@@ -106,8 +106,8 @@ function getJson(urlString, headers = {}) {
 
 async function listWhatsAppTemplates(nameFilter, cfg) {
     const authHeader = { Authorization: `Bearer ${cfg.whatsappAccessToken}` };
-    const ver        = cfg.whatsappApiVersion;
-    const phoneId    = cfg.whatsappPhoneNumberId;
+    const ver = cfg.whatsappApiVersion;
+    const phoneId = cfg.whatsappPhoneNumberId;
 
     // Step 1: resolve WABA ID from phone number ID
     const phoneRes = await getJson(
@@ -115,12 +115,12 @@ async function listWhatsAppTemplates(nameFilter, cfg) {
         authHeader,
     );
     const phoneData = JSON.parse(phoneRes.body);
-    const wabaId    = phoneData?.whatsapp_business_account?.id;
+    const wabaId = phoneData?.whatsapp_business_account?.id;
     if (!wabaId) return { error: 'Could not resolve WABA ID', raw: phoneData };
 
     // Step 2: list templates (optionally filtered by name)
     const qs = nameFilter ? `?name=${encodeURIComponent(nameFilter)}&fields=name,language,status,category` : '?fields=name,language,status,category&limit=20';
-    const tplRes  = await getJson(`https://graph.facebook.com/${ver}/${wabaId}/message_templates${qs}`, authHeader);
+    const tplRes = await getJson(`https://graph.facebook.com/${ver}/${wabaId}/message_templates${qs}`, authHeader);
     const tplData = JSON.parse(tplRes.body);
     return tplData;
 }
@@ -213,13 +213,13 @@ async function resolvePhoneByEmail(email) {
         const User = require('../models/user');
         const userDoc = await User.findOne({ email: normalizedEmail }).select('phone').lean();
         if (userDoc && userDoc.phone) return userDoc.phone;
-    } catch (_) {}
+    } catch (_) { }
 
     try {
         const Tenant = require('../models/Tenant');
         const tenantDoc = await Tenant.findOne({ email: normalizedEmail }).select('phone').lean();
         if (tenantDoc && tenantDoc.phone) return tenantDoc.phone;
-    } catch (_) {}
+    } catch (_) { }
 
     return '';
 }
@@ -280,7 +280,7 @@ async function sendWhatsAppByEmailRecipients(recipients, subject, text, html, cf
 
 function buildTransportOptions({ host, port, secure, user, pass, cfg, service = '', name = '' }) {
     const isGmail = service === 'gmail' || (host && host.toLowerCase().includes('gmail'));
-    
+
     if (isGmail) {
         return {
             service: 'gmail',
@@ -373,7 +373,7 @@ async function sendViaMailjetApi(recipients, subject, text, html, cfg, attachmen
 
 async function sendMail(to, subject, text, html, options = {}) {
     const cfg = getMailerConfig();
-    
+
     const recipients = normalizeRecipients(to);
     const hasSmtp = isSmtpConfigured(cfg);
     const hasMailjet = isMailjetConfigured(cfg);
@@ -451,7 +451,7 @@ async function sendMail(to, subject, text, html, options = {}) {
 
 function getLoginUrlForRole(role, originUrl = '') {
     let frontendUrl = (process.env.FRONTEND_URL || process.env.WEB_APP_URL || 'https://admin.roomhy.com').replace(/\/$/, '');
-    
+
     if (originUrl) {
         frontendUrl = originUrl.replace(/\/$/, '');
     }
@@ -691,8 +691,8 @@ async function sendWhatsAppTemplate(toPhone, templateName, languageCode, bodyPar
 
     // Try the specified language code first, then fall back through common English codes.
     // Meta error 132001 means "template not found in this language" — safe to retry with another code.
-    const startCode  = languageCode || 'en';
-    const fallbacks  = ['en', 'en_US', 'en_GB'];
+    const startCode = languageCode || 'en';
+    const fallbacks = ['en', 'en_US', 'en_GB'];
     const codesToTry = [startCode, ...fallbacks.filter(c => c !== startCode)];
 
     for (const code of codesToTry) {
@@ -715,7 +715,7 @@ async function sendWhatsAppTemplate(toPhone, templateName, languageCode, bodyPar
         }
         // Only retry on language-not-found error — any other error is final
         let errCode = 0;
-        try { errCode = JSON.parse(response.body)?.error?.code; } catch (_) {}
+        try { errCode = JSON.parse(response.body)?.error?.code; } catch (_) { }
         if (errCode !== 132001) {
             console.warn(`WhatsApp template '${templateName}' failed [lang=${code}]:`, response.status, response.body);
             return false;
@@ -738,4 +738,89 @@ module.exports = {
     getMailerConfig,
     isWhatsAppConfigured,
     normalizePhoneNumber,
+    sendCashOtpToOwner,
+    sendOnboardingReceipt
 };
+
+// Phase 5: Owner-Verified Cash Payment OTP Notification
+async function sendCashOtpToOwner(toEmail, tenantName, roomInfo, otpCode, propertyTitle) {
+    if (!toEmail) return;
+    const subject = `Cash Payment Authorization OTP: ${tenantName}`;
+    const text = `Hello,\n\nTenant ${tenantName} (Room ${roomInfo} at ${propertyTitle}) has requested to complete their onboarding payment via Cash.\n\nOTP Code: ${otpCode}\n\nProvide this code to the tenant ONLY if you have securely received their physical cash payment.\n\n© RoomHy`;
+    const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f8fafc; padding: 20px;">
+    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+        <h2 style="color: #7c3aed; margin-top: 0;">💰 Cash Authorization Request</h2>
+        <p style="color: #64748b; font-size: 15px; margin-bottom: 20px;">Hello,</p>
+        <p style="color: #64748b; font-size: 15px; margin-bottom: 20px;">
+            Tenant <strong>${tenantName}</strong> (Room <strong>${roomInfo}</strong> at <strong>${propertyTitle}</strong>) has initiated a manual Cash Payment flow for their onboarding.
+        </p>
+        <div style="background: #f8fafc; border: 2px dashed #94a3b8; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
+            <p style="margin: 0; color: #64748b; font-size: 14px; text-transform: uppercase; font-weight: bold;">Authorization OTP</p>
+            <h1 style="color: #0f172a; letter-spacing: 5px; font-size: 32px; margin: 10px 0;">${otpCode}</h1>
+        </div>
+        <div style="background: #fef2f2; color: #991b1b; padding: 15px; border-radius: 8px; font-size: 14px; margin-bottom: 20px;">
+            <strong>⚠️ SECURITY WARNING</strong><br>
+            Only provide this OTP to the tenant <strong>AFTER</strong> you have safely and physically collected the cash. Once they enter this code, their profile will be instantly activated.
+        </div>
+        <p style="color: #94a3b8; font-size: 12px;">© 2026 RoomHy. All rights reserved.</p>
+    </div>
+</body>
+</html>`;
+    const { sendMail } = module.exports;
+    return sendMail(toEmail, subject, text, html);
+}
+
+// Phase 6: Onboarding Payment Receipt Email
+async function sendOnboardingReceipt(toEmail, receipt) {
+    if (!toEmail || !receipt) return;
+    const subject = `Payment Receipt — ${receipt.tenantName || 'Tenant'} | ${receipt.propertyName || 'Property'}`;
+    const text = `Payment Receipt\n\nReceipt #: ${receipt.receiptNumber}\nTenant: ${receipt.tenantName}\nProperty: ${receipt.propertyName}, Room ${receipt.roomNumber}\nAmount: ₹${receipt.amount}\nMethod: ${receipt.paymentMethod}\nDate: ${receipt.paidAt}\nStatus: ${receipt.status}\n\n© RoomHy`;
+    const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: Arial, sans-serif; background-color: #f8fafc; padding: 20px;">
+    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+        <h2 style="color: #7c3aed; margin-top: 0;">🧾 Payment Receipt</h2>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Receipt #</td>
+                <td style="text-align: right; padding: 10px 0; font-weight: bold;">${receipt.receiptNumber}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Tenant</td>
+                <td style="text-align: right; padding: 10px 0; font-weight: bold;">${receipt.tenantName}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Property</td>
+                <td style="text-align: right; padding: 10px 0;">${receipt.propertyName}, Room ${receipt.roomNumber}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Billing Month</td>
+                <td style="text-align: right; padding: 10px 0;">${receipt.billingMonth}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Payment Method</td>
+                <td style="text-align: right; padding: 10px 0; text-transform: capitalize;">${receipt.paymentMethod}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="color: #64748b; padding: 10px 0; font-size: 14px;">Date</td>
+                <td style="text-align: right; padding: 10px 0;">${new Date(receipt.paidAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+            </tr>
+            <tr>
+                <td style="color: #0f172a; padding: 15px 0; font-size: 16px; font-weight: bold;">Amount Paid</td>
+                <td style="text-align: right; padding: 15px 0; font-size: 20px; font-weight: bold; color: #16a34a;">₹${receipt.amount}</td>
+            </tr>
+        </table>
+        <div style="background: #f0fdf4; color: #166534; padding: 12px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 14px;">
+            ✅ ${receipt.status}
+        </div>
+        <p style="color: #94a3b8; font-size: 12px; margin-top: 20px;">© 2026 RoomHy. All rights reserved.</p>
+    </div>
+</body>
+</html>`;
+    const { sendMail } = module.exports;
+    return sendMail(toEmail, subject, text, html);
+}
