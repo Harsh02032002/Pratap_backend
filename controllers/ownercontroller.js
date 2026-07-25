@@ -102,10 +102,129 @@ exports.healOwnerProperties = async (loginId) => {
             await prop.save();
             console.log(`   ✓ Linked property "${prop.title}" to owner ${normalizedLoginId}`);
         }
+        // Heal unpaid invoices if corresponding paid Rent records exist
+        await exports.healTenantInvoices(normalizedLoginId);
     } catch (err) {
         console.error('❌ Error running auto-healer in healOwnerProperties:', err);
     }
 };
+
+exports.healTenantInvoices = async (ownerLoginId) => {
+    try {
+        const mongoose = require('mongoose');
+        const RentInvoice = mongoose.models.RentInvoice || require('../models/RentInvoice');
+        const Rent = mongoose.models.Rent || require('../models/Rent');
+        const Owner = mongoose.models.Owner || require('../models/Owner');
+        const Tenant = mongoose.models.Tenant || require('../models/Tenant');
+        const RentPayment = mongoose.models.RentPayment || require('../models/RentPayment');
+        const { getEffectiveConfig } = require('../services/invoiceService');
+
+        const ownerDoc = await Owner.findOne({ loginId: ownerLoginId }).lean();
+        if (!ownerDoc) return;
+
+        // 1. Heal existing PENDING/PARTIAL invoices if a paid Rent record exists
+        const invoices = await RentInvoice.find({
+            ownerId: ownerDoc._id,
+            status: { $in: ['PENDING', 'PARTIAL'] }
+        });
+
+        for (const inv of invoices) {
+            const rentRecord = await Rent.findOne({
+                $or: [
+                    { tenantId: inv.tenantId },
+                    ...(inv.tenantLoginId ? [{ tenantLoginId: inv.tenantLoginId }] : []),
+                    ...(inv.tenantEmail ? [{ tenantEmail: inv.tenantEmail }] : [])
+                ],
+                collectionMonth: inv.billingMonth,
+                paymentStatus: { $in: ['paid', 'completed'] }
+            });
+
+            if (rentRecord) {
+                console.log(`🧹 Healing RentInvoice ${inv._id}: Tenant already paid via Rent record!`);
+                const paidAmt = rentRecord.paidAmount || inv.rentAmount || 0;
+                inv.paidAmount = paidAmt;
+                inv.rentPaidAmount = paidAmt;
+                inv.outstandingAmount = 0;
+                inv.status = 'PAID';
+                inv.paymentMethod = rentRecord.paymentMethod || 'cash';
+                inv.razorpayPaymentId = rentRecord.razorpayPaymentId || '';
+                inv.paymentDate = rentRecord.paymentDate || new Date();
+                await inv.save();
+            }
+        }
+
+        // 2. Auto-create missing PAID invoices for tenants who have paid Rent records but no RentInvoice
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const tenants = await Tenant.find({ ownerLoginId: ownerLoginId, isDeleted: { $ne: true } }).lean();
+
+        for (const t of tenants) {
+            const paidRent = await Rent.findOne({
+                $or: [
+                    { tenantLoginId: t.loginId },
+                    { tenantId: t._id },
+                    ...(t.email ? [{ tenantEmail: t.email }] : [])
+                ],
+                paymentStatus: { $in: ['paid', 'completed'] }
+            }).sort({ createdAt: -1 });
+
+            if (paidRent) {
+                const billingMonth = paidRent.collectionMonth || currentMonth;
+                const existingInv = await RentInvoice.findOne({ tenantId: t._id, billingMonth });
+
+                if (!existingInv) {
+                    const rentAmt = Number(t.agreedRent || paidRent.rentAmount || 0);
+                    const invoiceNumber = `INV-${billingMonth}-${String(t._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+                    const config = await getEffectiveConfig(ownerDoc._id, t.property, null);
+                    const [yr, mo] = billingMonth.split('-');
+                    const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
+
+                    const newInv = await RentInvoice.create({
+                        invoiceNumber,
+                        ownerId: ownerDoc._id,
+                        propertyId: t.property || null,
+                        tenantId: t._id,
+                        tenantName: t.name || '',
+                        tenantEmail: t.email || '',
+                        tenantPhone: t.phone || '',
+                        billingMonth,
+                        rentAmount: rentAmt,
+                        dueDate,
+                        totalDue: rentAmt,
+                        outstandingAmount: 0,
+                        paidAmount: rentAmt,
+                        rentPaidAmount: rentAmt,
+                        status: 'PAID',
+                        paymentDate: paidRent.paymentDate || new Date(),
+                        penaltyConfigSnapshot: config || {},
+                    });
+
+                    if (rentAmt > 0) {
+                        await RentPayment.create({
+                            invoiceId: newInv._id,
+                            tenantId: t._id,
+                            propertyId: t.property || null,
+                            ownerId: ownerDoc._id,
+                            amount: rentAmt,
+                            paymentMethod: paidRent.paymentMethod || 'cash',
+                            transactionId: paidRent.razorpayPaymentId || `HEAL-${Date.now().toString(36).toUpperCase()}`,
+                            isPartial: false,
+                            remainingAfter: 0,
+                            rentPaidAmount: rentAmt,
+                            penaltyPaidAmount: 0,
+                            paymentDate: paidRent.paymentDate || new Date(),
+                            recordedBy: ownerLoginId,
+                            notes: 'Auto-healed move-in rent payment receipt',
+                        }).catch(() => { });
+                    }
+                    console.log(`🧾 Auto-healed missing PAID invoice for tenant ${t.name} (${t.loginId})`);
+                }
+            }
+        }
+    } catch (err) {
+        console.error('❌ Error healing tenant invoices:', err.message);
+    }
+};
+
 
 // Sync occupancy counts for a property based on Rooms, Tenants, and roomTypes fallback
 exports.syncPropertyOccupancyData = async (propertyId) => {
@@ -321,7 +440,28 @@ exports.getOwnerTenants = async (req, res) => {
         await exports.healOwnerProperties(ownerLoginId);
         const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
         const propertyIds = properties.map(p => p._id);
-        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
+        const Tenant = require('../models/Tenant');
+
+        // Auto-heal tenants without mismatch: promote pending_verification -> verified & pending -> active
+        await Tenant.updateMany(
+            {
+                $or: [{ ownerLoginId }, { property: { $in: propertyIds } }],
+                isDeleted: { $ne: true },
+                kycStatus: { $ne: 'mismatch_review' },
+                'kyc.mismatchReasons': { $exists: false },
+                $or: [
+                    { kycStatus: 'pending_verification' },
+                    { kycStatus: 'pending' },
+                    { kycStatus: { $exists: false } },
+                    { status: 'pending' }
+                ]
+            },
+            {
+                $set: { kycStatus: 'verified', status: 'active' }
+            }
+        ).catch(() => {});
+
+        const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
         res.json({ tenants });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -503,6 +643,10 @@ exports.getAllOwners = async (req, res) => {
                 checkinUpiId: o.checkinUpiId || checkinMap[o.loginId]?.ownerProfile?.payment?.upiId || o.profile?.upiId || '',
                 checkinAadhaarLinkedPhone: o.checkinAadhaarLinkedPhone || checkinMap[o.loginId]?.ownerKyc?.aadhaarLinkedPhone || o.kyc?.aadhaarLinkedPhone || '',
                 checkinAadhaarNumber: o.checkinAadhaarNumber || checkinMap[o.loginId]?.ownerKyc?.aadhaarNumber || o.kyc?.aadharNumber || o.kyc?.aadhaarNumber || '',
+                checkinOwnerPhoto: o.checkinOwnerPhoto || checkinMap[o.loginId]?.ownerKyc?.ownerPhoto || '',
+                checkinBankProof: o.checkinBankProof || checkinMap[o.loginId]?.ownerKyc?.bankProof || '',
+                checkinAadhaarImage: o.checkinAadhaarImage || o.kyc?.documentImage || checkinMap[o.loginId]?.ownerKyc?.aadhaarImage || '',
+                checkinCancelledCheque: o.checkinCancelledCheque || checkinMap[o.loginId]?.ownerKyc?.cancelledCheque || null,
                 checkinOtpVerified: !!checkinMap[o.loginId]?.ownerKyc?.otpVerified,
                 checkinSubmittedAt: checkinMap[o.loginId]?.ownerSubmittedAt || null,
                 // Merge profile data to top level (profile takes priority, then top-level field)
@@ -893,6 +1037,95 @@ exports.addTenantToProperty = async (req, res) => {
             );
         }
 
+        // ── Auto-create PAID invoice for move-in month ──────────────────────────
+        // Move-in month rent is already received (security/advance). Create a PAID
+        // invoice immediately so the owner panel shows "paid + View receipt" from day 1.
+        // From NEXT month onwards the normal rent cycle (invoice → pending → penalty) begins.
+        try {
+            const newTenant = tenantResponse.data.tenant;
+            const newTenantId = newTenant?._id || newTenant?.id;
+            if (newTenant && newTenantId) {
+                const mongoose = require('mongoose');
+                const RentInvoice = mongoose.models.RentInvoice || require('../models/RentInvoice');
+                const RentPayment = mongoose.models.RentPayment || require('../models/RentPayment');
+                const RentAuditLog = mongoose.models.RentAuditLog || require('../models/RentAuditLog');
+                const { getEffectiveConfig } = require('../services/invoiceService');
+
+                const moveIn = moveInDate ? new Date(moveInDate) : new Date();
+                const billingMonth = `${moveIn.getFullYear()}-${String(moveIn.getMonth() + 1).padStart(2, '0')}`;
+
+                // Only create if no invoice exists yet for this tenant+month
+                const existing = await RentInvoice.findOne({ tenantId: newTenantId, billingMonth });
+                if (!existing) {
+                    const ownerDoc = await Owner.findOne({ loginId: normalizedOwnerId }).lean();
+                    const ownerUserId = ownerDoc?._id || null;
+                    const rentAmt = Number(agreedRent || 0);
+
+                    const config = ownerUserId
+                        ? await getEffectiveConfig(ownerUserId, propertyId, null)
+                        : null;
+                    const [yr, mo] = billingMonth.split('-');
+                    const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
+
+                    const invoiceNumber = `INV-${billingMonth}-${String(newTenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
+                    const invoice = await RentInvoice.create({
+                        invoiceNumber,
+                        ownerId: ownerUserId,
+                        propertyId: propertyId,
+                        tenantId: newTenantId,
+                        tenantName: name || '',
+                        tenantEmail: email || '',
+                        tenantPhone: phone || '',
+                        billingMonth,
+                        rentAmount: rentAmt,
+                        dueDate,
+                        totalDue: rentAmt,
+                        outstandingAmount: 0,
+                        paidAmount: rentAmt,
+                        rentPaidAmount: rentAmt,
+                        status: 'PAID',
+                        paymentDate: moveIn,
+                        penaltyConfigSnapshot: config || {},
+                    });
+
+                    // Create RentPayment record so Receipts tab works
+                    if (ownerUserId && rentAmt > 0) {
+                        await RentPayment.create({
+                            invoiceId: invoice._id,
+                            tenantId: newTenantId,
+                            propertyId: propertyId,
+                            ownerId: ownerUserId,
+                            amount: rentAmt,
+                            paymentMethod: 'cash',
+                            transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
+                            isPartial: false,
+                            remainingAfter: 0,
+                            rentPaidAmount: rentAmt,
+                            penaltyPaidAmount: 0,
+                            paymentDate: moveIn,
+                            recordedBy: normalizedOwnerId,
+                            notes: 'Move-in month rent — auto-recorded on tenant onboarding',
+                        });
+                    }
+
+                    await RentAuditLog.create({
+                        action: 'INVOICE_CREATED',
+                        invoiceId: invoice._id,
+                        tenantId: newTenantId,
+                        ownerId: ownerUserId,
+                        propertyId: propertyId,
+                        meta: { billingMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID' },
+                    }).catch(() => { });
+
+                    console.log(`🧾 Auto-created PAID invoice for ${name} (move-in month: ${billingMonth})`);
+                }
+            }
+        } catch (invErr) {
+            // Non-blocking — don't fail the tenant add if invoice creation fails
+            console.warn('⚠️ Could not auto-create move-in invoice:', invErr.message);
+        }
+
         // Log action for audit
         console.log(`✅ Tenant ${name} (${email}) added to property ${property.title} by owner ${normalizedOwnerId}`);
 
@@ -904,6 +1137,7 @@ exports.addTenantToProperty = async (req, res) => {
             tenantCheckinLink: tenantResponse.data.tenantCheckinLink,
             onboarding: tenantResponse.data.onboarding
         });
+
 
     } catch (err) {
         console.error('Error adding tenant:', err);

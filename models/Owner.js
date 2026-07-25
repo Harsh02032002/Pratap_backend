@@ -163,6 +163,16 @@ const ownerSchema = new mongoose.Schema({
     walletBalance: { type: Number, default: 0 },
     pendingBalance: { type: Number, default: 0 },
     withdrawnBalance: { type: Number, default: 0 },
+    // Owner Panel Free Trial & Subscription tracking
+    subscription: {
+        trialStartDate: { type: Date }, // set at onboarding (or pulled from createdAt)
+        trialEndDate: { type: Date },   // trialStartDate + ownerTrialDays from SystemSettings
+        isSubscribed: { type: Boolean, default: false },
+        subscriptionExpiry: { type: Date },
+        extendedBy: { type: String },   // superadmin loginId who extended
+        extensionNote: { type: String }, // reason for extension
+        lastExtendedAt: { type: Date }
+    },
     createdAt: { type: Date, default: Date.now }
 });
 

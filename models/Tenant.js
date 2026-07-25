@@ -68,7 +68,11 @@ const TenantSchema = new mongoose.Schema({
         idProofFile: { type: String },
         addressProof: { type: String },
         addressProofFile: { type: String },
-        uploadedAt: { type: Date }
+        uploadedAt: { type: Date },
+        // Store Aadhaar OCR data from admin entry
+        aadhaarData: { type: mongoose.Schema.Types.Mixed },
+        fatherName: { type: String },
+        permanentAddress: { type: String }
     },
     
     // Rental Agreement
@@ -136,8 +140,17 @@ const TenantSchema = new mongoose.Schema({
     isDeleted: { type: Boolean, default: false },
     kycStatus: {
         type: String,
-        enum: ['pending', 'submitted', 'verified', 'rejected'],
+        enum: ['pending', 'submitted', 'pending_verification', 'audit_pending', 'mismatch_review', 'verified', 'rejected'],
         default: 'pending'
+    },
+    // Store admin-entered data for KYC comparison
+    kycVerificationData: {
+        adminEnteredName: { type: String },
+        adminEnteredFatherName: { type: String },
+        adminEnteredAddress: { type: String },
+        adminEnteredDob: { type: String },
+        adminEnteredAadhaar: { type: String },
+        adminEnteredPhone: { type: String }
     },
     
     // Owner who assigned

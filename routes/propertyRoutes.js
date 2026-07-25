@@ -57,7 +57,8 @@ router.post('/ensure-owner', formLimiter, auditTrail('properties'), async (req, 
                 locationCode,
                 ownerLoginId,
                 status: 'active',
-                isPublished: true
+                isPublished: true,
+                isLiveOnWebsite: true
             });
         }
 

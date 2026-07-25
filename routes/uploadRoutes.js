@@ -29,9 +29,18 @@ router.post('/upload-profile-photo', protect, upload.single('profilePhoto'), asy
 });
 
 // POST /api/upload - Generic image/video upload
-router.post('/upload', protect, upload.single('image'), async (req, res) => {
+router.post('/upload', protect, (req, res, next) => {
+  upload.any()(req, res, (err) => {
+    if (err) {
+      console.error('Upload multer error:', err);
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
-    if (!req.file) {
+    const file = (req.files && req.files.length > 0) ? req.files[0] : req.file;
+    if (!file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
     const stream = cloudinary.uploader.upload_stream({
@@ -39,10 +48,11 @@ router.post('/upload', protect, upload.single('image'), async (req, res) => {
       resource_type: 'auto',
     }, (error, result) => {
       if (error) return res.status(500).json({ error: error.message });
-      return res.json({ url: result.secure_url });
+      return res.json({ url: result.secure_url, filePath: result.secure_url, location: result.secure_url });
     });
-    stream.end(req.file.buffer);
+    stream.end(file.buffer);
   } catch (err) {
+    console.error('Upload handler error:', err);
     res.status(500).json({ error: err.message });
   }
 });

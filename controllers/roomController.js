@@ -436,7 +436,7 @@ exports.togglePromoted = async (req, res) => {
 exports.updateRoom = async (req, res) => {
     try {
         const { roomId } = req.params;
-        const updateData = req.body;
+        const updateData = { ...req.body };
         
         // Ensure electricity unit cost maps properly if provided
         if (updateData.electricityUnitCost !== undefined) {
@@ -444,52 +444,68 @@ exports.updateRoom = async (req, res) => {
             delete updateData.electricityUnitCost;
         }
 
-        // Intercept updates if the user role is owner or propertyowner
-        const isOwner = req.user && (req.user.role === 'owner' || req.user.role === 'propertyowner');
-        if (isOwner) {
-            const existingRoom = await Room.findById(roomId);
-            if (!existingRoom) {
-                return res.status(404).json({ success: false, message: "Room not found" });
-            }
-            
-            existingRoom.pendingChanges = {
-                data: updateData,
-                requestedAt: new Date(),
-                requestedBy: req.user.loginId || req.user.name || 'owner',
-                reason: updateData.reason || 'Owner edit request',
-                status: 'pending'
-            };
-            await existingRoom.save();
+        // Automatically sync beds count with sharingType if provided
+        if (updateData.sharingType) {
+            const sType = String(updateData.sharingType).trim();
+            if (sType === 'Single Sharing' || sType === 'Private Room (No Sharing)') updateData.beds = 1;
+            else if (sType === 'Double Sharing') updateData.beds = 2;
+            else if (sType === 'Triple Sharing') updateData.beds = 3;
+            else if (sType === 'Four Sharing') updateData.beds = 4;
+            else if (updateData.roomBeds) updateData.beds = Number(updateData.roomBeds);
+        } else if (updateData.roomBeds) {
+            updateData.beds = Number(updateData.roomBeds);
+        }
 
-            // Create superadmin notification
+        const room = await Room.findById(roomId);
+        if (!room) {
+            return res.status(404).json({ success: false, message: "Room not found" });
+        }
+
+        // Check if media/photos are being updated - requires admin approval
+        const hasMediaUpdate = updateData.media && Array.isArray(updateData.media) && updateData.media.length > 0;
+        
+        if (hasMediaUpdate) {
+            // Save changes to pendingChanges for admin approval instead of applying live
+            room.pendingChanges = {
+                data: updateData,
+                status: 'pending',
+                requestedAt: new Date(),
+                requestedBy: req.user?.loginId || room.ownerLoginId || 'owner'
+            };
+            await room.save();
+
+            // Send approval request notification to superadmins
             try {
                 const superAdmins = await User.find({ role: 'superadmin' }).lean();
                 for (const sa of superAdmins) {
                     await Notification.create({
                         toRole: 'superadmin',
                         toLoginId: sa.loginId || '',
-                        from: req.user.loginId || 'owner',
-                        type: 'room_edit_request',
-                        message: `Room edit request submitted by owner for room "${existingRoom.title}"`,
+                        from: req.user?.loginId || 'owner',
+                        type: 'room_media_approval',
+                        message: `New room photos uploaded for "${room.title}" by owner. Pending review and live website approval.`,
                         meta: {
-                            roomId: existingRoom._id.toString(),
-                            roomTitle: existingRoom.title,
-                            propertyId: existingRoom.property.toString()
+                            roomId: room._id.toString(),
+                            roomTitle: room.title,
+                            propertyId: room.property?.toString()
                         }
                     });
                 }
             } catch (notifyErr) {
-                console.warn('Room edit request notification failed:', notifyErr.message);
+                console.warn('Room media superadmin notification failed:', notifyErr.message);
             }
 
-            return res.json({ success: true, message: "Room changes submitted and pending approval", room: existingRoom });
+            return res.json({ 
+                success: true, 
+                message: "Room photo upload submitted for admin approval. Changes will go live after approval.",
+                room,
+                requiresApproval: true
+            });
         }
 
-        const room = await Room.findByIdAndUpdate(roomId, { $set: updateData }, { new: true });
-        if (!room) {
-            return res.status(404).json({ success: false, message: "Room not found" });
-        }
-        res.json({ success: true, room });
+        // For non-media updates, apply directly
+        const updatedRoom = await Room.findByIdAndUpdate(roomId, { $set: updateData }, { new: true });
+        res.json({ success: true, message: "Room updated successfully", room: updatedRoom });
     } catch (err) {
         console.error("Error updating room:", err);
         res.status(500).json({ success: false, message: err.message });
@@ -507,6 +523,9 @@ exports.approveRoomChanges = async (req, res) => {
         if (!room.pendingChanges || room.pendingChanges.status !== 'pending') {
             return res.status(400).json({ success: false, message: "No pending changes for this room" });
         }
+
+        const requestedBy = room.pendingChanges.requestedBy;
+        const hasMediaChanges = room.pendingChanges.data?.media && Array.isArray(room.pendingChanges.data.media);
 
         // Apply changes
         const data = room.pendingChanges.data;
@@ -526,6 +545,29 @@ exports.approveRoomChanges = async (req, res) => {
         // Clear data but keep record of approval
         room.pendingChanges.data = null;
         await room.save();
+
+        // Send notification to owner
+        try {
+            const Notification = require('../models/Notification');
+            const message = hasMediaChanges 
+                ? `Your room photos for "${room.title}" have been approved and are now live on the website.`
+                : `Your room changes for "${room.title}" have been approved and applied successfully.`;
+
+            await Notification.create({
+                toRole: 'owner',
+                toLoginId: requestedBy,
+                from: req.user?.loginId || 'superadmin',
+                type: 'room_changes_approved',
+                message: message,
+                meta: {
+                    roomId: room._id.toString(),
+                    roomTitle: room.title,
+                    propertyId: room.property?.toString()
+                }
+            });
+        } catch (notifyErr) {
+            console.warn('Owner notification failed for room approval:', notifyErr.message);
+        }
 
         res.json({ success: true, message: "Room changes approved and applied successfully", room });
     } catch (err) {

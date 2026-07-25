@@ -8,7 +8,9 @@ const RentAuditLog = require("../models/RentAuditLog");
 const RentInvoice = require("../models/RentInvoice");
 const RentPayment = require("../models/RentPayment");
 const crypto = require("crypto");
-const { evaluateInvoice } = require("../services/invoiceService");
+const { evaluateInvoice, getEffectiveConfig } = require("../services/invoiceService");
+const PaymentTransaction = require("../models/PaymentTransaction");
+const SystemSettings = require("../models/SystemSettings");
 
 async function getTenantProfileByLoginId(loginId) {
   const normalizedLoginId = String(loginId || "")
@@ -424,13 +426,71 @@ exports.recordPaymentByTenant = async (req, res) => {
       notes: "Razorpay payment recorded via recordPaymentByTenant",
     });
 
-    // ── Sync RentInvoice so the owner panel shows the correct paid status ──────
+    // ── Sync/create RentInvoice so owner panel shows correct PAID status ────────
     try {
-      const invoiceQuery = { billingMonth: rent.collectionMonth };
+      const billingMonth = rent.collectionMonth || new Date().toISOString().slice(0, 7);
+      const invoiceQuery = { billingMonth };
       if (tenantProfile?._id) invoiceQuery.tenantId = tenantProfile._id;
 
-      const matchedInvoice = await RentInvoice.findOne(invoiceQuery);
-      if (matchedInvoice) {
+      let matchedInvoice = await RentInvoice.findOne(invoiceQuery);
+
+      if (!matchedInvoice && tenantProfile?._id) {
+        // ── AUTO-CREATE invoice so owner panel never shows "no-invoice" ──
+        console.log(`🧾 [recordPaymentByTenant] No invoice found — auto-creating PAID invoice for ${billingMonth}`);
+        const ownerDoc = tenantProfile?.ownerLoginId
+          ? await Owner.findOne({ loginId: tenantProfile.ownerLoginId }).lean()
+          : null;
+        const ownerUserId = ownerDoc?._id || null;
+        const rentAmt = Number(tenantProfile?.agreedRent || paidAmount);
+        const invoiceNumber = `INV-${billingMonth}-${String(tenantProfile._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+        const config = ownerUserId
+          ? await getEffectiveConfig(ownerUserId, tenantProfile?.property, null)
+          : null;
+        const [yr, mo] = billingMonth.split('-');
+        const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, (config?.rentDueDay || 1));
+
+        matchedInvoice = await RentInvoice.create({
+          invoiceNumber,
+          ownerId: ownerUserId,
+          propertyId: tenantProfile?.property || null,
+          tenantId: tenantProfile._id,
+          tenantName: tenantProfile?.name || '',
+          tenantEmail: tenantProfile?.email || '',
+          tenantPhone: tenantProfile?.phone || '',
+          billingMonth,
+          rentAmount: rentAmt,
+          dueDate,
+          totalDue: rentAmt,
+          outstandingAmount: 0,
+          paidAmount: Number(paidAmount),
+          rentPaidAmount: Number(paidAmount),
+          status: 'PAID',
+          paymentDate: new Date(),
+          penaltyConfigSnapshot: config || {},
+        });
+        console.log(`✅ [recordPaymentByTenant] Auto-created PAID invoice: ${matchedInvoice._id}`);
+
+        // Create RentPayment record for receipts
+        if (ownerUserId) {
+          await RentPayment.create({
+            invoiceId: matchedInvoice._id,
+            tenantId: tenantProfile._id,
+            propertyId: tenantProfile?.property || null,
+            ownerId: ownerUserId,
+            amount: Number(paidAmount),
+            paymentMethod: rent.paymentMethod || 'razorpay',
+            transactionId: rent.razorpayPaymentId || String(Date.now()),
+            isPartial: false,
+            remainingAfter: 0,
+            rentPaidAmount: Number(paidAmount),
+            penaltyPaidAmount: 0,
+            paymentDate: new Date(),
+            recordedBy: tenantId,
+            notes: 'Auto-recorded from tenant Razorpay payment',
+          });
+        }
+      } else if (matchedInvoice) {
+        // ── UPDATE existing invoice ──
         const newPaidAmount = (matchedInvoice.paidAmount || 0) + Number(paidAmount);
         const newOutstanding = Math.max(0, (matchedInvoice.totalDue || 0) - newPaidAmount);
         const isFullyPaid = newOutstanding <= 0;
@@ -439,16 +499,69 @@ exports.recordPaymentByTenant = async (req, res) => {
             paidAmount: newPaidAmount,
             rentPaidAmount: Math.min(newPaidAmount, matchedInvoice.rentAmount || 0),
             outstandingAmount: newOutstanding,
-            status: isFullyPaid ? "PAID" : newPaidAmount > 0 ? "PARTIAL" : "PENDING",
+            status: isFullyPaid ? 'PAID' : newPaidAmount > 0 ? 'PARTIAL' : 'PENDING',
             lastEvaluatedAt: new Date(),
           },
         });
       }
     } catch (invoiceSyncErr) {
       console.warn(
-        "recordPaymentByTenant: invoice sync failed:",
+        'recordPaymentByTenant: invoice sync failed:',
         invoiceSyncErr.message,
       );
+    }
+
+    // ── Auto-create PaymentTransaction for admin commission split ──────────
+    // This makes the Financial Ledger show commission earned from monthly rent payments.
+    try {
+      if (rent.paymentMethod === 'razorpay' || rent.razorpayPaymentId) {
+        // Check if a transaction for this payment_id already exists
+        const existingTx = rent.razorpayPaymentId
+          ? await PaymentTransaction.findOne({ razorpay_payment_id: rent.razorpayPaymentId })
+          : null;
+
+        if (!existingTx) {
+          let settings = await SystemSettings.findOne({});
+          if (!settings) settings = { commission_percentage: 10, gst_percentage: 18 };
+          const commPct = settings.commission_percentage || 10;
+          const gstPct = settings.gst_percentage || 18;
+          const amt = Number(paidAmount);
+          const commAmt = Math.round(amt * commPct / 100 * 100) / 100;
+          const gstAmt = Math.round(commAmt * gstPct / 100 * 100) / 100;
+          const ownerAmt = amt - commAmt - gstAmt;
+
+          const ownerDoc = tenantProfile?.ownerLoginId
+            ? await Owner.findOne({ loginId: tenantProfile.ownerLoginId }).lean()
+            : null;
+
+          await PaymentTransaction.create({
+            razorpay_payment_id: rent.razorpayPaymentId || `RENT-${Date.now()}`,
+            razorpay_order_id: rent.razorpayOrderId || null,
+            razorpay_signature: rent.razorpaySignature || null,
+            status: 'Verified',
+            booking_id: String(rent._id),
+            property_id: String(tenantProfile?.property || ''),
+            property_name: tenantProfile?.propertyTitle || '',
+            tenant_id: tenantId,
+            tenant_name: tenantProfile?.name || '',
+            owner_id: tenantProfile?.ownerLoginId || '',
+            owner_name: ownerDoc?.name || ownerDoc?.profile?.name || '',
+            booking_amount: amt,
+            commission_percentage: commPct,
+            commission_amount: commAmt,
+            gst_percentage: gstPct,
+            gst_amount: gstAmt,
+            owner_amount: ownerAmt,
+            payout_status: 'Pending',
+            payment_method: 'razorpay',
+            payment_date: new Date(),
+            notes: `Monthly rent payment - ${rent.collectionMonth || new Date().toISOString().slice(0, 7)}`,
+          });
+          console.log(`💰 [recordPaymentByTenant] Commission split recorded: ₹${commAmt} admin, ₹${ownerAmt} owner`);
+        }
+      }
+    } catch (commErr) {
+      console.warn('recordPaymentByTenant: commission split failed:', commErr.message);
     }
 
     // Send payment confirmation email

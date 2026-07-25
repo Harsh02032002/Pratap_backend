@@ -44,9 +44,9 @@ router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee',
       totalBookings,
       totalRents
     ] = await Promise.all([
-      Property.countDocuments(),
-      User.countDocuments({ role: { $in: ['tenant', 'user'] } }),
-      User.countDocuments({ role: 'owner' }),
+      Property.countDocuments({ isDeleted: { $ne: true } }),
+      User.countDocuments({ role: { $in: ['tenant', 'user'] }, isDeleted: { $ne: true } }),
+      Owner.countDocuments({ isDeleted: { $ne: true } }),
       Booking.countDocuments(),
       Rent.countDocuments()
     ]);
@@ -159,7 +159,13 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       Rent.find(pendingRentFilter).limit(10).sort({ createdAt: -1 })
     ]);
 
-    // --- Revenue calculation (active tenants only) ---
+    // --- Revenue calculation (PaymentTransaction commission + fallback to active tenant rents) ---
+    const txs = await PaymentTransaction.find({}).lean();
+    let txCommission = 0;
+    txs.forEach(t => {
+      txCommission += (t.commission_amount || 0);
+    });
+
     const activeIdSet = new Set(activeTenantIds.map(String));
     const activeLoginSet = new Set(activeTenantLoginIds);
     let totalRevenue = 0;
@@ -172,6 +178,8 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       const fee = Number(rent.serviceFeeAmount || 50);
       totalRevenue += (commission + fee);
     });
+
+    const finalRevenue = txCommission > 0 ? txCommission : totalRevenue;
 
     // --- Revenue trend (last 5 months) ---
     let trendMatch = {};
@@ -259,7 +267,7 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       summary: {
         totalProperties: propertiesCount,
         totalTenants: tenantsCount,
-        monthlyRevenue: Math.round(totalRevenue),
+        monthlyRevenue: Math.round(finalRevenue),
         alerts: totalAlerts
       },
       revenueTrend: formattedTrends.length > 0 ? formattedTrends : [
@@ -326,15 +334,18 @@ router.get('/properties/overview', protect, authorize('superadmin'), async (req,
 router.get('/users/overview', protect, authorize('superadmin'), async (req, res) => {
   try {
     const Tenant = require('../models/Tenant');
-    const [total, team, owners, tenants] = await Promise.all([
-      User.countDocuments(),
-      User.countDocuments({ role: { $in: ['employee', 'admin', 'superadmin'] } }),
-      User.countDocuments({ role: 'owner' }),
-      User.countDocuments({ role: 'tenant' })
+    const Employee = require('../models/Employee');
+    const [userTeamCount, empCount, owners, tenants] = await Promise.all([
+      User.countDocuments({ role: { $in: ['employee', 'areamanager', 'manager', 'admin'] }, isDeleted: { $ne: true } }),
+      Employee.countDocuments({ isDeleted: { $ne: true } }),
+      Owner.countDocuments({ isDeleted: { $ne: true } }),
+      User.countDocuments({ role: 'tenant', isDeleted: { $ne: true } })
     ]);
+    const team = userTeamCount + empCount;
+    const total = team + owners + tenants;
 
     // Fetch recent signups
-    const recentSignups = await User.find({})
+    const recentSignups = await User.find({ isDeleted: { $ne: true }, role: { $ne: 'superadmin' } })
       .sort({ createdAt: -1 })
       .limit(5)
       .select('name email role createdAt kycStatus')
@@ -2343,6 +2354,207 @@ router.get('/backups/download/:filename', protect, authorize('superadmin'), asyn
     res.download(filepath, filename);
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OWNER SUBSCRIPTION / FREE TRIAL MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: get or create system settings doc
+async function getSettings() {
+  let s = await SystemSettings.findOne();
+  if (!s) s = await SystemSettings.create({});
+  return s;
+}
+
+// Helper: compute trial status for one owner
+function computeTrialStatus(owner, trialDays) {
+  const now = new Date();
+  // Use subscription.trialStartDate, else fall back to owner.createdAt
+  const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
+  // Use subscription.trialEndDate if manually set, else calculate from trialDays
+  let endDate = owner.subscription?.trialEndDate;
+  if (!endDate && trialDays) {
+    endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
+  }
+
+  const isSubscribed = owner.subscription?.isSubscribed || false;
+  const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
+
+  // If subscribed and subscription not expired
+  if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
+    return { status: 'subscribed', daysRemaining: null, trialExpired: false, endDate: subscriptionExpiry, startDate };
+  }
+
+  if (!endDate) {
+    // Trial days not configured yet
+    return { status: 'trial_unconfigured', daysRemaining: null, trialExpired: false, endDate: null, startDate };
+  }
+
+  const msRemaining = new Date(endDate).getTime() - now.getTime();
+  const daysRemaining = Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+  const trialExpired = msRemaining <= 0;
+
+  return {
+    status: trialExpired ? 'expired' : 'trial_active',
+    daysRemaining: trialExpired ? 0 : daysRemaining,
+    trialExpired,
+    endDate,
+    startDate
+  };
+}
+
+// GET /api/superadmin/owner-subscriptions — all owners with trial/subscription status
+router.get('/owner-subscriptions', protect, authorize('superadmin'), async (req, res) => {
+  try {
+    const [owners, settings] = await Promise.all([
+      Owner.find({ isDeleted: { $ne: true } })
+        .select('loginId name email phone createdAt subscription isActive')
+        .lean(),
+      getSettings()
+    ]);
+
+    const trialDays = settings.ownerTrialDays || null;
+
+    const ownersWithStatus = owners.map(owner => {
+      const trial = computeTrialStatus(owner, trialDays);
+      return {
+        _id: owner._id,
+        loginId: owner.loginId,
+        name: owner.name,
+        email: owner.email,
+        phone: owner.phone,
+        isActive: owner.isActive,
+        createdAt: owner.createdAt,
+        subscription: owner.subscription,
+        trialStatus: trial
+      };
+    });
+
+    // Stats summary
+    const total = ownersWithStatus.length;
+    const trialActive = ownersWithStatus.filter(o => o.trialStatus.status === 'trial_active').length;
+    const expired = ownersWithStatus.filter(o => o.trialStatus.status === 'expired').length;
+    const subscribed = ownersWithStatus.filter(o => o.trialStatus.status === 'subscribed').length;
+    const unconfigured = ownersWithStatus.filter(o => o.trialStatus.status === 'trial_unconfigured').length;
+
+    return res.json({
+      success: true,
+      stats: { total, trialActive, expired, subscribed, unconfigured },
+      owners: ownersWithStatus,
+      settings: {
+        ownerTrialDays: settings.ownerTrialDays,
+        ownerSubscriptionPrice: settings.ownerSubscriptionPrice,
+        ownerSubscriptionCurrency: settings.ownerSubscriptionCurrency
+      }
+    });
+  } catch (err) {
+    console.error('❌ owner-subscriptions error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /api/superadmin/owner-subscriptions/:ownerId/extend — extend trial or mark subscribed
+router.post('/owner-subscriptions/:ownerId/extend', protect, authorize('superadmin'), async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    const { newTrialEndDate, extendByDays, markSubscribed, subscriptionExpiry, note } = req.body;
+
+    const owner = await Owner.findOne({
+      $or: [{ loginId: ownerId }, { _id: mongoose.Types.ObjectId.isValid(ownerId) ? ownerId : null }]
+    });
+    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+    const superadminLoginId = req.user?.loginId || 'superadmin';
+    const now = new Date();
+
+    if (!owner.subscription) owner.subscription = {};
+
+    // Set trial start if missing
+    if (!owner.subscription.trialStartDate) {
+      owner.subscription.trialStartDate = owner.createdAt || now;
+    }
+
+    if (markSubscribed) {
+      // Mark as fully subscribed
+      owner.subscription.isSubscribed = true;
+      owner.subscription.subscriptionExpiry = subscriptionExpiry ? new Date(subscriptionExpiry) : null;
+    } else if (newTrialEndDate) {
+      // Set specific end date
+      owner.subscription.trialEndDate = new Date(newTrialEndDate);
+      owner.subscription.isSubscribed = false;
+    } else if (extendByDays) {
+      // Extend from current end date or now
+      const currentEnd = owner.subscription.trialEndDate
+        ? new Date(owner.subscription.trialEndDate)
+        : now;
+      const base = currentEnd < now ? now : currentEnd; // if already expired, extend from now
+      owner.subscription.trialEndDate = new Date(base.getTime() + Number(extendByDays) * 24 * 60 * 60 * 1000);
+      owner.subscription.isSubscribed = false;
+    }
+
+    owner.subscription.extendedBy = superadminLoginId;
+    owner.subscription.extensionNote = note || '';
+    owner.subscription.lastExtendedAt = now;
+
+    await owner.save();
+
+    const settings = await getSettings();
+    const trialStatus = computeTrialStatus(owner.toObject(), settings.ownerTrialDays);
+
+    return res.json({
+      success: true,
+      message: 'Owner subscription updated successfully',
+      owner: {
+        loginId: owner.loginId,
+        name: owner.name,
+        subscription: owner.subscription,
+        trialStatus
+      }
+    });
+  } catch (err) {
+    console.error('❌ extend owner subscription error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET /api/superadmin/subscription-settings — get current trial & price settings
+router.get('/subscription-settings', protect, authorize('superadmin'), async (req, res) => {
+  try {
+    const settings = await getSettings();
+    return res.json({
+      success: true,
+      ownerTrialDays: settings.ownerTrialDays ?? null,
+      ownerSubscriptionPrice: settings.ownerSubscriptionPrice ?? null,
+      ownerSubscriptionCurrency: settings.ownerSubscriptionCurrency || 'INR'
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// PUT /api/superadmin/subscription-settings — update trial days & price
+router.put('/subscription-settings', protect, authorize('superadmin'), async (req, res) => {
+  try {
+    const { ownerTrialDays, ownerSubscriptionPrice, ownerSubscriptionCurrency } = req.body;
+    const settings = await getSettings();
+
+    if (ownerTrialDays !== undefined) settings.ownerTrialDays = Number(ownerTrialDays);
+    if (ownerSubscriptionPrice !== undefined) settings.ownerSubscriptionPrice = ownerSubscriptionPrice === '' ? undefined : Number(ownerSubscriptionPrice);
+    if (ownerSubscriptionCurrency) settings.ownerSubscriptionCurrency = ownerSubscriptionCurrency;
+    settings.updated_by = req.user?.loginId || 'superadmin';
+
+    await settings.save();
+    return res.json({
+      success: true,
+      message: 'Subscription settings updated',
+      ownerTrialDays: settings.ownerTrialDays,
+      ownerSubscriptionPrice: settings.ownerSubscriptionPrice,
+      ownerSubscriptionCurrency: settings.ownerSubscriptionCurrency
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 

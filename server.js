@@ -209,8 +209,50 @@ app.use(async (req, res, next) => {
     next();
 });
 
+async function seedSuperAdminIfMissing() {
+    try {
+        const User = require('./models/user');
+        const count = await User.countDocuments({ role: 'superadmin' });
+        if (count === 0) {
+            console.log('👤 No superadmin found in DB — auto-seeding default superadmin...');
+            const superAdmin = new User({
+                name: 'Super Admin',
+                email: 'roomhyadmin@gmail.com',
+                phone: '9999999999',
+                password: 'admin@123',
+                role: 'superadmin',
+                loginId: 'roomhyadmin@gmail.com',
+                status: 'active',
+                isActive: true,
+                isDeleted: false
+            });
+            await superAdmin.save();
+
+            const adminUser = new User({
+                name: 'Super Admin',
+                email: 'admin@roomhy.com',
+                phone: '9876543210',
+                password: 'admin@123',
+                role: 'superadmin',
+                loginId: 'superadmin',
+                status: 'active',
+                isActive: true,
+                isDeleted: false
+            });
+            await adminUser.save();
+
+            console.log('✅ Superadmin accounts auto-seeded successfully!');
+            console.log('   ID: roomhyadmin@gmail.com | Password: admin@123');
+            console.log('   ID: superadmin            | Password: admin@123');
+        }
+    } catch (err) {
+        console.warn('⚠️ Auto-seed superadmin error:', err.message);
+    }
+}
+
 mongoose.connection.on('connected', () => {
     console.log('✅ Mongoose connected');
+    seedSuperAdminIfMissing();
     if (!escalationJobStarted) {
         escalationJobStarted = true;
         startEscalationJob();

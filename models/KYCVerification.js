@@ -21,7 +21,7 @@ const kycVerificationSchema = new mongoose.Schema({
     // KYC Status
     kycStatus: {
         type: String,
-        enum: ['pending', 'verified', 'rejected', 'expired'],
+        enum: ['pending', 'submitted', 'pending_verification', 'audit_pending', 'mismatch_review', 'verified', 'rejected', 'expired'],
         default: 'pending'
     },
     status: {

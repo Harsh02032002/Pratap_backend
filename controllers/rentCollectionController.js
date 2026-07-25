@@ -13,6 +13,7 @@ const {
   recordPayment,
   waivePenalty,
   getEffectiveConfig,
+  autoHealMoveInInvoices,
 } = require('../services/invoiceService');
 const { queueNotification, dispatchNotification, sendReminderEmailDirect } = require('../services/notificationService');
 const { calculatePenalties, generatePreviewBreakdown } = require('../engine/penaltyEngine');
@@ -23,13 +24,22 @@ function getPerformedBy(req) {
   return req.user?.loginId || String(req.user?._id) || 'unknown';
 }
 
-async function assertOwnership(invoice, userId) {
+async function assertOwnership(invoice, reqUser) {
   if (!invoice) {
     const err = new Error('Invoice not found');
     err.status = 404;
     throw err;
   }
-  if (String(invoice.ownerId) !== String(userId)) {
+  const userId = reqUser?._id || reqUser;
+  const userLoginId = reqUser?.loginId ? String(reqUser.loginId).toUpperCase() : null;
+
+  const Owner = require('../models/Owner');
+  const ownerDoc = userLoginId ? await Owner.findOne({ loginId: userLoginId }).lean() : null;
+
+  const validOwnerIds = [String(userId)];
+  if (ownerDoc?._id) validOwnerIds.push(String(ownerDoc._id));
+
+  if (!validOwnerIds.includes(String(invoice.ownerId))) {
     const err = new Error('Unauthorized access');
     err.status = 403;
     throw err;
@@ -84,7 +94,7 @@ async function recordPaymentHandler(req, res) {
     }
 
     const invoice = await RentInvoice.findById(invoiceId).lean();
-    await assertOwnership(invoice, req.user._id);
+    await assertOwnership(invoice, req.user);
 
     const result = await recordPayment(
       invoiceId,
@@ -101,7 +111,7 @@ async function recordPaymentHandler(req, res) {
 async function sendReminder(req, res) {
   try {
     const invoice = await RentInvoice.findById(req.params.id).lean();
-    await assertOwnership(invoice, req.user._id);
+    await assertOwnership(invoice, req.user);
 
     const config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
     const penalties = calculatePenalties(invoice, config);
@@ -226,7 +236,7 @@ async function sendReminder(req, res) {
 async function waivePenaltyHandler(req, res) {
   try {
     const invoice = await RentInvoice.findById(req.params.id).lean();
-    await assertOwnership(invoice, req.user._id);
+    await assertOwnership(invoice, req.user);
 
     const { reason, waivedAmount } = req.body;
     const result = await waivePenalty(req.params.id, { reason, waivedAmount }, getPerformedBy(req));
@@ -240,19 +250,25 @@ async function waivePenaltyHandler(req, res) {
 async function getDashboard(req, res) {
   try {
     const ownerId = req.user._id;
+    await autoHealMoveInInvoices(ownerId, req.user).catch(() => {});
+    const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;
+    const ownerIds = [req.user._id];
+    if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
+
+    const ownerFilter = { ownerId: { $in: ownerIds } };
 
     const [all, paid, partial, pending, waived] = await Promise.all([
-      RentInvoice.countDocuments({ ownerId }),
-      RentInvoice.countDocuments({ ownerId, status: 'PAID' }),
-      RentInvoice.countDocuments({ ownerId, status: 'PARTIAL' }),
-      RentInvoice.countDocuments({ ownerId, status: 'PENDING' }),
-      RentInvoice.countDocuments({ ownerId, status: 'WAIVED' }),
+      RentInvoice.countDocuments(ownerFilter),
+      RentInvoice.countDocuments({ ...ownerFilter, status: 'PAID' }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: 'PARTIAL' }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: 'PENDING' }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: 'WAIVED' }),
     ]);
 
     const [phase1, phase2, phase3] = await Promise.all([
-      RentInvoice.countDocuments({ ownerId, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 1 }),
-      RentInvoice.countDocuments({ ownerId, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 2 }),
-      RentInvoice.countDocuments({ ownerId, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 3 }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 1 }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 2 }),
+      RentInvoice.countDocuments({ ...ownerFilter, status: { $in: ['PENDING', 'PARTIAL'] }, currentPhase: 3 }),
     ]);
 
     const now = new Date();
@@ -261,22 +277,22 @@ async function getDashboard(req, res) {
     const [overdueTotals, allTotals, penaltyTotals, monthlyAggregates] = await Promise.all([
       // Outstanding + penalty only from unpaid invoices
       RentInvoice.aggregate([
-        { $match: { ownerId, status: { $in: ['PENDING', 'PARTIAL'] } } },
+        { $match: { ...ownerFilter, status: { $in: ['PENDING', 'PARTIAL'] } } },
         { $group: { _id: null, totalOutstanding: { $sum: '$outstandingAmount' } } },
       ]),
       // Gross totals across every invoice
       RentInvoice.aggregate([
-        { $match: { ownerId } },
+        { $match: ownerFilter },
         { $group: { _id: null, totalRentAmount: { $sum: '$rentAmount' }, totalPaid: { $sum: '$paidAmount' } } },
       ]),
       // Total penalty charged across ALL invoices (including PAID ones)
       RentInvoice.aggregate([
-        { $match: { ownerId, totalPenalty: { $gt: 0 } } },
+        { $match: { ...ownerFilter, totalPenalty: { $gt: 0 } } },
         { $group: { _id: null, totalPenalty: { $sum: '$totalPenalty' } } },
       ]),
       // Strict Monthly Segregation for perfect Spider Chart / UI synchronicity
       RentInvoice.aggregate([
-        { $match: { ownerId } },
+        { $match: ownerFilter },
         {
           $group: {
             _id: '$billingMonth',
@@ -324,9 +340,14 @@ async function getDashboard(req, res) {
 async function listInvoices(req, res) {
   try {
     const ownerId = req.user._id;
+    await autoHealMoveInInvoices(ownerId, req.user).catch(() => {});
     const { status, phase, billingMonth, page = 1, limit = 20 } = req.query;
 
-    const filter = { ownerId };
+    const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;
+    const ownerIds = [req.user._id];
+    if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
+
+    const filter = { ownerId: { $in: ownerIds } };
     if (status) {
       const values = status.split(',').map(v => v.trim()).filter(Boolean);
       filter.status = values.length > 1 ? { $in: values } : values[0];
@@ -399,7 +420,7 @@ async function getInvoiceById(req, res) {
   try {
     console.log('getInvoiceById invoiceId:', req.params.id);
     const invoice = await RentInvoice.findById(req.params.id).lean();
-    await assertOwnership(invoice, req.user._id);
+    await assertOwnership(invoice, req.user);
 
     const config = invoice.penaltyConfigSnapshot || await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
     let live = calculatePenalties(invoice, config);
@@ -627,9 +648,13 @@ async function getMonthlySummary(req, res) {
       slots.push({ key, label: d.toLocaleString('en', { month: 'short' }) });
     }
 
+    const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;
+    const ownerIds = [req.user._id];
+    if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
+
     const keys = slots.map(s => s.key);
     const rows = await RentInvoice.aggregate([
-      { $match: { ownerId, billingMonth: { $in: keys } } },
+      { $match: { ownerId: { $in: ownerIds }, billingMonth: { $in: keys } } },
       {
         $group: {
           _id: '$billingMonth',

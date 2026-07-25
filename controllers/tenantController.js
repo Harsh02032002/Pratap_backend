@@ -11,6 +11,134 @@ const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { enrichTenantsWithDues } = require('../services/tenantDuesService');
 
 /**
+ * Approve or reject tenant KYC verification
+ * POST /api/tenants/:tenantId/kyc-verification
+ * Body: { action: 'approve' | 'reject', reason?: string }
+ */
+exports.verifyTenantKYC = async (req, res) => {
+    try {
+        const { tenantId } = req.params;
+        const { action, reason } = req.body;
+
+        if (!['approve', 'reject'].includes(action)) {
+            return res.status(400).json({ success: false, message: 'Invalid action' });
+        }
+
+        const tenant = await Tenant.findById(tenantId);
+        if (!tenant) {
+            return res.status(404).json({ success: false, message: 'Tenant not found' });
+        }
+
+        // Compare tenant-submitted KYC data with admin-entered data
+        const adminData = tenant.kycVerificationData || {};
+        const tenantData = tenant.digitalCheckin?.kyc || {};
+        
+        const mismatches = [];
+        
+        // Compare name
+        if (adminData.adminEnteredName && tenant.digitalCheckin?.profile?.name) {
+            if (adminData.adminEnteredName.toLowerCase() !== tenant.digitalCheckin.profile.name.toLowerCase()) {
+                mismatches.push({
+                    field: 'name',
+                    admin: adminData.adminEnteredName,
+                    tenant: tenant.digitalCheckin.profile.name
+                });
+            }
+        }
+        
+        // Compare Aadhaar number
+        if (adminData.adminEnteredAadhaar && tenantData.aadhaarNumber) {
+            if (adminData.adminEnteredAadhaar !== tenantData.aadhaarNumber) {
+                mismatches.push({
+                    field: 'aadhaar',
+                    admin: adminData.adminEnteredAadhaar,
+                    tenant: tenantData.aadhaarNumber
+                });
+            }
+        }
+        
+        // Compare phone
+        if (adminData.adminEnteredPhone && tenant.aadhaarLinkedPhone) {
+            if (adminData.adminEnteredPhone !== tenant.aadhaarLinkedPhone) {
+                mismatches.push({
+                    field: 'phone',
+                    admin: adminData.adminEnteredPhone,
+                    tenant: tenant.aadhaarLinkedPhone
+                });
+            }
+        }
+
+        if (action === 'approve') {
+            tenant.kycStatus = 'verified';
+            tenant.status = 'active'; // Activate tenant on KYC approval
+            
+            // Send notification to tenant
+            try {
+                const Notification = require('../models/Notification');
+                await Notification.create({
+                    type: 'kyc_approved',
+                    title: 'KYC Verification Approved',
+                    message: 'Your KYC has been verified and approved. You can now access your account.',
+                    recipientId: tenant.user,
+                    recipientType: 'tenant',
+                    tenantId: tenant._id,
+                    createdAt: new Date(),
+                    isRead: false
+                });
+            } catch (notifErr) {
+                console.error('[NOTIFICATION ERROR] Failed to send KYC approval notification:', notifErr && notifErr.message);
+            }
+        } else {
+            tenant.kycStatus = 'rejected';
+            
+            // Send notification to tenant with rejection reason
+            try {
+                const Notification = require('../models/Notification');
+                await Notification.create({
+                    type: 'kyc_rejected',
+                    title: 'KYC Verification Rejected',
+                    message: `Your KYC verification was rejected. ${reason || 'Please contact support for more information.'}`,
+                    recipientId: tenant.user,
+                    recipientType: 'tenant',
+                    tenantId: tenant._id,
+                    rejectionReason: reason,
+                    createdAt: new Date(),
+                    isRead: false
+                });
+            } catch (notifErr) {
+                console.error('[NOTIFICATION ERROR] Failed to send KYC rejection notification:', notifErr && notifErr.message);
+            }
+        }
+
+        // Store verification result
+        tenant.kycVerificationResult = {
+            action,
+            verifiedBy: req.user ? req.user.id : null,
+            verifiedAt: new Date(),
+            mismatches: mismatches.length > 0 ? mismatches : null,
+            reason: action === 'reject' ? reason : null
+        };
+
+        await tenant.save();
+
+        res.json({
+            success: true,
+            message: action === 'approve' ? 'Tenant KYC approved successfully' : 'Tenant KYC rejected',
+            tenant: {
+                id: tenant._id,
+                name: tenant.name,
+                kycStatus: tenant.kycStatus,
+                status: tenant.status,
+                mismatches: mismatches.length > 0 ? mismatches : undefined
+            }
+        });
+    } catch (error) {
+        console.error('[KYC VERIFICATION ERROR]', error);
+        res.status(500).json({ success: false, message: 'Failed to process KYC verification' });
+    }
+};
+
+/**
  * Assign a tenant to a room
  * POST /api/tenants/assign
  * Body: { name, phone, email, propertyId, roomNo, bedNo, moveInDate, agreedRent }
@@ -244,13 +372,26 @@ exports.assignTenant = async (req, res) => {
                 idProofFile: idProof?.file || '',
                 aadhaarNumber: (idProof?.type === 'Aadhaar Card' ? idProof?.number : ''),
                 aadhar: (idProof?.type === 'Aadhaar Card' ? idProof?.number : ''),
-                aadhaarFront: (idProof?.type === 'Aadhaar Card' ? idProof?.file : '')
+                aadhaarFront: (idProof?.type === 'Aadhaar Card' ? idProof?.file : ''),
+                // Store Aadhaar OCR data for verification
+                aadhaarData: idProof?.aadhaarData || null,
+                fatherName: additional?.fatherName || '',
+                permanentAddress: additional?.permanentAddress || ''
+            },
+            kycStatus: req.body.kycStatus || 'verified', // Default verified when no mismatch
+            kycVerificationData: {
+                // Store data from Add Tenant for comparison during tenant KYC
+                adminEnteredName: name,
+                adminEnteredFatherName: additional?.fatherName || '',
+                adminEnteredAddress: additional?.permanentAddress || '',
+                adminEnteredDob: dob,
+                adminEnteredAadhaar: idProof?.number || '',
+                adminEnteredPhone: phone
             },
             ownerLoginId: String(ownerLoginId || property.ownerLoginId || '').toUpperCase() || undefined,
             propertyTitle: assignedPropertyTitle || property.title || '',
             assignedBy: req.user ? req.user.id : (property.owner && property.owner._id ? property.owner._id : undefined),
-            status: 'pending',
-            kycStatus: idProof?.file ? 'submitted' : 'pending',
+            status: req.body.status || 'active',
             digitalCheckin: {
                 agreementDetails: {
                     ...(accommodationType && { accommodationType }),
@@ -317,8 +458,125 @@ exports.assignTenant = async (req, res) => {
             console.log(`[RENT ALREADY EXISTS] Skipped duplicate rent generation for ${loginId} in ${collectionMonth}`);
         }
 
+        // Auto-create PAID RentInvoice & RentPayment for move-in month
+        try {
+            const RentInvoice = require('../models/RentInvoice');
+            const RentPayment = require('../models/RentPayment');
+            const RentAuditLog = require('../models/RentAuditLog');
+            const Owner = require('../models/Owner');
+            const { getEffectiveConfig } = require('../services/invoiceService');
+
+            const moveIn = moveInDate ? new Date(moveInDate) : new Date();
+            const now = new Date();
+            const billingMonth = `${moveIn.getFullYear()}-${String(moveIn.getMonth() + 1).padStart(2, '0')}`;
+            const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+            if (billingMonth === currentMonth) {
+                const existingInv = await RentInvoice.findOne({ tenantId: tenant._id, billingMonth: currentMonth });
+                if (!existingInv) {
+                const ownerDoc = normalizedOwnerLoginId ? await Owner.findOne({ loginId: normalizedOwnerLoginId }).lean() : null;
+                const ownerUserId = ownerDoc?._id || property.owner?._id || property.owner || null;
+                const rentAmt = Number(agreedRent || 0);
+
+                const config = ownerUserId
+                    ? await getEffectiveConfig(ownerUserId, property._id, null).catch(() => null)
+                    : null;
+                const [yr, mo] = billingMonth.split('-');
+                const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
+
+                const invoiceNumber = `INV-${billingMonth}-${String(tenant._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
+                const invoice = await RentInvoice.create({
+                    invoiceNumber,
+                    ownerId: ownerUserId,
+                    propertyId: property._id,
+                    tenantId: tenant._id,
+                    tenantName: name || '',
+                    tenantEmail: email || '',
+                    tenantPhone: phone || '',
+                    billingMonth,
+                    rentAmount: rentAmt,
+                    dueDate,
+                    totalDue: rentAmt,
+                    outstandingAmount: 0,
+                    paidAmount: rentAmt,
+                    rentPaidAmount: rentAmt,
+                    status: 'PAID',
+                    paymentDate: moveIn,
+                    penaltyConfigSnapshot: config || {},
+                });
+
+                if (ownerUserId && rentAmt > 0) {
+                    await RentPayment.create({
+                        invoiceId: invoice._id,
+                        tenantId: tenant._id,
+                        propertyId: property._id,
+                        ownerId: ownerUserId,
+                        amount: rentAmt,
+                        paymentMethod: 'cash',
+                        transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
+                        isPartial: false,
+                        remainingAfter: 0,
+                        rentPaidAmount: rentAmt,
+                        penaltyPaidAmount: 0,
+                        paymentDate: moveIn,
+                        recordedBy: normalizedOwnerLoginId || 'SYSTEM',
+                        notes: 'Move-in month rent — auto-recorded on tenant onboarding',
+                    }).catch(() => {});
+                }
+
+                await RentAuditLog.create({
+                    action: 'INVOICE_CREATED',
+                    invoiceId: invoice._id,
+                    tenantId: tenant._id,
+                    ownerId: ownerUserId,
+                    propertyId: property._id,
+                    meta: { billingMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID' },
+                }).catch(() => {});
+
+                console.log(`[INVOICE CREATED] Auto-created PAID invoice for ${name} (${loginId}), billingMonth: ${billingMonth}`);
+            }
+            }
+        } catch (invErr) {
+            console.warn('[INVOICE CREATION WARN] Could not auto-create move-in invoice:', invErr.message);
+        }
+
         // Log notification for super admin
         console.log(`[TENANT ASSIGNED] ${name} (${loginId}) assigned to ${rentPropertyName}, Room ${roomNo}`);
+
+        // Send notification to owner about new tenant requiring KYC verification
+        try {
+            const ownerNotification = {
+                type: 'kyc_verification_required',
+                title: 'New Tenant KYC Verification Required',
+                message: `Tenant ${name} has been assigned to Room ${roomNo} in ${rentPropertyName}. Please review their KYC details and approve/reject.`,
+                recipientId: property.owner._id,
+                recipientType: 'owner',
+                tenantId: tenant._id,
+                tenantName: tenant.name,
+                propertyName: rentPropertyName,
+                roomNo: roomNo,
+                kycData: {
+                    adminEntered: {
+                        name: name,
+                        fatherName: additional?.fatherName || '',
+                        address: additional?.permanentAddress || '',
+                        aadhaar: idProof?.number || '',
+                        phone: phone
+                    },
+                    aadhaarOCR: idProof?.aadhaarData || null
+                },
+                createdAt: new Date(),
+                isRead: false
+            };
+            
+            // Save notification to database (assuming Notification model exists)
+            const Notification = require('../models/Notification');
+            await Notification.create(ownerNotification);
+            console.log(`[NOTIFICATION] KYC verification notification sent to owner for tenant ${tenant.loginId}`);
+        } catch (notifErr) {
+            console.error('[NOTIFICATION ERROR] Failed to send KYC verification notification:', notifErr && notifErr.message);
+        }
 
         // Send email to tenant with loginId, tempPassword and digital check-in link (non-blocking)
         const baseWebUrl = process.env.DIGITAL_CHECKIN_URL || process.env.APP_BASE_URL || process.env.APP_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';

@@ -790,9 +790,15 @@ exports.login = async (req, res) => {
                         isDeleted: false
                     });
                 } else if (tenant.status !== 'active' || tenant.isActive === false || tenant.isDeleted) {
-                    tenant.status = 'active';
                     tenant.isActive = true;
                     tenant.isDeleted = false;
+                    if (tenant.status !== 'suspended' && tenant.status !== 'inactive') {
+                        if (tenant.kycStatus === 'verified') {
+                            tenant.status = 'active';
+                        } else {
+                            tenant.status = 'pending';
+                        }
+                    }
                     await tenant.save();
                 }
             }
@@ -1158,7 +1164,11 @@ exports.setTenantPassword = async (req, res) => {
 
         if (tenant) {
             tenant.tempPassword = null;
-            tenant.status = tenant.status === 'pending' ? 'active' : tenant.status;
+            if (tenant.status === 'pending') {
+                if (tenant.kycStatus === 'verified') {
+                    tenant.status = 'active';
+                }
+            }
             await tenant.save();
         }
 

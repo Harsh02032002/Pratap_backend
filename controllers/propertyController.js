@@ -109,8 +109,8 @@ exports.addProperty = async (req, res) => {
       }
     }
 
-    // Staff members can add properties with their requested status (defaulting to active). Everyone else (owner) goes to pending_approval.
-    const isStaff = req.user && ['superadmin', 'admin', 'employee', 'manager', 'areamanager'].includes(req.user.role);
+    // Staff members or requests explicitly marked active (e.g. Superadmin wizard) create active/published properties. Owner requests default to pending_approval.
+    const isStaff = (req.user && ['superadmin', 'admin', 'employee', 'manager', 'areamanager'].includes(req.user.role)) || req.body.status === 'active';
     
     if (isStaff) {
         propertyData.status = req.body.status || 'active'; 

@@ -72,7 +72,9 @@ exports.protect = async (req, res, next) => {
 exports.authorize = (...roles) => {
     return (req, res, next) => {
         if (!req.user) return res.status(401).json({ message: 'Not authenticated' });
-        const expanded = roles.includes('superadmin') ? [...roles, 'admin'] : roles;
+        const expanded = roles.includes('superadmin') 
+            ? [...roles, 'admin', 'employee', 'areamanager', 'manager'] 
+            : roles;
         console.log(`[AUTH DEBUG] Path: ${req.method} ${req.originalUrl} | Required: ${roles.join(',')} | User Role: ${req.user.role}`);
         if (!expanded.includes(req.user.role)) {
             console.log(`[AUTH DEBUG] Forbidden: User role ${req.user.role} not in expanded roles [${expanded.join(',')}]`);

@@ -152,6 +152,38 @@ router.post(
     }
 );
 
+// ══ 6.1 ADMIN/OWNER: VIEW TENANT KYC DOCUMENTS ═══════════════════════════
+router.get(
+    '/:tenantId/kyc',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner', 'employee', 'manager'),
+    async (req, res) => {
+        try {
+            const { tenantId } = req.params;
+            const tenant = await Tenant.findById(tenantId);
+            if (!tenant) {
+                return res.status(404).json({ success: false, message: 'Tenant not found' });
+            }
+
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
+
+            res.json({
+                success: true,
+                kyc: tenant.kyc || {},
+                kycStatus: tenant.kycStatus,
+                tenantName: tenant.name,
+                tenantLoginId: tenant.loginId
+            });
+        } catch (err) {
+            res.status(500).json({ success: false, message: err.message });
+        }
+    }
+);
+
 // ══ 7. TENANT SELF-SERVICE: KYC SUBMISSION ════════════════════════════════════
 // IDOR FIX: tenantLoginId from the request body is intentionally NOT used for
 // the database lookup. The tenant record is resolved from req.user.loginId
@@ -192,18 +224,33 @@ router.post(
     }
 );
 
-// ══ 8. ADMIN: KYC APPROVE / REJECT ══════════════════════════════════════════
+// ══ 8. ADMIN/OWNER: KYC APPROVE / REJECT WITH DATA COMPARISON ═════════════════
+router.post(
+    '/:tenantId/kyc-verification',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    tenantController.verifyTenantKYC
+);
+
+// ══ 8.1. ADMIN/OWNER: LEGACY KYC APPROVE / REJECT ══════════════════════════════════════════
 router.post(
     '/kyc/approve',
     protect,
-    authorize('superadmin', 'areamanager'),
+    authorize('superadmin', 'areamanager', 'owner'),
     auditTrail('tenants'),
     async (req, res) => {
         try {
             const { tenantId } = req.body;
             const tenant = await Tenant.findById(tenantId);
             if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
             tenant.kycStatus = 'verified';
+            tenant.status = 'active'; // Activate tenant on KYC approval
             await tenant.save();
             res.json({ success: true, tenant });
         } catch (err) {
@@ -215,18 +262,95 @@ router.post(
 router.post(
     '/kyc/reject',
     protect,
-    authorize('superadmin', 'areamanager'),
+    authorize('superadmin', 'areamanager', 'owner'),
     auditTrail('tenants'),
     async (req, res) => {
         try {
             const { tenantId } = req.body;
             const tenant = await Tenant.findById(tenantId);
             if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
             tenant.kycStatus = 'rejected';
             await tenant.save();
             res.json({ success: true, tenant });
         } catch (err) {
             res.status(500).json({ message: err.message });
+        }
+    }
+);
+
+router.post(
+    '/kyc/resend-link',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    async (req, res) => {
+        try {
+            const { tenantId } = req.body;
+            const tenant = await Tenant.findById(tenantId);
+            if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
+            if (!tenant.email) {
+                return res.status(400).json({ success: false, message: 'Tenant email address is missing' });
+            }
+
+            const mailer = require('../utils/mailer');
+            const origin = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:5173';
+            const kycLink = `${origin.replace(/\/$/, '')}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
+            
+            const sent = await mailer.sendKycLinkEmail(tenant.email, tenant.name, tenant.propertyName || 'RoomHy Tenant Portal', kycLink);
+            
+            res.json({ 
+                success: true, 
+                message: sent ? `KYC link successfully emailed to ${tenant.email}` : `Failed to send email to ${tenant.email}`,
+                kycLink 
+            });
+        } catch (err) {
+            res.status(500).json({ success: false, message: err.message });
+        }
+    }
+);
+
+router.post(
+    '/:tenantId/resend-kyc-link',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    async (req, res) => {
+        try {
+            const tenantId = req.params.tenantId || req.body.tenantId;
+            const tenant = await Tenant.findById(tenantId);
+            if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
+            if (!tenant.email) {
+                return res.status(400).json({ success: false, message: 'Tenant email address is missing' });
+            }
+
+            const mailer = require('../utils/mailer');
+            const origin = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:5173';
+            const kycLink = `${origin.replace(/\/$/, '')}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
+            
+            const sent = await mailer.sendKycLinkEmail(tenant.email, tenant.name, tenant.propertyName || 'RoomHy Tenant Portal', kycLink);
+            
+            res.json({ 
+                success: true, 
+                message: sent ? `KYC link successfully emailed to ${tenant.email}` : `Failed to send email to ${tenant.email}`,
+                kycLink 
+            });
+        } catch (err) {
+            res.status(500).json({ success: false, message: err.message });
         }
     }
 );
@@ -415,19 +539,60 @@ router.get(
             }
 
             const loginId = requestedId;
+            const Tenant = require('../models/Tenant');
+            const RentInvoice = require('../models/RentInvoice');
+            const tenantDoc = await Tenant.findOne({ loginId }).lean();
             const rents = await Rent.find({ tenantLoginId: loginId }).lean();
+            const invoices = tenantDoc?._id ? await RentInvoice.find({ tenantId: tenantDoc._id }).lean() : [];
             const customEntries = await LedgerEntry.find({ tenantLoginId: loginId }).lean();
             const ledgerItems = [];
 
+            const monthMap = new Map();
+
             rents.forEach(r => {
-                const label = r.collectionMonth ||
-                    new Date(r.createdAt || r.dueDate || Date.now()).toLocaleString('en-US', { month: 'short', year: 'numeric' });
-                ledgerItems.push({ date: r.createdAt || r.dueDate || new Date(), details: `Monthly Rent Charged (${label})`, debit: r.rentAmount || 0, credit: 0 });
-                if (r.paidAmount > 0 || ['paid', 'completed'].includes(String(r.paymentStatus).toLowerCase())) {
-                    const method = r.paymentMethod ? ` via ${r.paymentMethod}` : '';
-                    ledgerItems.push({ date: r.paymentDate || r.updatedAt || r.createdAt || new Date(), details: `Rent Payment Received${method} (${label})`, debit: 0, credit: r.paidAmount || r.rentAmount || 0 });
+                const month = r.collectionMonth || (r.createdAt ? new Date(r.createdAt).toISOString().slice(0, 7) : null);
+                if (month) {
+                    monthMap.set(month, {
+                        rentAmount: r.rentAmount || 0,
+                        paidAmount: r.paidAmount || 0,
+                        paymentStatus: r.paymentStatus || 'pending',
+                        paymentMethod: r.paymentMethod,
+                        paymentDate: r.paymentDate,
+                        createdAt: r.createdAt || r.dueDate
+                    });
                 }
             });
+
+            invoices.forEach(inv => {
+                const month = inv.billingMonth;
+                if (!month) return;
+                if (!monthMap.has(month)) {
+                    monthMap.set(month, {
+                        rentAmount: inv.rentAmount || 0,
+                        paidAmount: inv.paidAmount || 0,
+                        paymentStatus: inv.status === 'PAID' ? 'paid' : 'pending',
+                        paymentMethod: inv.paymentMethod,
+                        paymentDate: inv.paymentDate,
+                        createdAt: inv.createdAt || inv.dueDate
+                    });
+                } else {
+                    const existing = monthMap.get(month);
+                    if (inv.status === 'PAID') {
+                        existing.paymentStatus = 'paid';
+                        existing.paidAmount = inv.paidAmount || inv.rentAmount;
+                        existing.paymentDate = inv.paymentDate || existing.paymentDate;
+                    }
+                }
+            });
+
+            for (const [month, r] of monthMap.entries()) {
+                const label = month;
+                ledgerItems.push({ date: r.createdAt || new Date(), details: `Monthly Rent Charged (${label})`, debit: r.rentAmount || 0, credit: 0 });
+                if (r.paidAmount > 0 || ['paid', 'completed'].includes(String(r.paymentStatus).toLowerCase())) {
+                    const method = r.paymentMethod ? ` via ${r.paymentMethod}` : '';
+                    ledgerItems.push({ date: r.paymentDate || r.createdAt || new Date(), details: `Rent Payment Received${method} (${label})`, debit: 0, credit: r.paidAmount || r.rentAmount || 0 });
+                }
+            }
 
             customEntries.forEach(c => {
                 ledgerItems.push({ _id: c._id, date: c.date, details: c.details, debit: c.debit || 0, credit: c.credit || 0 });

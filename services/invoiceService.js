@@ -94,20 +94,7 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
   for (const tenant of tenants) {
     try {
       const tenantDoc = await Tenant.findById(tenant.tenantId).select('name email phone moveInDate').lean();
-      if (tenantDoc) {
-        const moveInDateRaw = tenantDoc.moveInDate || tenantDoc.createdAt;
-        if (moveInDateRaw) {
-          const d = new Date(moveInDateRaw);
-          if (!isNaN(d.getTime())) {
-            const utcMonth = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-            const localMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-            if (utcMonth === billingMonth || localMonth === billingMonth || String(moveInDateRaw).startsWith(billingMonth)) {
-              results.skipped++;
-              continue;
-            }
-          }
-        }
-      }
+
 
       const existing = await RentInvoice.findOne({
         ownerId,
@@ -384,10 +371,131 @@ async function waivePenalty(invoiceId, waiverData, performedBy) {
   return { success: true, waiver };
 }
 
+async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
+  try {
+    const Owner = require('../models/Owner');
+    const Property = require('../models/Property');
+
+    let loginId = reqUser?.loginId || (typeof ownerIdInput === 'string' && ownerIdInput.startsWith('ROOMHY') ? ownerIdInput : null);
+    
+    let ownerDoc = null;
+    if (loginId) {
+      ownerDoc = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).lean();
+    }
+    if (!ownerDoc && ownerIdInput) {
+      ownerDoc = await Owner.findOne({ $or: [{ _id: ownerIdInput }, { loginId: String(ownerIdInput).toUpperCase() }] }).lean();
+    }
+
+    const ownerObjId = ownerDoc?._id || ownerIdInput;
+    const ownerLoginId = ownerDoc?.loginId || loginId || String(ownerIdInput).toUpperCase();
+
+    // Find properties owned by this owner
+    const properties = await Property.find({
+      $or: [{ ownerLoginId }, { owner: ownerObjId }],
+      isDeleted: { $ne: true }
+    }).select('_id').lean();
+    const propertyIds = properties.map(p => p._id);
+
+    // Find all active, non-deleted tenants for this owner
+    const tenants = await Tenant.find({
+      $or: [
+        { ownerLoginId },
+        { property: { $in: propertyIds } },
+        { assignedBy: ownerObjId }
+      ],
+      isDeleted: { $ne: true },
+      status: { $ne: 'inactive' },
+    }).lean();
+
+    console.log(`[AUTO-HEAL DIAGNOSTIC] Owner: ${ownerLoginId}, Found ${tenants.length} tenants to check`);
+
+    const now = new Date();
+    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    for (const t of tenants) {
+      const rentAmt = Number(t.agreedRent || t.baseRoomRent || 0);
+      if (rentAmt <= 0) continue;
+
+      const moveIn = t.moveInDate ? new Date(t.moveInDate) : (t.createdAt ? new Date(t.createdAt) : now);
+      const moveInYear = moveIn.getFullYear();
+      const moveInMonthNum = moveIn.getMonth() + 1;
+      const moveInMonthStr = `${moveInYear}-${String(moveInMonthNum).padStart(2, '0')}`;
+
+      // ONLY auto-create PAID invoice if move-in month IS the current month!
+      if (moveInMonthStr === currentMonth) {
+        const existingMoveInInv = await RentInvoice.findOne({
+          tenantId: t._id,
+          billingMonth: currentMonth,
+        });
+
+        if (!existingMoveInInv) {
+          const config = await getEffectiveConfig(ownerObjId, t.property, null).catch(() => null);
+          const dueDate = new Date(moveInYear, moveInMonthNum - 1, config?.rentDueDay || 1);
+          const invoiceNumber = `INV-${currentMonth}-${String(t._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
+          const invoice = await RentInvoice.create({
+            invoiceNumber,
+            ownerId: ownerObjId,
+            propertyId: t.property,
+            tenantId: t._id,
+            tenantName: t.name || '',
+            tenantEmail: t.email || '',
+            tenantPhone: t.phone || '',
+            billingMonth: currentMonth,
+            rentAmount: rentAmt,
+            dueDate,
+            totalDue: rentAmt,
+            outstandingAmount: 0,
+            paidAmount: rentAmt,
+            rentPaidAmount: rentAmt,
+            status: 'PAID',
+            paymentDate: moveIn,
+            penaltyConfigSnapshot: config || {},
+          });
+
+          if (rentAmt > 0) {
+            await RentPayment.create({
+              invoiceId: invoice._id,
+              tenantId: t._id,
+              propertyId: t.property,
+              ownerId: ownerObjId,
+              amount: rentAmt,
+              paymentMethod: 'cash',
+              transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
+              isPartial: false,
+              remainingAfter: 0,
+              rentPaidAmount: rentAmt,
+              penaltyPaidAmount: 0,
+              paymentDate: moveIn,
+              recordedBy: ownerLoginId || 'SYSTEM',
+              notes: 'Move-in month rent — auto-recorded on tenant onboarding',
+            }).catch(() => {});
+          }
+
+          await RentAuditLog.create({
+            action: 'INVOICE_CREATED',
+            invoiceId: invoice._id,
+            tenantId: t._id,
+            ownerId: ownerObjId,
+            propertyId: t.property,
+            meta: { billingMonth: currentMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID heal' },
+          }).catch(() => {});
+
+          console.log(`[MOVE-IN INVOICE HEALED SUCCESS] Auto-created PAID invoice for ${t.name} (${t.loginId}), month: ${currentMonth}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[autoHealMoveInInvoices] Error:', err.message);
+  }
+}
+
 module.exports = {
   getEffectiveConfig,
   generateMonthlyInvoices,
   evaluateInvoice,
   recordPayment,
   waivePenalty,
+  autoHealMoveInInvoices,
 };
+

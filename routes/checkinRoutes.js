@@ -416,8 +416,19 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         signatureDataUrl: record.tenantAgreement?.signatureDataUrl || tenant.digitalCheckin.agreement?.signatureDataUrl || ''
     };
     tenant.digitalCheckin.submittedAt = new Date();
-    tenant.status = 'active';
-    tenant.kycStatus = tenant.kycStatus || 'submitted';
+    // After e-sign: preserve mismatch_review or set audit_pending so owner must review & approve KYC
+    // Only upgrade to 'verified' when owner explicitly approves via owner panel
+    if (tenant.kycStatus === 'mismatch_review') {
+        // preserve mismatch_review flag
+    } else if (tenant.kycStatus !== 'verified') {
+        tenant.kycStatus = 'audit_pending';
+    }
+
+    if (tenant.kycStatus === 'verified') {
+        tenant.status = 'active';
+    } else {
+        tenant.status = 'pending';
+    }
     tenant.updatedAt = new Date();
     await tenant.save();
 
@@ -1175,6 +1186,10 @@ router.get('/tenant/profile/:loginId', async (req, res) => {
             }
         }
 
+        // Ensure idProofNumber & aadhaarNumber are populated on profile response
+        tenant.idProofNumber = tenant.idProofNumber || tenant.idProof?.number || tenant.aadhaarNumber || tenant.aadhar || tenant.kyc?.aadhaarNumber || tenant.kyc?.aadhar || '';
+        tenant.aadhaarNumber = tenant.aadhaarNumber || tenant.idProofNumber || tenant.idProof?.number || '';
+
         return res.json({ success: true, tenant: { ...tenant, ownerName } });
     } catch (err) {
         console.error('tenant/profile GET error:', err);
@@ -1382,7 +1397,7 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
 
 router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) => {
     try {
-        const { loginId, aadhaarNumber, otp, aadhaarFront, aadhaarBack, tenantPhoto } = req.body || {};
+        const { loginId, aadhaarNumber, otp, aadhaarFront, aadhaarBack, tenantPhoto, kycStatus, mismatchReasons: clientMismatch } = req.body || {};
         const normalizedLoginId = String(loginId || '').toUpperCase();
         const k = keyFor('tenant', normalizedLoginId, aadhaarNumber);
         const entry = otpStore.get(k);
@@ -1393,19 +1408,60 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
             return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
         }
         otpStore.delete(k);
-        const record = await upsertRecord(normalizedLoginId, 'tenant', { 'tenantKyc.otpVerified': true });
 
         const tenant = await Tenant.findOne({ loginId: normalizedLoginId });
         if (!tenant) {
             return res.status(404).json({ success: false, message: 'Tenant not found for this login ID' });
         }
 
+        // Compare scanned/entered Aadhaar vs owner-set expected Aadhaar number
+        const ownerSetAadhaar = (
+            tenant.idProofNumber ||
+            tenant.aadhaarNumber ||
+            tenant.idProof?.number ||
+            tenant.kyc?.aadhaarNumber ||
+            tenant.kyc?.aadhar ||
+            tenant.kycVerificationData?.adminEnteredAadhaar ||
+            ''
+        );
+
+        const isAadhaarMatch = (expected, scanned) => {
+            if (!expected || !scanned) return true;
+            const expClean = String(expected).replace(/\D/g, '');
+            const scnClean = String(scanned).replace(/\D/g, '');
+            if (!expClean || !scnClean) return true;
+            if (expClean === scnClean) return true;
+            if (scnClean.length === 8 && expClean.length === 12) {
+                return expClean.startsWith(scnClean.slice(0, 4)) && expClean.endsWith(scnClean.slice(4, 8));
+            }
+            if (expClean.length === 8 && scnClean.length === 12) {
+                return scnClean.startsWith(expClean.slice(0, 4)) && scnClean.endsWith(expClean.slice(4, 8));
+            }
+            return false;
+        };
+
+        const mismatchReasons = [];
+        if (clientMismatch && !clientMismatch.includes('mismatch: Owner Record () vs') && !clientMismatch.includes('mismatch: Owner set () vs')) {
+            mismatchReasons.push(clientMismatch);
+        }
+
+        if (ownerSetAadhaar && aadhaarNumber && !isAadhaarMatch(ownerSetAadhaar, aadhaarNumber)) {
+            mismatchReasons.push(`Aadhaar Number mismatch: Owner set (${ownerSetAadhaar}) vs Tenant uploaded (${aadhaarNumber})`);
+        }
+
+        const isMismatch = mismatchReasons.length > 0;
+        const targetKycStatus = isMismatch ? 'mismatch_review' : 'audit_pending';
+
         tenant.kyc = tenant.kyc || {};
         tenant.kyc.otpVerified = true;
         tenant.kyc.otpVerifiedAt = new Date();
+        tenant.kyc.aadhaarNumber = aadhaarNumber;
+        tenant.kyc.aadhar = aadhaarNumber;
         if (aadhaarFront) tenant.kyc.aadhaarFront = aadhaarFront;
         if (aadhaarBack)  tenant.kyc.aadhaarBack  = aadhaarBack;
-        tenant.kycStatus = 'verified';
+        if (mismatchReasons.length > 0) tenant.kyc.mismatchReasons = mismatchReasons.join('; ');
+
+        tenant.kycStatus = targetKycStatus;
 
         if (tenantPhoto) tenant.photo = tenantPhoto;
 
@@ -1416,10 +1472,18 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
             otpVerifiedAt: new Date(),
             ...(aadhaarFront && { aadhaarFront }),
             ...(aadhaarBack  && { aadhaarBack }),
-            ...(tenantPhoto  && { tenantPhoto })
+            ...(tenantPhoto  && { tenantPhoto }),
+            mismatchReasons: mismatchReasons.join('; ')
         };
         tenant.updatedAt = new Date();
         await tenant.save();
+
+        const record = await upsertRecord(normalizedLoginId, 'tenant', { 
+            'tenantKyc.otpVerified': true,
+            'tenantKyc.kycStatus': targetKycStatus,
+            'tenantKyc.mismatchReasons': mismatchReasons.join('; ')
+        });
+
 
         // WhatsApp: notify tenant that KYC is verified
         try {

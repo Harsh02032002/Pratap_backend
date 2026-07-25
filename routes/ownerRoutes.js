@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const enquiryController = require('../controllers/enquiryController');
 const { sseStream } = require('../controllers/ownercontroller');
@@ -11,6 +12,8 @@ const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
 const ownerController = require('../controllers/ownercontroller');
+
+const mailer = require('../utils/mailer');
 
 // --- SSE Endpoint ---
 router.get('/:loginId/stream', sseStream);
@@ -87,40 +90,60 @@ router.get('/:loginId', ownerController.getOwnerById);
 // 3b. Delete owner by loginId (Soft Delete)
 router.delete('/:loginId', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {
     try {
-        const loginId = String(req.params.loginId || '').toUpperCase();
-        if (!loginId) {
-            return res.status(400).json({ success: false, message: 'Invalid owner loginId' });
+        const param = String(req.params.loginId || '').trim();
+        if (!param) {
+            return res.status(400).json({ success: false, message: 'Invalid owner identifier' });
         }
 
-        const owner = await Owner.findOne({ loginId });
-        if (!owner) {
-            return res.status(404).json({ success: false, message: `Owner ${loginId} not found` });
-        }
+        const isObjId = mongoose.Types.ObjectId.isValid(param);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { email: param.toLowerCase() }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { email: param.toLowerCase() }] };
 
-        // 1. Soft delete owner profile
-        owner.isDeleted = true;
-        owner.isActive = false;
-        await owner.save();
-
-        // 2. Soft delete corresponding login credentials from User collection
+        const owner = await Owner.findOne(query);
         const User = require('../models/user');
-        await User.updateOne({ loginId, role: 'owner' }, { $set: { isDeleted: true, isActive: false } });
+        const userQuery = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { role: 'owner', email: param.toLowerCase() }] } 
+            : { $or: [{ loginId: param.toUpperCase() }, { role: 'owner', email: param.toLowerCase() }] };
+        const userDoc = await User.findOne(userQuery);
 
-        // 3. Soft delete all properties owned by this owner
+        if (!owner && !userDoc) {
+            return res.status(404).json({ success: false, message: `Owner ${param} not found` });
+        }
+
+        const targetLoginId = owner?.loginId || userDoc?.loginId || param;
+
+        if (owner) {
+            owner.isDeleted = true;
+            owner.isActive = false;
+            await owner.save();
+        }
+
+        if (userDoc) {
+            userDoc.isDeleted = true;
+            userDoc.isActive = false;
+            await userDoc.save();
+        }
+
+        if (targetLoginId) {
+            await User.updateMany({ loginId: targetLoginId, role: 'owner' }, { $set: { isDeleted: true, isActive: false } });
+        }
+
+        // Soft delete all properties owned by this owner
         const Property = require('../models/Property');
         const Room = require('../models/Room');
         const ApprovedProperty = require('../models/ApprovedProperty');
 
-        const properties = await Property.find({ ownerLoginId: loginId });
-        const propertyIds = properties.map(p => p._id);
+        if (targetLoginId) {
+            const properties = await Property.find({ ownerLoginId: targetLoginId });
+            const propertyIds = properties.map(p => p._id);
 
-        await Property.updateMany({ ownerLoginId: loginId }, { $set: { isDeleted: true, status: 'inactive', isPublished: false, isLiveOnWebsite: false } });
-        await Room.updateMany({ property: { $in: propertyIds } }, { $set: { isDeleted: true } });
+            await Property.updateMany({ ownerLoginId: targetLoginId }, { $set: { isDeleted: true, status: 'inactive', isPublished: false, isLiveOnWebsite: false } });
+            await Room.updateMany({ property: { $in: propertyIds } }, { $set: { isDeleted: true } });
+            await ApprovedProperty.deleteMany({ 'generatedCredentials.loginId': targetLoginId });
+        }
 
-        // Remove from public website approved listings
-        await ApprovedProperty.deleteMany({ 'generatedCredentials.loginId': loginId });
-
-        return res.json({ success: true, message: `Owner ${loginId} deleted successfully` });
+        return res.json({ success: true, message: `Owner ${param} deleted successfully` });
     } catch (err) {
         console.error('❌ Owner DELETE error:', err.message);
         return res.status(500).json({ success: false, message: err.message });
@@ -597,7 +620,35 @@ router.get('/:loginId/tenants', async (req, res) => {
         await ownerController.healOwnerProperties(loginId);
         const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id');
         const propertyIds = properties.map((p) => p._id);
-        const tenants = await require('../models/Tenant').find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
+        const Tenant = require('../models/Tenant');
+
+        // Auto-heal tenants without mismatch: promote pending_verification -> verified & pending -> active
+        await Tenant.updateMany(
+            {
+                $or: [{ ownerLoginId: loginId }, { property: { $in: propertyIds } }],
+                isDeleted: { $ne: true },
+                kycStatus: { $ne: 'mismatch_review' },
+                'kyc.mismatchReasons': { $exists: false },
+                $or: [
+                    { kycStatus: 'pending_verification' },
+                    { kycStatus: 'pending' },
+                    { kycStatus: { $exists: false } },
+                    { status: 'pending' }
+                ]
+            },
+            {
+                $set: { kycStatus: 'verified', status: 'active' }
+            }
+        ).catch(() => {});
+
+        const tenants = await Tenant.find({
+            $or: [
+                { property: { $in: propertyIds } },
+                { ownerLoginId: loginId }
+            ],
+            isDeleted: { $ne: true }
+        }).lean();
+
 
         let tenantsWithDues = tenants;
         if (req.query.nodues !== 'true') {
@@ -679,6 +730,83 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
+});
+
+// Owner subscription / trial status check
+// GET /api/owners/subscription-status?loginId=OWN001
+router.get('/subscription-status', async (req, res) => {
+  try {
+    const loginId = String(req.query.loginId || '').trim().toUpperCase();
+    if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
+
+    const SystemSettings = require('../models/SystemSettings');
+    const [owner, settings] = await Promise.all([
+      Owner.findOne({ loginId, isDeleted: { $ne: true } })
+        .select('loginId name createdAt subscription')
+        .lean(),
+      SystemSettings.findOne().lean()
+    ]);
+
+    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+    const trialDays = settings?.ownerTrialDays ?? null;
+    const price = settings?.ownerSubscriptionPrice ?? null;
+    const currency = settings?.ownerSubscriptionCurrency || 'INR';
+
+    const now = new Date();
+    const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
+    let endDate = owner.subscription?.trialEndDate;
+    if (!endDate && trialDays) {
+      endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
+    }
+
+    const isSubscribed = owner.subscription?.isSubscribed || false;
+    const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
+
+    // Subscribed check
+    if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
+      return res.json({
+        success: true,
+        status: 'subscribed',
+        trialExpired: false,
+        daysRemaining: null,
+        trialEndDate: subscriptionExpiry,
+        price,
+        currency
+      });
+    }
+
+    // Trial not configured
+    if (!endDate) {
+      return res.json({
+        success: true,
+        status: 'trial_unconfigured',
+        trialExpired: false,
+        daysRemaining: null,
+        trialEndDate: null,
+        price,
+        currency
+      });
+    }
+
+    const msRemaining = new Date(endDate).getTime() - now.getTime();
+    const trialExpired = msRemaining <= 0;
+    const daysRemaining = trialExpired ? 0 : Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+
+    return res.json({
+      success: true,
+      status: trialExpired ? 'expired' : 'trial_active',
+      trialExpired,
+      daysRemaining,
+      trialEndDate: endDate,
+      trialStartDate: startDate,
+      price,
+      currency
+    });
+  } catch (err) {
+    console.error('❌ subscription-status error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 module.exports = router;

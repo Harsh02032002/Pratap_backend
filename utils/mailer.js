@@ -619,7 +619,7 @@ async function sendKycLinkEmail(toEmail, name, portalName, kycLink) {
 async function sendDirectWhatsAppOtp(toPhone, otp) {
     const cfg = getMailerConfig();
     if (!isWhatsAppConfigured(cfg) || !cfg.whatsappOtpTemplateName) {
-        console.warn('WhatsApp OTP skip: not configured or template name missing');
+        // WhatsApp API unconfigured — silently fallback to email OTP
         return false;
     }
 
