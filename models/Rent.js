@@ -67,6 +67,15 @@ const rentSchema = new mongoose.Schema({
     cashRejectedAt: Date,
     cashOtpAttempts: { type: Number, default: 0 },
     cashOtpMaxAttempts: { type: Number, default: 5 },
+
+    // Onboarding Cash OTP fields (Phase 5 — for payment/gateway flow)
+    cashOtpCode: String,
+    cashOtpExpiresAt: Date,
+    cashOtpLastSentAt: Date,
+
+    // Onboarding payment identity lockout (Phase 6.5)
+    loginAttempts: { type: Number, default: 0 },
+
     
     // Reminder Tracking
     reminders: [

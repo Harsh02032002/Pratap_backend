@@ -384,6 +384,9 @@ try {
     console.log('  ✓ tenantGateRoutes');
     app.use('/api/user', require('./routes/userRoutes'));
     app.use('/api/superadmin', require('./routes/superadminRoutes'));
+    app.use('/api/superadmin/finance', require('./routes/financeRoutes'));
+    app.use('/api/finance', require('./routes/financeRoutes'));
+    console.log('  ✓ financeRoutes');
     app.use('/api/amenities', require('./routes/amenityRoutes'));
     console.log('  ? amenityRoutes');
     app.use('/api/pricing', require('./routes/pricingRoutes'));

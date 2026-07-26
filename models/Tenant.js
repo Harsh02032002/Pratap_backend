@@ -43,6 +43,7 @@ const TenantSchema = new mongoose.Schema({
     tempPassword: { type: String }, // Stored temporarily; user will set own password
     ownerLoginId: { type: String },
     propertyTitle: { type: String },
+    assignmentLocationCode: { type: String, default: '' }, // locationCode from property at time of assignment
 
     // Financial Details for Assignment
     securityDepositTotal: { type: Number, default: 0 },
@@ -130,6 +131,16 @@ const TenantSchema = new mongoose.Schema({
         refundAmount: { type: Number, default: 0 },
         refundStatus: { type: String, default: '' }
     },
+
+    // Onboarding Payment Tracking (Phase 4–6.5)
+    paymentLinkStatus: {
+        type: String,
+        enum: ['pending', 'paid'],
+        default: 'pending'
+    },
+    onboardingRentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Rent' },
+    credentialsEmailStatus: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+    receiptEmailStatus: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
 
     // Status Tracking
     status: {

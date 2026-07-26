@@ -432,6 +432,67 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
     tenant.updatedAt = new Date();
     await tenant.save();
 
+    // [PHASE 3 HOOK — Agreement Complete -> Payment Link]
+    // After tenant signs the agreement, generate a tokenized payment link and email it.
+    try {
+        if (tenant.paymentLinkStatus !== 'sent' && tenant.paymentLinkStatus !== 'paid') {
+            const Rent = require('../models/Rent');
+            let rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+            if (!rent) {
+                rent = new Rent({
+                    tenantId: tenant._id,
+                    tenantLoginId: tenant.loginId,
+                    tenantName: tenant.name,
+                    tenantEmail: tenant.email,
+                    tenantPhone: tenant.phone,
+                    ownerLoginId: tenant.ownerLoginId,
+                    propertyName: tenant.propertyTitle || 'RoomHy Property',
+                    roomNumber: tenant.roomNo || '',
+                    rentAmount: tenant.agreedRent || 0,
+                    totalDue: tenant.agreedRent || 0,
+                    paymentStatus: 'pending'
+                });
+                await rent.save();
+            }
+            const rentRecordId = rent._id;
+            const jwtSecret = process.env.JWT_SECRET;
+            if (!jwtSecret) throw new Error('JWT_SECRET missing');
+
+            const jwt = require('jsonwebtoken');
+            const token = jwt.sign(
+                { loginId: tenant.loginId, rentRecordId, purpose: 'onboarding_payment' },
+                jwtSecret,
+                { expiresIn: '72h' }
+            );
+            let appBase = process.env.APP_URL || APP_URL || 'http://localhost:5173';
+            if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
+            const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
+
+            const subject = `Payment Required: Secure your booking for ${tenant.propertyTitle || 'RoomHy'}`;
+            const paymentHtml = `
+                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+                    <div style="background:#6366f1;color:white;padding:20px;text-align:center;">
+                        <h2 style="margin:0;">RoomHy — Complete Your Onboarding</h2>
+                    </div>
+                    <div style="padding:25px;color:#374151;">
+                        <p>Hello <strong>${tenant.name || 'Tenant'}</strong>,</p>
+                        <p>Your KYC verification and agreement are complete! Please complete your pending onboarding payment to secure your booking.</p>
+                        <div style="text-align:center;margin:30px 0;">
+                            <a href="${paymentUrl}" style="background:#6366f1;color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">Click here to Pay</a>
+                        </div>
+                        <p style="color:#6b7280;font-size:13px;">This link expires in 72 hours. Do not share it with anyone.</p>
+                    </div>
+                </div>
+            `;
+            await sendMail(tenant.email, subject, `Pay here: ${paymentUrl}`, paymentHtml);
+            tenant.paymentLinkStatus = 'sent';
+            await tenant.save();
+            console.log(`[PAYMENT LINK] Sent to ${tenant.email} for ${tenant.loginId}`);
+        }
+    } catch (paymentLinkErr) {
+        console.error('[PAYMENT LINK ERROR] Hook (agreement-complete) Failed:', paymentLinkErr.message);
+    }
+
     try {
         const { settleTransactionMoveIn } = require('../controllers/bookingController');
         await settleTransactionMoveIn(normalizedLoginId);
@@ -476,13 +537,16 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         }
     }
 
+    // Phase 6.5 Fix: DO NOT send tenant login credentials here!
+    // Credentials are strictly gated behind finalizeOnboardingPayment (post-payment).
+    // BUT the signed agreement PDF copy MUST still go to the tenant.
     if (tenant.email && agreementPdfBuffer) {
         try {
             await sendMail(
                 tenant.email,
-                'RoomHy Tenant Agreement & Login Details',
-                '',
-                buildTenantLoginEmail(tenant, dashboardUrl, record),
+                `Your Signed Agreement — ${tenant.propertyTitle || 'RoomHy Property'}`,
+                `Hi ${tenant.name || 'Tenant'}, your signed agreement is attached. Please retain this for your records.`,
+                buildOwnerTenantSignedEmail(tenant.name || 'Tenant', tenant),
                 {
                     attachments: [
                         {
@@ -493,9 +557,9 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                     ]
                 }
             );
-            loginEmailSent = true;
-        } catch (emailErr) {
-            console.error('[TENANT AGREEMENT COMPLETE] Email send error:', emailErr.message);
+            console.log(`[TENANT AGREEMENT COMPLETE] Agreement PDF emailed to tenant ${tenant.email} for ${normalizedLoginId}.`);
+        } catch (tenantEmailErr) {
+            console.error(`[TENANT AGREEMENT COMPLETE] Tenant agreement email error:`, tenantEmailErr.message);
         }
     }
 

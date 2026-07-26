@@ -727,9 +727,136 @@ async function sendWhatsAppTemplate(toPhone, templateName, languageCode, bodyPar
     return false;
 }
 
+function receiptHtml(receipt) {
+  const originalRent = Number(receipt.originalRent || receipt.rentAmount || receipt.amount || 0);
+  const penalty = Number(receipt.penalty || receipt.latePenalty || 0);
+  const electricity = Number(receipt.electricity || receipt.electricityCharge || 0);
+  const totalDue = originalRent + penalty + electricity;
+  const paidAmt = Number(receipt.paidAmount || receipt.paid || totalDue);
+  const period = receipt.period || receipt.billingMonth || receipt.collectionMonth || 'Current Month';
+  const receiptNo = receipt.receiptNo || receipt.invoiceNumber || receipt.id || `RCPT-${Date.now().toString(36).toUpperCase()}`;
+  const dateStr = receipt.date || receipt.paymentDate || new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  const tenantName = receipt.tenantName || 'Tenant';
+  const propertyName = receipt.propertyName || receipt.propertyTitle || 'Property';
+  const roomNo = receipt.roomNo || receipt.roomNumber || '-';
+  const paymentMethod = receipt.paymentMethod || 'Razorpay / Cash';
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <title>Receipt ${receiptNo}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Helvetica Neue',Arial,sans-serif;color:#000;background:#fff;font-size:13px}
+    .page{max-width:760px;margin:0 auto;padding:40px 44px 36px}
+    .hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #ddd}
+    .logo{font-family:Georgia,serif;font-size:42px;font-weight:900;letter-spacing:-2px;color:#000;line-height:1}
+    .logo em{font-weight:400;font-style:italic}
+    .co{text-align:right;font-size:11.5px;color:#222;line-height:1.65}
+    .co strong{display:block;font-size:13.5px;font-weight:700;margin-bottom:3px}
+    .title-band{text-align:center;margin:0 0 18px;padding:10px 0;border-top:2px solid #000;border-bottom:2px solid #000}
+    .title-band h2{font-size:15px;font-weight:700;letter-spacing:3.5px;text-transform:uppercase;color:#000}
+    .details-row{display:flex;gap:16px;margin-bottom:18px}
+    .box{flex:1;border:1px solid #d1d5db;border-radius:4px;overflow:hidden}
+    .box-head{background:#f5f5f5;padding:8px 14px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#444;border-bottom:1px solid #d1d5db}
+    .box-body{padding:10px 14px}
+    .field-row{display:flex;justify-content:space-between;align-items:baseline;padding:3.5px 0;font-size:12.5px;gap:8px}
+    .field-row .lbl{color:#555;white-space:nowrap}
+    .field-row .val{font-weight:600;color:#000;text-align:right}
+    .badge-paid{display:inline-block;padding:3px 10px;border:1.5px solid #16a34a;border-radius:3px;font-size:11px;font-weight:800;letter-spacing:.06em;color:#166534;background:#f0fdf4}
+    .bill-name{font-size:15px;font-weight:700;margin-bottom:2px}
+    table.items{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:0}
+    table.items thead tr{background:#f5f5f5}
+    table.items th{padding:9px 14px;text-align:left;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#555;border:1px solid #d1d5db}
+    table.items th.right{text-align:right}
+    table.items td{padding:12px 14px;border:1px solid #e8e8e8;vertical-align:top;color:#000}
+    table.items td.right{text-align:right;font-weight:600}
+    .totals-wrap{display:flex;justify-content:flex-end;margin-top:0;margin-bottom:16px;border:1px solid #d1d5db;border-top:none}
+    .totals-inner{width:320px;border-left:1px solid #d1d5db}
+    .t-row{display:flex;justify-content:space-between;padding:5px 16px;font-size:13px}
+    .t-row .tv{font-weight:600}
+    .t-row.sep{border-top:1.5px solid #000;padding-top:8px;padding-bottom:8px;margin-top:4px}
+    .t-row.sep .tk,.t-row.sep .tv{font-size:14px;font-weight:800}
+    .end-note{text-align:center;font-size:10.5px;color:#999;margin-top:20px;padding-top:12px;border-top:1px solid #efefef}
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="hdr">
+    <div class="logo">Room<em>Hy</em></div>
+    <div class="co">
+      <strong>RoomHy Technologies India Pvt. Ltd.</strong>
+      CIN: U72000MP2024PTC123456 | GSTIN: 23AABCR1234A1Z5 | PAN: AABCR1234A<br/>
+      Sector 7, Civil Lines, Indore, Madhya Pradesh - 452001, India<br/>
+      Contact: care@roomhy.com | Web: www.roomhy.com
+    </div>
+  </div>
+  <div class="title-band"><h2>Rental Payment Receipt</h2></div>
+  <div class="details-row">
+    <div class="box">
+      <div class="box-head">Invoice Details</div>
+      <div class="box-body">
+        <div class="field-row"><span class="lbl">Receipt #</span><span class="val">${receiptNo}</span></div>
+        <div class="field-row"><span class="lbl">Date</span><span class="val">${dateStr}</span></div>
+        <div class="field-row"><span class="lbl">Payment Method</span><span class="val">${paymentMethod}</span></div>
+        <div class="field-row"><span class="lbl">Status</span><span class="badge-paid">✓ PAID</span></div>
+      </div>
+    </div>
+    <div class="box">
+      <div class="box-head">Tenant Details</div>
+      <div class="box-body">
+        <div class="bill-name">${tenantName}</div>
+        <div class="field-row"><span class="lbl">Property</span><span class="val">${propertyName}</span></div>
+        <div class="field-row"><span class="lbl">Room</span><span class="val">${roomNo}</span></div>
+        <div class="field-row"><span class="lbl">Billing Period</span><span class="val">${period}</span></div>
+      </div>
+    </div>
+  </div>
+  <table class="items">
+    <thead>
+      <tr>
+        <th>Description</th>
+        <th class="right">Amount (₹)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Rent Payment for ${period}</td>
+        <td class="right">₹${originalRent.toLocaleString('en-IN')}</td>
+      </tr>
+      ${penalty > 0 ? `<tr><td>Late Penalty</td><td class="right">₹${penalty.toLocaleString('en-IN')}</td></tr>` : ''}
+      ${electricity > 0 ? `<tr><td>Electricity Bill</td><td class="right">₹${electricity.toLocaleString('en-IN')}</td></tr>` : ''}
+    </tbody>
+  </table>
+  <div class="totals-wrap">
+    <div class="totals-inner">
+      <div class="t-row"><span class="tk">Rent Amount</span><span class="tv">₹${originalRent.toLocaleString('en-IN')}</span></div>
+      ${penalty > 0 ? `<div class="t-row"><span class="tk">Late Penalty</span><span class="tv">₹${penalty.toLocaleString('en-IN')}</span></div>` : ''}
+      ${electricity > 0 ? `<div class="t-row"><span class="tk">Electricity</span><span class="tv">₹${electricity.toLocaleString('en-IN')}</span></div>` : ''}
+      <div class="t-row sep"><span class="tk">Total Amount Paid</span><span class="tv">₹${paidAmt.toLocaleString('en-IN')}</span></div>
+    </div>
+  </div>
+  <div class="end-note">This is a computer-generated receipt issued by RoomHy Technologies India Pvt. Ltd.</div>
+</div>
+</body>
+</html>`;
+}
+
+async function sendReceiptEmail(toEmail, receiptDetails) {
+  if (!toEmail) return false;
+  const period = receiptDetails.period || receiptDetails.billingMonth || receiptDetails.collectionMonth || 'RoomHy';
+  const subject = `Rental Payment Receipt - ${period}`;
+  const html = receiptHtml(receiptDetails);
+  const text = `Rental Payment Receipt\nReceipt #: ${receiptDetails.receiptNo || receiptDetails.id || ''}\nTenant: ${receiptDetails.tenantName || ''}\nAmount Paid: ₹${receiptDetails.paidAmount || receiptDetails.amount || 0}\nStatus: PAID`;
+  return sendMail(toEmail, subject, text, html);
+}
+
 module.exports = {
     sendCredentials,
     sendMail,
+    sendReceiptEmail,
+    receiptHtml,
     sendWhatsAppMessage,
     sendWhatsAppTemplate,
     listWhatsAppTemplates,

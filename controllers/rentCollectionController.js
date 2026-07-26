@@ -724,6 +724,19 @@ async function getDailyPaymentSummary(req, res) {
   }
 }
 
+// Helper function to get ownerId by ownerLoginId
+async function getOwnerIdByLoginId(ownerLoginId) {
+  if (!ownerLoginId) return null;
+  try {
+    const Owner = require('../models/Owner');
+    const owner = await Owner.findOne({ loginId: ownerLoginId }).select('_id').lean();
+    return owner?._id || null;
+  } catch (err) {
+    console.error('Error getting ownerId by loginId:', err);
+    return null;
+  }
+}
+
 // ─── GET /api/rents/tenant/me ────────────────────────────────────────────────
 // Tenant dashboard: Get latest invoice with LIVE penalty calculations
 async function getTenantInvoiceSummary(req, res) {
@@ -733,19 +746,143 @@ async function getTenantInvoiceSummary(req, res) {
       return res.status(400).json({ success: false, message: 'Authenticated tenant loginId is required' });
     }
 
-    // Find tenant record
+    // Find tenant record with property details
     const tenant = await Tenant.findOne({ loginId: tenantLoginId })
-      .select('_id loginId ownerLoginId')
+      .select('_id loginId ownerLoginId property agreedRent name')
       .lean();
 
     if (!tenant) {
       return res.status(404).json({ success: false, message: 'Tenant record not found' });
     }
 
-    // Find all invoices for this tenant
-    const invoices = await RentInvoice.find({ tenantId: tenant._id })
+    console.log(`[getTenantInvoiceSummary] Found tenant: ${tenant._id} for loginId: ${tenantLoginId}`);
+
+    // Find all invoices for this tenant - try both tenantId and tenantLoginId
+    let invoices = await RentInvoice.find({ tenantId: tenant._id })
       .sort({ billingMonth: -1, dueDate: -1, createdAt: -1 })
       .lean();
+
+    console.log(`[getTenantInvoiceSummary] Found ${invoices.length} invoices by tenantId`);
+
+    // If no invoices found by tenantId, try finding by tenantLoginId in custom fields
+    if (invoices.length === 0) {
+      invoices = await RentInvoice.find({ tenantLoginId: tenantLoginId })
+        .sort({ billingMonth: -1, dueDate: -1, createdAt: -1 })
+        .lean();
+      console.log(`[getTenantInvoiceSummary] Found ${invoices.length} invoices by tenantLoginId`);
+    }
+
+    // Debug: Show sample invoice structure if found
+    if (invoices.length > 0) {
+      console.log(`[getTenantInvoiceSummary] Sample invoice:`, JSON.stringify(invoices[0], null, 2));
+    } else {
+      // Debug: Check if ANY invoices exist in the system
+      const allInvoices = await RentInvoice.find({}).limit(3).lean();
+      console.log(`[getTenantInvoiceSummary] Total invoices in system: ${await RentInvoice.countDocuments()}`);
+      if (allInvoices.length > 0) {
+        console.log(`[getTenantInvoiceSummary] Sample system invoice:`, JSON.stringify(allInvoices[0], null, 2));
+      }
+
+      // If no invoices found for this tenant, check Rent model and create RentInvoice
+      console.log(`[getTenantInvoiceSummary] No invoices found for tenant ${tenant._id}, checking Rent model...`);
+      const Rent = require('../models/Rent');
+      const rentRecord = await Rent.findOne({ tenantLoginId: tenantLoginId })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (rentRecord) {
+        console.log(`[getTenantInvoiceSummary] Found Rent record:`, JSON.stringify({ _id: rentRecord._id, paymentStatus: rentRecord.paymentStatus, collectionMonth: rentRecord.collectionMonth, totalDue: rentRecord.totalDue }, null, 2));
+
+        // Create RentInvoice from Rent record
+        const billingMonth = rentRecord.collectionMonth || new Date().toISOString().slice(0, 7);
+        const invoiceNumber = `INV-${billingMonth}-${String(tenant._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
+        // Get ownerId from tenant if not in rentRecord
+        const ownerId = rentRecord.ownerId || (tenant.ownerLoginId ? await getOwnerIdByLoginId(tenant.ownerLoginId) : null);
+
+        // Get propertyId - try multiple sources
+        let propertyId = rentRecord.propertyId;
+        if (!propertyId && tenant.property) {
+          if (typeof tenant.property === 'object' && tenant.property._id) {
+            propertyId = tenant.property._id;
+          } else if (typeof tenant.property === 'string') {
+            propertyId = tenant.property;
+          }
+        }
+
+        console.log(`[getTenantInvoiceSummary] Invoice fields: ownerId=${ownerId}, propertyId=${propertyId}, tenant.property=${JSON.stringify(tenant.property)}`);
+
+        if (!ownerId || !propertyId) {
+          console.log(`[getTenantInvoiceSummary] Skipping invoice creation due to missing required fields (ownerId: ${!!ownerId}, propertyId: ${!!propertyId})`);
+        } else {
+          const newInvoice = await RentInvoice.create({
+            invoiceNumber,
+            tenantId: tenant._id,
+            tenantLoginId: tenantLoginId,
+            tenantName: rentRecord.tenantName || tenant.loginId,
+            billingMonth: billingMonth,
+            rentAmount: rentRecord.rentAmount || rentRecord.totalDue || 0,
+            totalDue: rentRecord.totalDue || rentRecord.rentAmount || 0,
+            paidAmount: rentRecord.paidAmount || 0,
+            paymentDate: rentRecord.paymentDate,
+            paymentMethod: rentRecord.paymentMethod,
+            status: rentRecord.paymentStatus === 'paid' ? 'PAID' : 'PENDING',
+            dueDate: rentRecord.dueDate || new Date(),
+            ownerId: ownerId,
+            propertyId: propertyId,
+            unitId: rentRecord.unitId
+          });
+
+          console.log(`[getTenantInvoiceSummary] Created RentInvoice ${newInvoice._id} from Rent record`);
+          invoices.push(newInvoice);
+        }
+      } else {
+        console.log(`[getTenantInvoiceSummary] No Rent record found for tenant ${tenantLoginId}`);
+
+        // Create RentInvoice from tenant's agreed rent
+        if (tenant.agreedRent) {
+          const billingMonth = new Date().toISOString().slice(0, 7);
+          const invoiceNumber = `INV-${billingMonth}-${String(tenant._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
+          // Get ownerId from tenant
+          const ownerId = tenant.ownerLoginId ? await getOwnerIdByLoginId(tenant.ownerLoginId) : null;
+
+          // Get propertyId from tenant
+          let propertyId = null;
+          if (tenant.property) {
+            if (typeof tenant.property === 'object' && tenant.property._id) {
+              propertyId = tenant.property._id;
+            } else if (typeof tenant.property === 'string') {
+              propertyId = tenant.property;
+            }
+          }
+
+          console.log(`[getTenantInvoiceSummary] Invoice fields from tenant: ownerId=${ownerId}, propertyId=${propertyId}, tenant.property=${JSON.stringify(tenant.property)}`);
+
+          if (!ownerId || !propertyId) {
+            console.log(`[getTenantInvoiceSummary] Skipping invoice creation due to missing required fields (ownerId: ${!!ownerId}, propertyId: ${!!propertyId})`);
+          } else {
+            const newInvoice = await RentInvoice.create({
+              invoiceNumber,
+              tenantId: tenant._id,
+              tenantLoginId: tenantLoginId,
+              tenantName: tenant.name,
+              billingMonth: billingMonth,
+              rentAmount: tenant.agreedRent,
+              totalDue: tenant.agreedRent,
+              paidAmount: 0,
+              status: 'PENDING',
+              dueDate: new Date(),
+              ownerId: ownerId,
+              propertyId: propertyId
+            });
+
+            console.log(`[getTenantInvoiceSummary] Created RentInvoice ${newInvoice._id} from tenant agreed rent`);
+            invoices.push(newInvoice);
+          }
+        }
+      }
+    }
 
     // Get current month's invoice (or latest active one).
     // IMPORTANT: always check ALL invoices (including PAID) for the current month first
@@ -812,8 +949,10 @@ async function getTenantInvoiceSummary(req, res) {
         inv.cashOtpExpiry = r.cashOtpExpiry;
         inv.cashRejectedAt = r.cashRejectedAt;
         inv.cashRejectedReason = r.cashRejectedReason;
-        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
-        // VERY IMPORTANT: Ensure frontend `targetRentObj._id` maps back to Rent `_id` 
+        // Prioritize Rent model paymentStatus over Invoice status
+        // This ensures OTP-verified payments show as paid immediately
+        inv.paymentStatus = String(r.paymentStatus || inv.status).toLowerCase() === 'paid' ? 'paid' : 'pending';
+        // VERY IMPORTANT: Ensure frontend `targetRentObj._id` maps back to Rent `_id`
         // if this was requested by cash endpoints which expect `Rent.findById()`.
         inv._id = r._id;
       } else {
@@ -829,7 +968,8 @@ async function getTenantInvoiceSummary(req, res) {
         liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
         liveInvoice.cashRejectedAt = lr.cashRejectedAt;
         liveInvoice.cashRejectedReason = lr.cashRejectedReason;
-        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+        // Prioritize Rent model paymentStatus over Invoice status
+        liveInvoice.paymentStatus = String(lr.paymentStatus || liveInvoice.status).toLowerCase() === 'paid' ? 'paid' : 'pending';
         liveInvoice._id = lr._id;
       } else {
         liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';

@@ -598,7 +598,14 @@ router.get(
                 ledgerItems.push({ _id: c._id, date: c.date, details: c.details, debit: c.debit || 0, credit: c.credit || 0 });
             });
 
-            ledgerItems.sort((a, b) => new Date(a.date) - new Date(b.date));
+            ledgerItems.sort((a, b) => {
+                const timeDiff = new Date(a.date) - new Date(b.date);
+                if (Math.abs(timeDiff) < 1000 * 60 * 60 * 24) {
+                    if (a.debit > 0 && b.credit > 0) return -1;
+                    if (a.credit > 0 && b.debit > 0) return 1;
+                }
+                return timeDiff;
+            });
 
             let balance = 0;
             const entriesWithBalance = ledgerItems.map((item, idx) => {

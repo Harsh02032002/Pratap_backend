@@ -180,8 +180,16 @@ exports.createRent = async (req, res) => {
 // Get all rents for owner with filtering
 exports.getRentsByOwner = async (req, res) => {
   try {
-    const { ownerLoginId } = req.params;
+    let { ownerLoginId } = req.params;
     const { month, status } = req.query;
+
+    // If /owner/me, use authenticated user's loginId
+    if (ownerLoginId === 'me' || !ownerLoginId) {
+      ownerLoginId = req.user?.loginId;
+      if (!ownerLoginId) {
+        return res.status(400).json({ success: false, error: 'Owner loginId not found' });
+      }
+    }
 
     let query = { ownerLoginId };
     if (month) query.collectionMonth = month;
@@ -206,7 +214,21 @@ exports.getRentsByOwner = async (req, res) => {
       .populate("tenantId", "name email phone")
       .populate("propertyId", "title");
 
-    res.json({ success: true, rents });
+    // Format as invoices for frontend compatibility
+    const invoices = rents.map(rent => ({
+      _id: rent._id,
+      tenantName: rent.tenantId?.name || rent.tenantLoginId || "Unknown",
+      roomNo: rent.roomNo || "-",
+      totalDue: rent.totalDue || rent.rentAmount || 0,
+      rentAmount: rent.rentAmount || 0,
+      paymentDate: rent.paymentDate,
+      createdAt: rent.createdAt,
+      paymentStatus: rent.paymentStatus,
+      paymentMethod: rent.paymentMethod,
+      collectionMonth: rent.collectionMonth
+    }));
+
+    res.json({ success: true, invoices, rents });
   } catch (err) {
     console.error("Get rents error:", err);
     res.status(500).json({ error: err.message });
@@ -2003,6 +2025,38 @@ exports.verifyCashPaymentOtp = async (req, res) => {
 
 exports.buildCashPaymentReceipt = buildCashPaymentReceipt;
 
+// Get rent receipt details
+exports.getRentReceipt = async (req, res) => {
+  try {
+    const { rentId } = req.params;
+    const rent = await Rent.findById(rentId)
+      .populate("tenantId", "name email phone")
+      .populate("propertyId", "title address");
+
+    if (!rent) {
+      return res.status(404).json({ success: false, error: 'Rent record not found' });
+    }
+
+    const receipt = {
+      receiptNo: `RCPT-${String(rent._id).slice(-6).toUpperCase()}`,
+      tenantName: rent.tenantId?.name || rent.tenantLoginId || "Unknown",
+      propertyName: rent.propertyId?.title || rent.propertyTitle || "Roomhy Property",
+      roomNo: rent.roomNo || "-",
+      amount: rent.paidAmount || rent.totalDue || rent.rentAmount || 0,
+      paidAmount: rent.paidAmount || rent.totalDue || rent.rentAmount || 0,
+      paymentMethod: rent.paymentMethod || "Unknown",
+      paymentDate: rent.paymentDate || rent.updatedAt || rent.createdAt,
+      period: rent.collectionMonth || new Date().toISOString().slice(0, 7),
+      status: rent.paymentStatus
+    };
+
+    res.json({ success: true, receipt });
+  } catch (err) {
+    console.error("Get rent receipt error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 function normalizeLoginId(value) {
   return String(value || "")
     .trim()
@@ -2358,5 +2412,501 @@ exports.testTenantEmail = async (req, res) => {
   } catch (error) {
     console.error("testTenantEmail controller error:", error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ==========================================
+// Phase 4 / 5 / 6.5 — Standalone Public Onboarding Payment Endpoints
+// These do NOT require session auth — they rely on tokenized JWTs from email links
+// ==========================================
+
+/**
+ * [PHASE 6.5] Verify Payment Page Identity
+ * Public endpoint for frontend to validate the tenant before showing payment options.
+ */
+exports.verifyPaymentPageIdentity = async (req, res) => {
+  try {
+    const { token, enteredLoginId } = req.body;
+    if (!token || !enteredLoginId) {
+      return res.status(400).json({ message: 'Token and Login ID are required' });
+    }
+
+    const jwt = require('jsonwebtoken');
+    const jwtSecret = process.env.JWT_SECRET;
+    let decoded;
+    try {
+      decoded = jwt.verify(token, jwtSecret);
+    } catch (err) {
+      if (err.name === 'TokenExpiredError')
+        return res.status(410).json({ message: 'This payment link has expired. Please contact support.' });
+      return res.status(401).json({ message: 'Invalid payment link.' });
+    }
+
+    if (decoded.purpose !== 'onboarding_payment') {
+      return res.status(401).json({ message: 'Invalid link purpose.' });
+    }
+
+    let rentId = decoded.rentRecordId;
+    let rent;
+
+    if (rentId) {
+      rent = await Rent.findById(rentId);
+    } else {
+      // Backward compatibility: tokens generated without rentRecordId
+      const tenant = await Tenant.findOne({ loginId: decoded.loginId });
+      if (tenant) {
+        rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+        if (!rent) {
+          rent = new Rent({
+            tenantId: tenant._id,
+            tenantLoginId: tenant.loginId,
+            tenantName: tenant.name,
+            tenantEmail: tenant.email,
+            tenantPhone: tenant.phone,
+            ownerLoginId: tenant.ownerLoginId,
+            propertyName: tenant.propertyTitle || 'RoomHy Property',
+            roomNumber: tenant.roomNo || '',
+            rentAmount: (tenant.agreedRent || 0),
+            totalDue: (tenant.agreedRent || 0),
+            paymentStatus: 'pending'
+          });
+          await rent.save();
+        }
+        rentId = rent._id;
+      }
+    }
+
+    if (!rent) {
+      return res.status(404).json({ message: 'Associated payment record not found.' });
+    }
+
+    if (rent.paymentStatus === 'paid') {
+      return res.status(409).json({ message: 'This payment has already been completed. Thank you!' });
+    }
+
+    // Lockout Guard (5 attempts max)
+    const currentAttempts = rent.loginAttempts || 0;
+    if (currentAttempts >= 5) {
+      return res.status(429).json({ message: 'Too many incorrect attempts. This link is locked for security. Please contact support.' });
+    }
+
+    // Validate Identity (case-insensitive)
+    if (String(decoded.loginId).toUpperCase() !== String(enteredLoginId).toUpperCase().trim()) {
+      await Rent.updateOne({ _id: rentId }, { $inc: { loginAttempts: 1 } });
+      return res.status(403).json({ message: 'The entered Login ID does not match this link.' });
+    }
+
+    // Reset attempts on success
+    if (currentAttempts > 0) {
+      await Rent.updateOne({ _id: rentId }, { $set: { loginAttempts: 0 } });
+    }
+
+    // Fetch safe UI data
+    const tenant2 = await Tenant.findOne({ loginId: decoded.loginId }).select('name').lean();
+    const ownerDoc = await Owner.findOne({ loginId: rent.ownerLoginId }).select('name profile.name').lean();
+
+    const ownerName = ownerDoc ? (ownerDoc.name || ownerDoc.profile?.name || 'Owner') : 'Owner';
+    const tenantName = tenant2 ? tenant2.name : rent.tenantName;
+
+    return res.json({
+      propertyName: rent.propertyName || 'RoomHy Property',
+      ownerName,
+      tenantName,
+      rentAmount: rent.totalDue || rent.rentAmount,
+      rentId: rent._id
+    });
+  } catch (err) {
+    console.error('[verifyPaymentPageIdentity] Error:', err);
+    return res.status(500).json({ message: 'Failed to verify identity.' });
+  }
+};
+
+/**
+ * [PHASE 6.5] Token-gated Razorpay Order Creation
+ */
+exports.createOnboardingRazorpayOrder = async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ message: 'Token is required' });
+
+    const jwt = require('jsonwebtoken');
+    const jwtSecret = process.env.JWT_SECRET;
+    let decoded;
+    try {
+      decoded = jwt.verify(token, jwtSecret);
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid or expired payment link' });
+    }
+
+    if (decoded.purpose !== 'onboarding_payment') {
+      return res.status(401).json({ message: 'Invalid token payload' });
+    }
+
+    let rentId = decoded.rentRecordId;
+    let rent;
+
+    if (rentId) {
+      rent = await Rent.findById(rentId).lean();
+    } else {
+      const tenant = await Tenant.findOne({ loginId: decoded.loginId });
+      if (tenant) {
+        rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 }).lean();
+      }
+    }
+
+    if (!rent || rent.paymentStatus === 'paid') {
+      return res.status(400).json({ message: 'Payment no longer required' });
+    }
+
+    const amountToPay = Number(rent.totalDue || rent.rentAmount || 0);
+    if (amountToPay <= 0) return res.status(400).json({ message: 'Amount invalid' });
+
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+    if (!keyId || !keySecret || keySecret === 'your_key_secret_here') {
+      return res.status(500).json({ message: 'Razorpay is not configured on this server' });
+    }
+
+    const Razorpay = require('razorpay');
+    const instance = new Razorpay({ key_id: keyId, key_secret: keySecret });
+
+    const options = {
+      amount: Math.round(amountToPay * 100),
+      currency: 'INR',
+      receipt: `ONB_${String(rent._id).slice(-8)}`,
+      notes: {
+        rentId: String(rent._id),
+        tenantId: String(rent.tenantId || ''),
+        loginId: decoded.loginId,
+        paymentType: 'onboarding'
+      }
+    };
+
+    const order = await instance.orders.create(options);
+
+    const tenantForPrefill = await Tenant.findOne({ loginId: decoded.loginId }).lean();
+
+    return res.json({
+      orderId: order.id,
+      amount: options.amount,
+      currency: options.currency,
+      key: keyId,
+      userDetails: {
+        name: tenantForPrefill?.name || rent.tenantName || 'RoomHy Tenant',
+        email: tenantForPrefill?.email || rent.tenantEmail || '',
+        contact: tenantForPrefill?.phone || rent.tenantPhone || ''
+      },
+      notes: options.notes
+    });
+  } catch (err) {
+    console.error('[createOnboardingRazorpayOrder] Error:', err);
+    return res.status(500).json({ message: 'Failed to create payment order' });
+  }
+};
+
+/**
+ * [PHASE 4] Verify Razorpay Onboarding Payment
+ */
+exports.verifyRazorpayOnboardingPayment = async (req, res) => {
+  try {
+    const { token, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    if (!token) return res.status(400).json({ success: false, error: 'Token is required' });
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, error: 'Incomplete Razorpay payload' });
+    }
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) return res.status(500).json({ success: false, error: 'JWT_SECRET missing' });
+
+    let decoded;
+    try {
+      decoded = require('jsonwebtoken').verify(token, jwtSecret);
+    } catch (err) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired token' });
+    }
+
+    if (decoded.purpose !== 'onboarding_payment' || !decoded.loginId) {
+      return res.status(400).json({ success: false, error: 'Unauthorized token' });
+    }
+
+    let fallbackRentId = decoded.rentRecordId;
+    if (!fallbackRentId) {
+      const tenant = await Tenant.findOne({ loginId: decoded.loginId });
+      if (tenant) {
+        const pendingRent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+        if (pendingRent) fallbackRentId = pendingRent._id;
+      }
+    }
+    if (!fallbackRentId) return res.status(400).json({ success: false, error: 'Unauthorized token (Rent missing)' });
+    decoded.rentRecordId = fallbackRentId;
+
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keySecret) {
+      return res.status(500).json({ success: false, error: 'Razorpay secret is not configured' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', keySecret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ success: false, error: 'Invalid Razorpay payment signature' });
+    }
+
+    const rent = await Rent.findById(decoded.rentRecordId);
+    if (!rent) return res.status(404).json({ success: false, error: 'Invalid record references' });
+
+    if (rent.paymentStatus === 'paid') {
+      return res.status(400).json({ success: false, message: 'Payment already completed' });
+    }
+
+    const updatedRent = await Rent.findOneAndUpdate(
+      { _id: decoded.rentRecordId, paymentStatus: { $ne: 'paid' } },
+      {
+        $set: {
+          paidAmount: rent.totalDue || 0,
+          razorpayOrderId: razorpay_order_id,
+          razorpayPaymentId: razorpay_payment_id,
+          razorpaySignature: razorpay_signature,
+          paymentMethod: 'razorpay',
+          paymentDate: new Date(),
+          paymentStatus: 'paid'
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedRent) {
+      return res.status(400).json({ success: false, message: 'Payment handled by another request.' });
+    }
+
+    // Trigger Phase 5 Finalization (send credentials + receipt)
+    const tenantController = require('./tenantController');
+    await tenantController.finalizeOnboardingPayment(decoded.loginId, decoded.rentRecordId);
+    console.log(`[ONBOARDING PAYMENT] Razorpay verification successful for ${decoded.loginId}`);
+
+    return res.json({ success: true, message: 'Razorpay verification successful. Credentials generated.' });
+  } catch (error) {
+    console.error('verifyRazorpayOnboardingPayment error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to verify Razorpay onboarding payment' });
+  }
+};
+
+/**
+ * [PHASE 5] Generate Cash OTP (sent to owner email)
+ */
+exports.generateCashOtp = async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ success: false, error: 'Token is required' });
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) return res.status(500).json({ success: false, error: 'JWT_SECRET missing' });
+
+    let decoded;
+    try {
+      decoded = require('jsonwebtoken').verify(token, jwtSecret);
+    } catch (err) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired token' });
+    }
+
+    if (decoded.purpose !== 'onboarding_payment' || !decoded.loginId) {
+      return res.status(400).json({ success: false, error: 'Token is not authorized for onboarding cash payment' });
+    }
+
+    let fallbackRentId = decoded.rentRecordId;
+    if (!fallbackRentId) {
+      const tenant = await Tenant.findOne({ loginId: decoded.loginId });
+      if (tenant) {
+        const pendingRent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+        if (pendingRent) fallbackRentId = pendingRent._id;
+      }
+    }
+    decoded.rentRecordId = fallbackRentId;
+    const rent = await Rent.findById(fallbackRentId).populate('tenantId');
+    if (!rent) return res.status(404).json({ success: false, error: 'Rent record not found' });
+    if (rent.paymentStatus === 'paid') return res.status(400).json({ success: false, error: 'Payment already completed' });
+
+    // Rate Limit: 1 OTP per 60 seconds
+    if (rent.cashOtpLastSentAt && (Date.now() - new Date(rent.cashOtpLastSentAt).getTime()) < 60000) {
+      const waitTime = Math.ceil((60000 - (Date.now() - new Date(rent.cashOtpLastSentAt).getTime())) / 1000);
+      return res.status(429).json({ success: false, error: `Please wait ${waitTime} seconds before requesting a new OTP.` });
+    }
+
+    const ownerDoc = await Owner.findOne({ loginId: String(rent.ownerLoginId || '').trim().toUpperCase() });
+    const ownerEmail = (ownerDoc && (ownerDoc.email || ownerDoc.profile?.email)) || '';
+    if (!ownerEmail) return res.status(400).json({ success: false, error: 'Property owner does not have a registered email to receive OTP.' });
+
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    rent.cashOtpCode = otpCode;
+    rent.cashOtpExpiresAt = new Date(Date.now() + 10 * 60000); // 10 minutes
+    rent.cashOtpAttempts = 0;
+    rent.cashOtpLastSentAt = new Date();
+    await rent.save();
+
+    const mailer = require('../utils/mailer');
+    // Send OTP to owner email
+    const otpHtml = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#6366f1;color:white;padding:20px;text-align:center;">
+          <h2 style="margin:0;">RoomHy — Cash Payment OTP</h2>
+        </div>
+        <div style="padding:25px;color:#374151;">
+          <p>Dear Owner,</p>
+          <p>Tenant <strong>${rent.tenantName || ''}</strong> is completing their onboarding payment for room <strong>${rent.roomNumber || 'Assigned Room'}</strong> at <strong>${rent.propertyName || 'your property'}</strong>.</p>
+          <p>Please provide the following 6-digit OTP to authorize the cash payment:</p>
+          <div style="text-align:center;margin:30px 0;">
+            <span style="font-size:36px;font-weight:bold;letter-spacing:12px;color:#6366f1;border:2px solid #6366f1;padding:12px 24px;border-radius:8px;">${otpCode}</span>
+          </div>
+          <p style="color:#6b7280;font-size:13px;">This OTP is valid for 10 minutes. Do not share it with anyone other than the tenant completing payment.</p>
+        </div>
+      </div>
+    `;
+
+    await mailer.sendMail(ownerEmail, `RoomHy Cash OTP for ${rent.tenantName || 'Tenant'}`, '', otpHtml);
+
+    console.log(`[CASH OTP] Sent to owner ${ownerEmail} for tenant ${rent.tenantLoginId || rent.tenantName}`);
+
+    return res.json({ success: true, message: 'OTP has been dispatched securely to the property owner.' });
+  } catch (error) {
+    console.error('generateCashOtp error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to generate cash OTP' });
+  }
+};
+
+/**
+ * [PHASE 5] Verify Cash OTP — completes the cash payment
+ */
+exports.verifyAuthCashOtp = async (req, res) => {
+  try {
+    const { token, otp, paymentMethod } = req.body;
+    if (!token || !otp) return res.status(400).json({ success: false, error: 'Token and OTP are required' });
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) return res.status(500).json({ success: false, error: 'JWT_SECRET missing' });
+
+    let decoded;
+    try {
+      decoded = require('jsonwebtoken').verify(token, jwtSecret);
+    } catch (err) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired token' });
+    }
+
+    if (decoded.purpose !== 'onboarding_payment' || !decoded.loginId) {
+      return res.status(400).json({ success: false, error: 'Unauthorized token' });
+    }
+
+    let fallbackRentId = decoded.rentRecordId;
+    if (!fallbackRentId) {
+      const tenant = await Tenant.findOne({ loginId: decoded.loginId });
+      if (tenant) {
+        const pendingRent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+        if (pendingRent) fallbackRentId = pendingRent._id;
+      }
+    }
+    decoded.rentRecordId = fallbackRentId;
+    const rent = await Rent.findById(fallbackRentId);
+    if (!rent) return res.status(404).json({ success: false, error: 'Rent record not found' });
+
+    if (!rent.cashOtpCode) {
+      return res.status(400).json({ success: false, error: 'No OTP generated. Please generate a new OTP.' });
+    }
+
+    if (new Date() > rent.cashOtpExpiresAt) {
+      return res.status(400).json({ success: false, error: 'OTP has expired. Please request a new one.' });
+    }
+
+    if (String(rent.cashOtpCode) !== String(otp).trim()) {
+      rent.cashOtpAttempts = (rent.cashOtpAttempts || 0) + 1;
+
+      if (rent.cashOtpAttempts >= 5) {
+        rent.cashOtpCode = undefined;
+        rent.cashOtpExpiresAt = undefined;
+        await rent.save();
+        return res.status(403).json({ success: false, error: 'Too many failed attempts. OTP locked. Ask owner to regenerate.' });
+      }
+
+      await rent.save();
+      const remaining = 5 - rent.cashOtpAttempts;
+      return res.status(400).json({ success: false, error: `Invalid OTP. ${remaining} attempt(s) remaining.` });
+    }
+
+    // OTP correct — mark payment as paid with the correct payment method
+    const actualPaymentMethod = paymentMethod || 'cash';
+    const updatedRent = await Rent.findOneAndUpdate(
+      { _id: decoded.rentRecordId, paymentStatus: { $ne: 'paid' } },
+      {
+        $set: {
+          paymentMethod: actualPaymentMethod,
+          paymentDate: new Date(),
+          paymentStatus: 'paid',
+          paidAmount: rent.totalDue || 0
+        },
+        $unset: {
+          cashOtpCode: 1,
+          cashOtpExpiresAt: 1
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedRent) {
+      return res.status(400).json({ success: false, error: 'Payment already processed by another request.' });
+    }
+
+    // Also update/create RentInvoice for tenant dashboard display
+    const RentInvoice = require('../models/RentInvoice');
+    const billingMonth = updatedRent.collectionMonth || new Date().toISOString().slice(0, 7);
+
+    let invoice = await RentInvoice.findOne({
+      tenantId: updatedRent.tenantId,
+      billingMonth: billingMonth
+    });
+
+    if (!invoice) {
+      // Create invoice if it doesn't exist
+      console.log(`[CASH OTP] Creating new RentInvoice for tenant ${updatedRent.tenantId} month ${billingMonth}`);
+      invoice = await RentInvoice.create({
+        tenantId: updatedRent.tenantId,
+        billingMonth: billingMonth,
+        rentAmount: rent.rentAmount || rent.totalDue || 0,
+        totalDue: rent.totalDue || rent.rentAmount || 0,
+        status: 'PAID',
+        paidAmount: rent.totalDue || rent.rentAmount || 0,
+        paymentDate: new Date(),
+        paymentMethod: actualPaymentMethod,
+        dueDate: new Date()
+      });
+    } else {
+      // Update existing invoice
+      invoice = await RentInvoice.findByIdAndUpdate(
+        invoice._id,
+        {
+          $set: {
+            status: 'PAID',
+            paidAmount: rent.totalDue || 0,
+            paymentDate: new Date(),
+            paymentMethod: actualPaymentMethod
+          }
+        },
+        { new: true }
+      );
+    }
+
+    console.log(`[CASH OTP] RentInvoice ${invoice._id} set to PAID with method ${actualPaymentMethod}`);
+
+    // Trigger Phase 5 Finalization Hook (credentials + receipt email)
+    const tenantController = require('./tenantController');
+    await tenantController.finalizeOnboardingPayment(decoded.loginId, decoded.rentRecordId);
+
+    console.log(`[CASH OTP] Validation successful for ${decoded.loginId} with payment method: ${actualPaymentMethod}`);
+    return res.json({ success: true, message: 'Cash verification successful. Credentials generated.' });
+  } catch (error) {
+    console.error('verifyAuthCashOtp error:', error);
+    return res.status(500).json({ success: false, error: 'Server error during OTP verification' });
   }
 };

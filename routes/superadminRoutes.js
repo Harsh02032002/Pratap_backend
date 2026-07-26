@@ -614,21 +614,26 @@ router.get('/bookings/overview', protect, authorize('superadmin'), async (req, r
       monthBookings: confirmedBookingsMonth
     };
 
-    // 3. Recent Leads
-    const recentLeads = enquiries.slice(0, 5).map(e => {
+    // 3. Recent Leads & Recent Bookings
+    const recentLeads = (bookingsList.length > 0 ? bookingsList : enquiries).slice(0, 5).map(e => {
       let statusColor = 'bg-blue-50 text-blue-600';
-      if (e.status === 'contacted') statusColor = 'bg-amber-50 text-amber-600';
-      else if (['accepted', 'approved', 'confirmed'].includes(e.status)) statusColor = 'bg-purple-50 text-purple-600';
-      else if (e.visitAllowed) statusColor = 'bg-emerald-50 text-emerald-600';
+      const st = e.status || e.booking_status || 'pending';
+      if (st === 'contacted') statusColor = 'bg-amber-50 text-amber-600';
+      else if (['accepted', 'approved', 'confirmed', 'paid'].includes(st)) statusColor = 'bg-purple-50 text-purple-600';
+      else if (e.visitAllowed || st === 'site-visit') statusColor = 'bg-emerald-50 text-emerald-600';
 
       return {
-        name: e.studentName || 'Unknown Student',
-        loc: e.location || 'Multiple Locations',
+        _id: e._id,
+        name: e.studentName || e.userName || e.tenantName || 'Applicant',
+        tenantName: e.studentName || e.userName || e.tenantName || 'Applicant',
+        propertyName: e.propertyName || e.property_name || e.location || 'Roomhy Residence',
+        loc: e.location || e.city || 'Location',
         src: e.source || 'Website',
-        budget: e.budget || 'N/A',
-        status: e.status || 'New',
+        budget: e.budget || e.bidAmount || e.amount || 'N/A',
+        amount: e.bidAmount || e.amount || e.rentAmount || 0,
+        status: st,
         sc: statusColor,
-        time: e.ts ? e.ts.toISOString().split('T')[0] : 'N/A'
+        time: e.ts ? new Date(e.ts).toISOString().split('T')[0] : (e.created_at ? new Date(e.created_at).toISOString().split('T')[0] : 'Recently')
       };
     });
 

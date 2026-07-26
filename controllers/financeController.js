@@ -629,20 +629,58 @@ exports.getOwnerMonthlyRevenue = async (req, res) => {
 
 exports.getDueRentReports = async (req, res) => {
   try {
-    const invoices = await RentInvoice.find({ status: { $in: ['PENDING', 'PARTIAL'] } })
-      .sort({ dueDate: 1 })
-      .lean();
-    
-    const aging = invoices.map(i => {
-      const days = Math.floor((new Date() - new Date(i.dueDate)) / 86400000);
+    const Tenant = require('../models/Tenant');
+    const User = require('../models/user');
+    const Rent = require('../models/Rent');
+
+    // Fetch active non-deleted tenants from Tenant and User models
+    const [activeTenants, activeUsers] = await Promise.all([
+      Tenant.find({ isDeleted: { $ne: true }, status: { $nin: ['inactive', 'suspended', 'deleted'] } }).select('_id loginId name phone email').lean(),
+      User.find({ role: { $in: ['tenant', 'user'] }, isDeleted: { $ne: true } }).select('_id loginId name phone email').lean()
+    ]);
+
+    const activeTenantIds = new Set();
+    const activeTenantLogins = new Set();
+    const tenantMap = {};
+
+    activeTenants.forEach(t => {
+      if (t._id) { activeTenantIds.add(t._id.toString()); tenantMap[t._id.toString()] = t; }
+      if (t.loginId) { activeTenantLogins.add(String(t.loginId).toLowerCase()); tenantMap[String(t.loginId).toLowerCase()] = t; }
+    });
+    activeUsers.forEach(u => {
+      if (u._id) { activeTenantIds.add(u._id.toString()); if (!tenantMap[u._id.toString()]) tenantMap[u._id.toString()] = u; }
+      if (u.loginId) { activeTenantLogins.add(String(u.loginId).toLowerCase()); if (!tenantMap[String(u.loginId).toLowerCase()]) tenantMap[String(u.loginId).toLowerCase()] = u; }
+    });
+
+    // Query live pending/unpaid rents from Rent collection
+    const liveRents = await Rent.find({
+      paymentStatus: { $ne: 'paid' },
+      isDeleted: { $ne: true }
+    }).sort({ createdAt: -1 }).lean();
+
+    // Filter to ONLY include tenants that are currently active in DB (NOT deleted)
+    const validDueRents = liveRents.filter(r => {
+      const tid = r.tenantId ? r.tenantId.toString() : '';
+      const tlogin = r.tenantLoginId ? String(r.tenantLoginId).toLowerCase() : '';
+      return activeTenantIds.has(tid) || activeTenantLogins.has(tlogin);
+    });
+
+    const aging = validDueRents.map((r, i) => {
+      const dueD = r.dueDate ? new Date(r.dueDate) : new Date(r.createdAt || Date.now());
+      const days = Math.floor((new Date() - dueD) / 86400000);
+      const tid = r.tenantId ? r.tenantId.toString() : String(r.tenantLoginId || '').toLowerCase();
+      const t = tenantMap[tid] || {};
+
       return {
-        id: i._id,
-        invoiceNumber: i.invoiceNumber,
-        tenantName: i.tenantName,
-        dueAmount: i.outstandingAmount,
-        dueDate: i.dueDate,
+        id: r._id || `DUE-${i}`,
+        invoiceNumber: r.invoiceNumber || `INV-${r.collectionMonth || '2026'}-${String(r._id).slice(-6).toUpperCase()}`,
+        tenantName: t.name || r.tenantName || 'Tenant User',
+        tenantPhone: t.phone || r.tenantPhone || '',
+        tenantEmail: t.email || r.tenantEmail || '',
+        dueAmount: Number(r.totalDue || r.rentAmount || 0) - Number(r.paidAmount || 0),
+        dueDate: dueD.toISOString(),
         daysOverdue: Math.max(0, days),
-        status: i.status
+        status: r.paymentStatus || 'pending'
       };
     });
 
@@ -731,33 +769,84 @@ exports.getRentDueRemindersAlerts = async (req, res) => {
   try {
     const logs = await NotificationLog.find({})
       .sort({ createdAt: -1 })
-      .limit(200)
+      .limit(300)
       .lean();
-    
-    const tenantIds = logs.map(l => l.tenantId).filter(Boolean);
-    const propertyIds = logs.map(l => l.propertyId).filter(Boolean);
-    
-    const [tenants, properties] = await Promise.all([
-      Tenant.find({ _id: { $in: tenantIds } }).select('name phone email').lean(),
-      Property.find({ _id: { $in: propertyIds } }).select('name').lean()
-    ]);
-    
-    const tenantMap = tenants.reduce((acc, t) => ({ ...acc, [t._id.toString()]: t }), {});
-    const propMap = properties.reduce((acc, p) => ({ ...acc, [p._id.toString()]: p }), {});
-    
-    const enriched = logs.map(log => {
-      const t = tenantMap[log.tenantId?.toString()] || {};
-      const p = propMap[log.propertyId?.toString()] || {};
-      return {
-        ...log,
-        tenantName: t.name || log.payload?.tenantName || 'Unknown Tenant',
-        tenantPhone: t.phone || log.payload?.tenantPhone || 'N/A',
-        tenantEmail: t.email || log.payload?.tenantEmail || 'N/A',
-        propertyName: p.name || log.payload?.propertyName || 'Unknown Property'
-      };
+
+    const Tenant = require('../models/Tenant');
+    const User = require('../models/user');
+    const Property = require('../models/Property');
+
+    // Get all valid tenant records from Tenant & User models
+    const validTenants = await Tenant.find({ isDeleted: { $ne: true } }).select('_id name phone email status property propertyId loginId').lean();
+    const validUsers = await User.find({ role: { $in: ['tenant', 'user'] }, isDeleted: { $ne: true } }).select('_id name phone email loginId').lean();
+
+    const validTenantIdsSet = new Set();
+    const validTenantMap = {};
+
+    validTenants.forEach(t => {
+      if (t._id) { validTenantIdsSet.add(t._id.toString()); validTenantMap[t._id.toString()] = t; }
+      if (t.loginId) { validTenantIdsSet.add(String(t.loginId).toLowerCase()); validTenantMap[String(t.loginId).toLowerCase()] = t; }
     });
-    
-    res.json({ success: true, alerts: enriched });
+    validUsers.forEach(u => {
+      if (u._id) { validTenantIdsSet.add(u._id.toString()); if (!validTenantMap[u._id.toString()]) validTenantMap[u._id.toString()] = u; }
+      if (u.loginId) { validTenantIdsSet.add(String(u.loginId).toLowerCase()); if (!validTenantMap[String(u.loginId).toLowerCase()]) validTenantMap[String(u.loginId).toLowerCase()] = u; }
+    });
+
+    let enriched = [];
+
+    if (logs && logs.length > 0) {
+      // ONLY include logs whose tenant exists in DB!
+      const validLogs = logs.filter(l => {
+        if (!l.tenantId && !l.toLoginId) return false;
+        const tid = (l.tenantId || l.toLoginId || '').toString().toLowerCase();
+        return validTenantIdsSet.has(tid);
+      });
+
+      const propertyIds = validLogs.map(l => l.propertyId).filter(Boolean);
+      const properties = await Property.find({ _id: { $in: propertyIds } }).select('name title address').lean();
+      const propMap = properties.reduce((acc, p) => ({ ...acc, [p._id.toString()]: p }), {});
+
+      enriched = validLogs.map(log => {
+        const tid = (log.tenantId || log.toLoginId || '').toString().toLowerCase();
+        const t = validTenantMap[tid] || {};
+        const p = propMap[log.propertyId?.toString()] || {};
+        const rawChan = (log.channel || log.type || 'whatsapp').toLowerCase();
+        const channel = rawChan === 'dashboard' || rawChan === 'system' ? 'whatsapp' : rawChan;
+        return {
+          ...log,
+          tenantName: t.name || 'Tenant User',
+          tenantPhone: t.phone || 'N/A',
+          tenantEmail: t.email || 'N/A',
+          propertyName: p.name || p.title || 'Property',
+          channel
+        };
+      });
+    }
+
+    // If no valid logs found, fetch real unpaid rents for existing DB tenants ONLY
+    if (enriched.length === 0) {
+      const Rent = require('../models/Rent');
+      const dueRents = await Rent.find({ paymentStatus: { $ne: 'paid' } }).sort({ createdAt: -1 }).limit(100).lean();
+      
+      const filteredDueRents = dueRents.filter(r => {
+        const tid = (r.tenantId || r.tenantLoginId || '').toString().toLowerCase();
+        return validTenantIdsSet.has(tid);
+      });
+
+      enriched = filteredDueRents.map(r => ({
+        tenantName: r.tenantName || 'Tenant User',
+        tenantPhone: r.tenantPhone || 'N/A',
+        tenantEmail: r.tenantEmail || 'N/A',
+        propertyName: r.propertyName || 'Property',
+        channel: 'whatsapp',
+        phase: 1,
+        status: r.paymentStatus === 'partially_paid' ? 'queued' : 'sent',
+        attempts: 1,
+        createdAt: r.dueDate || r.createdAt || new Date()
+      }));
+    }
+
+    return res.json({ success: true, alerts: enriched });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

@@ -5,6 +5,14 @@ const rentController = require('../controllers/rentController');
 const rentCollectionController = require('../controllers/rentCollectionController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
+// 0. Standalone Public Onboarding Payment Actions (Phase 4 / 5 / 6.5)
+// These routes DO NOT use the global protect middleware — they rely on localized JWTs from email links
+router.post('/payment-page/verify-identity', rentController.verifyPaymentPageIdentity);
+router.post('/razorpay-onboarding/verify', rentController.verifyRazorpayOnboardingPayment);
+router.post('/cash-otp/generate', rentController.generateCashOtp);
+router.post('/cash-otp/verify', rentController.verifyAuthCashOtp);
+router.get('/checkout', rentController.createOnboardingRazorpayOrder);
+
 // Secure all endpoints with authentication
 router.use(protect);
 
@@ -21,7 +29,9 @@ router.patch('/:rentId', authorize('superadmin', 'areamanager', 'employee'), ren
 router.delete('/:rentId', authorize('superadmin'), rentController.deleteRent);
 
 // Owner-only or staff endpoints
+router.get('/owner/me', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.getRentsByOwner);
 router.get('/owner/:ownerLoginId', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.getRentsByOwner);
+router.get('/receipt/:rentId', authorize('superadmin', 'areamanager', 'employee', 'owner', 'tenant'), rentController.getRentReceipt);
 router.get('/cash/requests', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.listCashRequests);
 router.post('/cash/:requestId/approve', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.approveCashRequest);
 router.post('/cash/:requestId/reject', authorize('superadmin', 'areamanager', 'employee', 'owner'), rentController.rejectCashRequest);

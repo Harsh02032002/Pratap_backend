@@ -100,9 +100,25 @@ async function resolveRequestUser(req) {
         const token = authHeader.slice(7).trim();
         if (!token) return null;
         const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-        if (!decoded?.id) return null;
-        const user = await User.findById(decoded.id).select('role loginId').lean();
-        return user || null;
+        
+        if (decoded?.id) {
+            const user = await User.findById(decoded.id).select('role loginId name').lean();
+            if (user) return user;
+
+            const Employee = require('../models/Employee');
+            const emp = await Employee.findById(decoded.id).select('role loginId employeeId name').lean();
+            if (emp) {
+                return {
+                    role: emp.role || 'employee',
+                    loginId: emp.employeeId || emp.loginId || emp.name,
+                    name: emp.name
+                };
+            }
+        }
+        if (decoded?.role) {
+            return { role: decoded.role, loginId: decoded.loginId || decoded.employeeId || '' };
+        }
+        return null;
     } catch (_) {
         return null;
     }
@@ -196,8 +212,8 @@ router.post('/', async (req, res) => {
 
 // ============================================================
 // GET: Root endpoint - returns all visits (alias for /all)
-// Used by Area Manager dashboard
-// Supports optional ?staffId parameter to filter by staff
+// Used by Area Manager / Employee dashboard
+// Supports optional ?staffId / ?staffName parameters to filter by staff
 // ============================================================
 router.get('/', async (req, res) => {
     try {
@@ -206,25 +222,15 @@ router.get('/', async (req, res) => {
         const requestedStaffName = (req.query.staffName || '').toString().trim();
 
         // Employees should only see their own visit reports.
-        const enforcedStaffId =
-            requester?.role === 'employee'
-                ? String(requester.loginId || requestedStaffId || '').trim()
-                : requestedStaffId;
+        const isEmployee = requester?.role === 'employee' || requester?.role === 'staff' || requester?.role === 'areamanager';
+        const enforcedStaffId = isEmployee
+            ? String(requester?.loginId || requestedStaffId || '').trim()
+            : requestedStaffId;
 
         const staffId = enforcedStaffId;
-        const staffName = staffId ? '' : requestedStaffName;
+        const staffName = isEmployee ? (requester?.name || requestedStaffName) : (staffId ? '' : requestedStaffName);
         const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
         const skip = Math.max(0, parseInt(req.query.skip, 10) || 0);
-        const cacheKey = JSON.stringify({
-            staffId,
-            staffName,
-            limit,
-            skip
-        });
-        const cached = visitsListCache.get(cacheKey);
-        if (cached && Date.now() - cached.timestamp < VISITS_CACHE_TTL_MS) {
-            return res.json(cached.payload);
-        }
 
         let query = {};
         let usesCaseInsensitiveMatch = false;
@@ -245,16 +251,17 @@ router.get('/', async (req, res) => {
             }
             if (staffName) {
                 usesCaseInsensitiveMatch = true;
+                const nameRegex = new RegExp(`^${escapeRegex(staffName)}$`, 'i');
                 or.push(
-                    { staffName },
-                    { submittedBy: staffName }
+                    { staffName: nameRegex },
+                    { submittedBy: nameRegex }
                 );
             }
             query = or.length ? { $or: or } : {};
             console.log('[visits/GET] Fetching visits for staff filter:', {
                 staffId,
                 staffName,
-                enforcedByRole: requester?.role === 'employee'
+                enforcedByRole: isEmployee
             });
         } else {
             console.log('[visits/GET] Fetching all visits');
