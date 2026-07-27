@@ -232,6 +232,8 @@ router.get('/', async (req, res) => {
         const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
         const skip = Math.max(0, parseInt(req.query.skip, 10) || 0);
 
+        const cacheKey = JSON.stringify({ staffId, staffName, limit, skip });
+
         let query = {};
         let usesCaseInsensitiveMatch = false;
         if (staffId || staffName) {

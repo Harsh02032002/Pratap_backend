@@ -353,9 +353,15 @@ exports.createBookingRequest = async (req, res) => {
             });
         }
 
-        // Resolve owner_id — if not sent by client or generic, look it up from property record
+        // Resolve owner_id — if not sent by client or generic (like 'Verified Owner'), look it up from property record
         let resolvedOwnerId = owner_id;
-        if (!resolvedOwnerId || resolvedOwnerId === 'OWN001' || resolvedOwnerId === 'null') {
+        const isGenericOwnerId = (id) => {
+            if (!id || typeof id !== 'string') return true;
+            const clean = id.trim().toLowerCase();
+            return clean === 'own001' || clean === 'null' || clean === 'verified owner' || clean === 'undefined' || clean.includes('verified');
+        };
+
+        if (isGenericOwnerId(resolvedOwnerId)) {
             try {
                 let prop = null;
                 if (property_id && mongoose.Types.ObjectId.isValid(property_id)) {
@@ -698,14 +704,38 @@ exports.getBookingRequests = async (req, res) => {
             console.log(`🔍 Fetching bookings for email: ${email}`);
             query.email = email;
         } 
-        // ✅ NEW: Support owner_id query param for property owner panel
+        // ✅ Support owner_id query param for property owner panel
         else if (owner_id) {
             console.log(`🔍 Fetching bookings for owner_id: ${owner_id}`);
-            // For bulk requests, check if owner_id is in the owner_ids array
+            const cleanOwnerId = String(owner_id).trim();
+
+            let propIds = [];
+            let propVisitIds = [];
+            let propNames = [];
+
+            try {
+                const ownerProps = await ApprovedProperty.find({
+                    $or: [
+                        { ownerLoginId: cleanOwnerId },
+                        { 'generatedCredentials.loginId': cleanOwnerId },
+                        { owner_id: cleanOwnerId },
+                        { owner: cleanOwnerId }
+                    ]
+                }).select('_id visitId propertyName title').lean();
+
+                propIds = ownerProps.map(p => String(p._id));
+                propVisitIds = ownerProps.map(p => p.visitId).filter(Boolean);
+                propNames = ownerProps.map(p => p.propertyName || p.title).filter(Boolean);
+            } catch (_) {}
+
             query.$or = [
-                { owner_id: owner_id }, // Regular requests
-                { owner_ids: { $in: [owner_id] }, is_bulk_request: true } // Bulk requests
+                { owner_id: cleanOwnerId },
+                { owner_ids: { $in: [cleanOwnerId] }, is_bulk_request: true }
             ];
+
+            if (propIds.length > 0) query.$or.push({ property_id: { $in: propIds } });
+            if (propVisitIds.length > 0) query.$or.push({ property_id: { $in: propVisitIds } });
+            if (propNames.length > 0) query.$or.push({ property_name: { $in: propNames } });
         } else if (user_id) {
             query.user_id = user_id;
         } else if (manager_id) {

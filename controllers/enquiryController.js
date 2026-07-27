@@ -69,14 +69,44 @@ exports.listEnquiries = async (req, res) => {
     // 1. Fetch enquiries from Enquiry collection
     const enquiries = await Enquiry.find({ ownerLoginId }).sort({ ts: -1 }).lean();
 
-    // 2. Fetch booking requests from BookingRequest collection
+    // 2. Fetch booking requests from BookingRequest collection (matching owner_id OR owner's properties)
     const BookingRequest = require('../models/BookingRequest');
-    const bookingRequests = await BookingRequest.find({
+    const ApprovedProperty = require('../models/ApprovedProperty');
+
+    let propIds = [];
+    let propVisitIds = [];
+    let propNames = [];
+
+    try {
+      const ownerProps = await ApprovedProperty.find({
+        $or: [
+          { ownerLoginId: normalizedOwnerId },
+          { 'generatedCredentials.loginId': normalizedOwnerId },
+          { owner_id: normalizedOwnerId },
+          { owner: normalizedOwnerId },
+          { ownerLoginId: ownerLoginId },
+          { owner_id: ownerLoginId }
+        ]
+      }).select('_id visitId propertyName title').lean();
+
+      propIds = ownerProps.map(p => String(p._id));
+      propVisitIds = ownerProps.map(p => p.visitId).filter(Boolean);
+      propNames = ownerProps.map(p => p.propertyName || p.title).filter(Boolean);
+    } catch (_) {}
+
+    const bookingQuery = {
       $or: [
         { owner_id: normalizedOwnerId },
-        { owner_id: ownerLoginId }
+        { owner_id: ownerLoginId },
+        { owner_ids: { $in: [normalizedOwnerId, ownerLoginId] } }
       ]
-    }).sort({ created_at: -1 }).lean();
+    };
+
+    if (propIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propIds } });
+    if (propVisitIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propVisitIds } });
+    if (propNames.length > 0) bookingQuery.$or.push({ property_name: { $in: propNames } });
+
+    const bookingRequests = await BookingRequest.find(bookingQuery).sort({ created_at: -1 }).lean();
 
     // 3. Fetch tenants to see who has moved in (onboarded)
     const Tenant = require('../models/Tenant');
