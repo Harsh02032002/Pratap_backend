@@ -389,7 +389,7 @@ exports.createBookingRequest = async (req, res) => {
         const newRequest = new BookingRequest({
             property_id,
             property_name,
-            area,
+            area: area || req.body.area || filter_criteria?.area || filter_criteria?.location || null,
             city: req.body.city || filter_criteria?.city || null,
             property_type,
             rent_amount,
@@ -400,7 +400,7 @@ exports.createBookingRequest = async (req, res) => {
             owner_id: resolvedOwnerId,     // ✅ SET OWNER ID (resolved from request or property)
             owner_name: ownerName,          // ✅ SET OWNER NAME FROM USER DB
             request_type,
-            bid_amount: request_type === 'bid' ? (bid_amount || 500) : 0,
+            bid_amount: request_type === 'bid' ? (bid_amount || rent_amount || 7000) : 0,
             bid_min: request_type === 'bid' ? (bid_min || null) : null,
             bid_max: request_type === 'bid' ? (bid_max || null) : null,
             filter_criteria: filter_criteria || {},
