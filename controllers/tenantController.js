@@ -70,7 +70,7 @@ exports.verifyTenantKYC = async (req, res) => {
 
         if (action === 'approve') {
             tenant.kycStatus = 'verified';
-            tenant.status = 'active'; // Activate tenant on KYC approval
+            // Status remains 'pending' until onboarding payment is completed
             
             // Send notification to tenant
             try {
@@ -320,7 +320,7 @@ exports.assignTenant = async (req, res) => {
         // Generate temporary password (8 chars: mix of alphanumeric)
         const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
 
-        // Create User record for tenant (role: 'tenant')
+        // Create User record for tenant (role: 'tenant', inactive until payment)
         const user = await User.create({
             name,
             email,
@@ -329,7 +329,8 @@ exports.assignTenant = async (req, res) => {
             role: 'tenant',
             loginId,
             locationCode: effectiveLocationCode,
-            status: 'active',
+            status: 'pending',
+            isActive: false,
             requirePasswordReset: true
         });
 
@@ -378,7 +379,7 @@ exports.assignTenant = async (req, res) => {
                 fatherName: additional?.fatherName || '',
                 permanentAddress: additional?.permanentAddress || ''
             },
-            kycStatus: req.body.kycStatus || 'pending', // Default pending until KYC is completed
+            kycStatus: 'pending', // Always pending upon creation until tenant completes digital check-in
             kycVerificationData: {
                 // Store data from Add Tenant for comparison during tenant KYC
                 adminEnteredName: name,
@@ -391,7 +392,7 @@ exports.assignTenant = async (req, res) => {
             ownerLoginId: String(ownerLoginId || property.ownerLoginId || '').toUpperCase() || undefined,
             propertyTitle: assignedPropertyTitle || property.title || '',
             assignedBy: req.user ? req.user.id : (property.owner && property.owner._id ? property.owner._id : undefined),
-            status: req.body.status || 'pending', // Default pending until KYC is verified
+            status: 'pending', // Always pending upon creation until onboarding payment is completed
             digitalCheckin: {
                 agreementDetails: {
                     ...(accommodationType && { accommodationType }),
@@ -445,101 +446,19 @@ exports.assignTenant = async (req, res) => {
                 tenantLoginId: loginId,
                 rentAmount: rentAmount,
                 totalDue: rentAmount,
-                paidAmount: rentAmount,
-                paymentStatus: 'paid',
-                paymentDate: new Date(),
+                paidAmount: 0,
+                paymentStatus: 'pending',
                 moveInDate: moveInDate ? new Date(moveInDate) : new Date(),
                 dueDate: moveInDate ? new Date(moveInDate) : new Date(),
                 collectionMonth: collectionMonth,
                 createdAt: new Date()
             });
-            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount} (Marked PAID on onboarding)`);
+            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount} (Pending onboarding payment)`);
         } else {
             console.log(`[RENT ALREADY EXISTS] Skipped duplicate rent generation for ${loginId} in ${collectionMonth}`);
         }
 
-        // Auto-create PAID RentInvoice & RentPayment for move-in month
-        try {
-            const RentInvoice = require('../models/RentInvoice');
-            const RentPayment = require('../models/RentPayment');
-            const RentAuditLog = require('../models/RentAuditLog');
-            const Owner = require('../models/Owner');
-            const { getEffectiveConfig } = require('../services/invoiceService');
-
-            const moveIn = moveInDate ? new Date(moveInDate) : new Date();
-            const now = new Date();
-            const billingMonth = `${moveIn.getFullYear()}-${String(moveIn.getMonth() + 1).padStart(2, '0')}`;
-            const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-
-            if (billingMonth === currentMonth) {
-                const existingInv = await RentInvoice.findOne({ tenantId: tenant._id, billingMonth: currentMonth });
-                if (!existingInv) {
-                const ownerDoc = normalizedOwnerLoginId ? await Owner.findOne({ loginId: normalizedOwnerLoginId }).lean() : null;
-                const ownerUserId = ownerDoc?._id || property.owner?._id || property.owner || null;
-                const rentAmt = Number(agreedRent || 0);
-
-                const config = ownerUserId
-                    ? await getEffectiveConfig(ownerUserId, property._id, null).catch(() => null)
-                    : null;
-                const [yr, mo] = billingMonth.split('-');
-                const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
-
-                const invoiceNumber = `INV-${billingMonth}-${String(tenant._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-
-                const invoice = await RentInvoice.create({
-                    invoiceNumber,
-                    ownerId: ownerUserId,
-                    propertyId: property._id,
-                    tenantId: tenant._id,
-                    tenantName: name || '',
-                    tenantEmail: email || '',
-                    tenantPhone: phone || '',
-                    billingMonth,
-                    rentAmount: rentAmt,
-                    dueDate,
-                    totalDue: rentAmt,
-                    outstandingAmount: 0,
-                    paidAmount: rentAmt,
-                    rentPaidAmount: rentAmt,
-                    status: 'PAID',
-                    paymentDate: moveIn,
-                    penaltyConfigSnapshot: config || {},
-                });
-
-                if (ownerUserId && rentAmt > 0) {
-                    await RentPayment.create({
-                        invoiceId: invoice._id,
-                        tenantId: tenant._id,
-                        propertyId: property._id,
-                        ownerId: ownerUserId,
-                        amount: rentAmt,
-                        paymentMethod: 'cash',
-                        transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
-                        isPartial: false,
-                        remainingAfter: 0,
-                        rentPaidAmount: rentAmt,
-                        penaltyPaidAmount: 0,
-                        paymentDate: moveIn,
-                        recordedBy: normalizedOwnerLoginId || 'SYSTEM',
-                        notes: 'Move-in month rent — auto-recorded on tenant onboarding',
-                    }).catch(() => {});
-                }
-
-                await RentAuditLog.create({
-                    action: 'INVOICE_CREATED',
-                    invoiceId: invoice._id,
-                    tenantId: tenant._id,
-                    ownerId: ownerUserId,
-                    propertyId: property._id,
-                    meta: { billingMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID' },
-                }).catch(() => {});
-
-                console.log(`[INVOICE CREATED] Auto-created PAID invoice for ${name} (${loginId}), billingMonth: ${billingMonth}`);
-            }
-            }
-        } catch (invErr) {
-            console.warn('[INVOICE CREATION WARN] Could not auto-create move-in invoice:', invErr.message);
-        }
+        // Rent invoice and payment record will be created when tenant completes payment / cash OTP verification
 
         // Log notification for super admin
         console.log(`[TENANT ASSIGNED] ${name} (${loginId}) assigned to ${rentPropertyName}, Room ${roomNo}`);
@@ -1082,7 +1001,7 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
 
         updatedTenant = await Tenant.findOneAndUpdate(
             { loginId, paymentLinkStatus: { $ne: 'paid' } },
-            { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId } },
+            { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId, status: 'active' } },
             { new: true, session }
         );
 
@@ -1092,7 +1011,14 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
             return false;
         }
 
-        console.log(`[ONBOARDING FINALIZATION] Triggering credentials for ${updatedTenant.loginId}`);
+        // Activate User account so tenant can login after payment
+        await User.updateOne(
+            { loginId: updatedTenant.loginId },
+            { $set: { isActive: true, status: 'active' } },
+            session ? { session } : {}
+        );
+
+        console.log(`[ONBOARDING FINALIZATION] Triggering credentials & activating account for ${updatedTenant.loginId}`);
         credentialResult = await exports.generateTenantCredentials(updatedTenant._id, updatedTenant.assignmentLocationCode, { session });
 
         await session.commitTransaction();

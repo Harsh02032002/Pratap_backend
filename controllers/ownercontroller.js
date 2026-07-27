@@ -442,25 +442,7 @@ exports.getOwnerTenants = async (req, res) => {
         const propertyIds = properties.map(p => p._id);
         const Tenant = require('../models/Tenant');
 
-        // Auto-heal tenants without mismatch: promote pending_verification -> verified & pending -> active
-        await Tenant.updateMany(
-            {
-                $or: [{ ownerLoginId }, { property: { $in: propertyIds } }],
-                isDeleted: { $ne: true },
-                kycStatus: { $ne: 'mismatch_review' },
-                'kyc.mismatchReasons': { $exists: false },
-                $or: [
-                    { kycStatus: 'pending_verification' },
-                    { kycStatus: 'pending' },
-                    { kycStatus: { $exists: false } },
-                    { status: 'pending' }
-                ]
-            },
-            {
-                $set: { kycStatus: 'verified', status: 'active' }
-            }
-        ).catch(() => {});
-
+        // Fetch tenants for this owner's properties
         const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } }).lean();
         res.json({ tenants });
     } catch (err) {
@@ -1037,94 +1019,7 @@ exports.addTenantToProperty = async (req, res) => {
             );
         }
 
-        // ── Auto-create PAID invoice for move-in month ──────────────────────────
-        // Move-in month rent is already received (security/advance). Create a PAID
-        // invoice immediately so the owner panel shows "paid + View receipt" from day 1.
-        // From NEXT month onwards the normal rent cycle (invoice → pending → penalty) begins.
-        try {
-            const newTenant = tenantResponse.data.tenant;
-            const newTenantId = newTenant?._id || newTenant?.id;
-            if (newTenant && newTenantId) {
-                const mongoose = require('mongoose');
-                const RentInvoice = mongoose.models.RentInvoice || require('../models/RentInvoice');
-                const RentPayment = mongoose.models.RentPayment || require('../models/RentPayment');
-                const RentAuditLog = mongoose.models.RentAuditLog || require('../models/RentAuditLog');
-                const { getEffectiveConfig } = require('../services/invoiceService');
-
-                const moveIn = moveInDate ? new Date(moveInDate) : new Date();
-                const billingMonth = `${moveIn.getFullYear()}-${String(moveIn.getMonth() + 1).padStart(2, '0')}`;
-
-                // Only create if no invoice exists yet for this tenant+month
-                const existing = await RentInvoice.findOne({ tenantId: newTenantId, billingMonth });
-                if (!existing) {
-                    const ownerDoc = await Owner.findOne({ loginId: normalizedOwnerId }).lean();
-                    const ownerUserId = ownerDoc?._id || null;
-                    const rentAmt = Number(agreedRent || 0);
-
-                    const config = ownerUserId
-                        ? await getEffectiveConfig(ownerUserId, propertyId, null)
-                        : null;
-                    const [yr, mo] = billingMonth.split('-');
-                    const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
-
-                    const invoiceNumber = `INV-${billingMonth}-${String(newTenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-
-                    const invoice = await RentInvoice.create({
-                        invoiceNumber,
-                        ownerId: ownerUserId,
-                        propertyId: propertyId,
-                        tenantId: newTenantId,
-                        tenantName: name || '',
-                        tenantEmail: email || '',
-                        tenantPhone: phone || '',
-                        billingMonth,
-                        rentAmount: rentAmt,
-                        dueDate,
-                        totalDue: rentAmt,
-                        outstandingAmount: 0,
-                        paidAmount: rentAmt,
-                        rentPaidAmount: rentAmt,
-                        status: 'PAID',
-                        paymentDate: moveIn,
-                        penaltyConfigSnapshot: config || {},
-                    });
-
-                    // Create RentPayment record so Receipts tab works
-                    if (ownerUserId && rentAmt > 0) {
-                        await RentPayment.create({
-                            invoiceId: invoice._id,
-                            tenantId: newTenantId,
-                            propertyId: propertyId,
-                            ownerId: ownerUserId,
-                            amount: rentAmt,
-                            paymentMethod: 'cash',
-                            transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
-                            isPartial: false,
-                            remainingAfter: 0,
-                            rentPaidAmount: rentAmt,
-                            penaltyPaidAmount: 0,
-                            paymentDate: moveIn,
-                            recordedBy: normalizedOwnerId,
-                            notes: 'Move-in month rent — auto-recorded on tenant onboarding',
-                        });
-                    }
-
-                    await RentAuditLog.create({
-                        action: 'INVOICE_CREATED',
-                        invoiceId: invoice._id,
-                        tenantId: newTenantId,
-                        ownerId: ownerUserId,
-                        propertyId: propertyId,
-                        meta: { billingMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID' },
-                    }).catch(() => { });
-
-                    console.log(`🧾 Auto-created PAID invoice for ${name} (move-in month: ${billingMonth})`);
-                }
-            }
-        } catch (invErr) {
-            // Non-blocking — don't fail the tenant add if invoice creation fails
-            console.warn('⚠️ Could not auto-create move-in invoice:', invErr.message);
-        }
+        // Rent invoice and payment record will be created when tenant completes payment / cash OTP verification
 
         // Log action for audit
         console.log(`✅ Tenant ${name} (${email}) added to property ${property.title} by owner ${normalizedOwnerId}`);
