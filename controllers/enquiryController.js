@@ -106,6 +106,10 @@ exports.listEnquiries = async (req, res) => {
         studentName: b.name,
         studentEmail: b.email,
         studentPhone: b.phone,
+        city: b.city || b.filter_criteria?.city || '',
+        area: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
+        preferredCity: b.city || b.filter_criteria?.city || '',
+        preferredArea: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         location: b.area ? (b.city ? `${b.area}, ${b.city}` : b.area) : (b.city || ''),
         status: isMovedIn ? 'confirmed' : (b.booking_status || b.status || 'pending'),
         paidAmount: b.payment_amount || b.rent_amount || b.total_amount || 0,
@@ -130,8 +134,12 @@ exports.listEnquiries = async (req, res) => {
       };
     });
 
-    // 6. Merge and sort by timestamp
-    const allLeads = [...mappedEnquiries, ...mappedBookings];
+    // 6. Merge, filter out rejected/deleted leads, and sort by timestamp
+    const allLeads = [...mappedEnquiries, ...mappedBookings]
+      .filter(item => {
+        const st = String(item.status || '').toLowerCase();
+        return st !== 'rejected' && st !== 'deleted' && st !== 'cancelled' && !item.isDeleted;
+      });
     allLeads.sort((a, b) => new Date(b.ts) - new Date(a.ts));
 
     res.json(allLeads);
