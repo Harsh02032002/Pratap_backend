@@ -424,11 +424,8 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         tenant.kycStatus = 'audit_pending';
     }
 
-    if (tenant.kycStatus === 'verified') {
-        tenant.status = 'active';
-    } else {
-        tenant.status = 'pending';
-    }
+    // Status remains 'pending' until onboarding payment is completed
+    tenant.status = 'pending';
     tenant.updatedAt = new Date();
     await tenant.save();
 
