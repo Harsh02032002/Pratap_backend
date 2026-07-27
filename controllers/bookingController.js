@@ -433,7 +433,7 @@ exports.createBookingRequest = async (req, res) => {
             owner_id: resolvedOwnerId,     // ✅ SET OWNER ID (resolved from request or property)
             owner_name: ownerName,          // ✅ SET OWNER NAME FROM USER DB
             request_type,
-            bid_amount: request_type === 'bid' ? (bid_amount || rent_amount || 7000) : 0,
+            bid_amount: request_type === 'bid' ? (bid_amount || bid_max || bid_min || (filter_criteria && (filter_criteria.max_price || filter_criteria.min_price)) || 7000) : 0,
             bid_min: request_type === 'bid' ? (bid_min || null) : null,
             bid_max: request_type === 'bid' ? (bid_max || null) : null,
             filter_criteria: filter_criteria || {},

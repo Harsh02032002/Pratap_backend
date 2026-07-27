@@ -138,6 +138,7 @@ exports.listEnquiries = async (req, res) => {
         studentPhone: b.phone,
         city: b.city || b.filter_criteria?.city || '',
         area: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
+        notes: b.message || (b.request_type === 'direct' ? 'Direct booking request from website' : `Tenant Max Budget: ₹${((b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 7000).toLocaleString("en-IN")}. If you can offer this property for ₹${((b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 7000).toLocaleString("en-IN")}/month, please accept the bid.`),
         preferredCity: b.city || b.filter_criteria?.city || '',
         preferredArea: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         location: b.area ? (b.city ? `${b.area}, ${b.city}` : b.area) : (b.city || ''),
@@ -145,9 +146,21 @@ exports.listEnquiries = async (req, res) => {
         paidAmount: b.payment_amount || b.rent_amount || b.total_amount || 0,
         ts: b.created_at || b.createdAt || new Date(),
         source: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
-        interest: b.property_type || b.interest || 'Any Room',
-        budget: b.request_type === 'bid' ? `₹${(b.bid_amount || 0).toLocaleString("en-IN")}` : `₹${(b.rent_amount || b.total_amount || 0).toLocaleString("en-IN")}`,
-        notes: b.message || '',
+        budget: (() => {
+          if (b.request_type === 'bid') {
+            if (b.message) {
+              const match = String(b.message).match(/₹([\d,]+)/);
+              if (match && match[1]) {
+                const val = parseInt(match[1].replace(/,/g, ''), 10);
+                if (val > 0) return `₹${val.toLocaleString("en-IN")}`;
+              }
+            }
+            if (b.bid_amount && b.bid_amount > 0) return `₹${b.bid_amount.toLocaleString("en-IN")}`;
+            if (b.bid_max && b.bid_max > 0) return `₹${b.bid_max.toLocaleString("en-IN")}`;
+            if (b.filter_criteria?.max_price) return `₹${Number(b.filter_criteria.max_price).toLocaleString("en-IN")}`;
+          }
+          return `₹${(b.rent_amount || b.total_amount || 0).toLocaleString("en-IN")}`;
+        })(),
         isBookingRequest: true
       };
     });
