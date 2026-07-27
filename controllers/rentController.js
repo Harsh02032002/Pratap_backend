@@ -2870,13 +2870,27 @@ exports.verifyAuthCashOtp = async (req, res) => {
     if (!invoice) {
       // Create invoice if it doesn't exist
       console.log(`[CASH OTP] Creating new RentInvoice for tenant ${updatedRent.tenantId} month ${billingMonth}`);
+      const tenantDoc = await Tenant.findById(updatedRent.tenantId).lean();
+      const ownerDoc = updatedRent.ownerLoginId ? await Owner.findOne({ loginId: String(updatedRent.ownerLoginId).toUpperCase() }).lean() : null;
+      const ownerUserId = ownerDoc?._id || tenantDoc?.assignedBy || updatedRent.ownerId || null;
+      const propertyId = updatedRent.propertyId || tenantDoc?.property || null;
+      const invoiceNumber = `INV-${billingMonth}-${String(updatedRent.tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+
       invoice = await RentInvoice.create({
+        invoiceNumber,
+        ownerId: ownerUserId,
+        propertyId: propertyId,
         tenantId: updatedRent.tenantId,
+        tenantName: updatedRent.tenantName || tenantDoc?.name || '',
+        tenantEmail: updatedRent.tenantEmail || tenantDoc?.email || '',
+        tenantPhone: updatedRent.tenantPhone || tenantDoc?.phone || '',
         billingMonth: billingMonth,
         rentAmount: rent.rentAmount || rent.totalDue || 0,
         totalDue: rent.totalDue || rent.rentAmount || 0,
         status: 'PAID',
         paidAmount: rent.totalDue || rent.rentAmount || 0,
+        rentPaidAmount: rent.totalDue || rent.rentAmount || 0,
+        outstandingAmount: 0,
         paymentDate: new Date(),
         paymentMethod: actualPaymentMethod,
         dueDate: new Date()
