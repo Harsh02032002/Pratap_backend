@@ -11,22 +11,62 @@ const { uploadImage, deleteImage, getCloudinaryConfig } = require('../utils/clou
  */
 exports.getCities = async (req, res) => {
     try {
-        const cities = await City.find({ status: 'Active' }).select('_id name slug state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
-        
-        // Fetch dynamic property counts for each city from ApprovedProperty
-        const cityDataWithCounts = await Promise.all(cities.map(async (cityDoc) => {
-            const cityName = cityDoc.name;
+        const dbCities = await City.find({ status: 'Active' }).select('_id name slug state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
+        const dbCityNames = dbCities.map(c => c.name);
+
+        // Extract cities from all active property & owner models
+        const propCities = await ApprovedProperty.distinct('city');
+        const propInfoCities = await ApprovedProperty.distinct('propertyInfo.city');
+
+        let propertyModelCities = [];
+        try {
+            const PropertyModel = require('../models/Property');
+            if (PropertyModel) {
+                propertyModelCities = await PropertyModel.distinct('city');
+            }
+        } catch (e) {}
+
+        let ownerCities = [];
+        try {
+            const OwnerModel = require('../models/Owner');
+            if (OwnerModel) {
+                ownerCities = await OwnerModel.distinct('locationCode');
+            }
+        } catch (e) {}
+
+        const defaultCities = ['Chandigarh', 'Kota', 'Indore', 'Jaipur', 'Delhi', 'Bhopal', 'Nagpur', 'Jodhpur', 'Mumbai', 'Bangalore', 'Chennai', 'Pune', 'Ahmedabad', 'Sikar'];
+
+        // Merge all distinct city names
+        const allCityNames = [...new Set([
+            ...dbCityNames,
+            ...propCities,
+            ...propInfoCities,
+            ...propertyModelCities,
+            ...ownerCities,
+            ...defaultCities
+        ].filter(Boolean).map(c => String(c).trim()))];
+
+        const cityDataWithCounts = await Promise.all(allCityNames.map(async (cityName) => {
+            const dbMatch = dbCities.find(c => c.name.toLowerCase() === cityName.toLowerCase());
+            
             const count = await ApprovedProperty.countDocuments({
-                status: { $in: ['approved', 'live'] },
                 $or: [
                     { city: new RegExp(`^${cityName}$`, 'i') },
                     { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
                 ]
             });
-            
-            const cityObj = cityDoc.toObject();
-            cityObj.propertyCount = count;
-            return cityObj;
+
+            if (dbMatch) {
+                const obj = dbMatch.toObject();
+                obj.propertyCount = count;
+                return obj;
+            } else {
+                return {
+                    name: cityName,
+                    status: 'Active',
+                    propertyCount: count
+                };
+            }
         }));
 
         res.status(200).json({
