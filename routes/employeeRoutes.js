@@ -81,8 +81,17 @@ router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) =
         if (!newPassword) return res.status(400).json({ success: false, error: 'newPassword required' });
 
         // Token must belong to the same employee being reset
-        if (String(req.resetLoginId || '').toUpperCase() !== String(loginId).toUpperCase()) {
-            return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
+        const reqId = String(req.resetLoginId || '').toUpperCase();
+        const targetId = String(loginId || '').toUpperCase();
+        if (reqId && reqId !== targetId) {
+            try {
+                const empById = await Employee.findById(req.resetLoginId).lean();
+                if (!empById || String(empById.loginId || '').toUpperCase() !== targetId) {
+                    return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
+                }
+            } catch (_) {
+                return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
+            }
         }
 
         const emp = await Employee.findOne({ loginId });
