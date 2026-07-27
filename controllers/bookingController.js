@@ -353,15 +353,42 @@ exports.createBookingRequest = async (req, res) => {
             });
         }
 
-        // Resolve owner_id — if not sent by client, look it up from the property record
+        // Resolve owner_id — if not sent by client or generic, look it up from property record
         let resolvedOwnerId = owner_id;
-        if (!resolvedOwnerId && property_id) {
+        if (!resolvedOwnerId || resolvedOwnerId === 'OWN001' || resolvedOwnerId === 'null') {
             try {
-                const prop = await ApprovedProperty.findById(property_id).select('generatedCredentials');
-                resolvedOwnerId = prop?.generatedCredentials?.loginId || null;
-                if (resolvedOwnerId) console.log(`🔍 owner_id resolved from property: ${resolvedOwnerId}`);
-            } catch (_) {}
+                let prop = null;
+                if (property_id && mongoose.Types.ObjectId.isValid(property_id)) {
+                    prop = await ApprovedProperty.findById(property_id).select('generatedCredentials ownerLoginId owner_id owner');
+                }
+                if (!prop && (property_id || property_name)) {
+                    prop = await ApprovedProperty.findOne({
+                        $or: [
+                            { visitId: property_id },
+                            { propertyName: property_name },
+                            { title: property_name }
+                        ]
+                    }).select('generatedCredentials ownerLoginId owner_id owner');
+                }
+                if (!prop && (property_id || property_name)) {
+                    const PropertyModel = require('../models/Property');
+                    if (PropertyModel) {
+                        prop = await PropertyModel.findOne({
+                            $or: [
+                                { _id: (property_id && mongoose.Types.ObjectId.isValid(property_id)) ? property_id : null },
+                                { title: property_name }
+                            ]
+                        }).select('ownerLoginId owner_id owner');
+                    }
+                }
+
+                const foundOwner = prop?.generatedCredentials?.loginId || prop?.ownerLoginId || prop?.owner_id || prop?.owner;
+                if (foundOwner) resolvedOwnerId = foundOwner;
+            } catch (lookupErr) {
+                console.warn('Owner lookup error:', lookupErr.message);
+            }
         }
+
         if (!resolvedOwnerId) {
             console.warn('❌ owner_id could not be resolved');
             return res.status(400).json({ success: false, message: 'Property owner ID is required' });
@@ -389,7 +416,7 @@ exports.createBookingRequest = async (req, res) => {
         const newRequest = new BookingRequest({
             property_id,
             property_name,
-            area: area || req.body.area || filter_criteria?.area || filter_criteria?.location || null,
+            area: area || req.body.area || filter_criteria?.area || filter_criteria?.location || req.body.city || 'Nearby',
             city: req.body.city || filter_criteria?.city || null,
             property_type,
             rent_amount,

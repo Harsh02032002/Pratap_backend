@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const bookingRequestSchema = new mongoose.Schema({
     property_id: { type: String, required: true, index: true },
     property_name: { type: String, required: true },
-    area: { type: String, required: true, index: true },
+    area: { type: String, default: 'Nearby', index: true },
     city: { type: String },
     property_type: { type: String },
     rent_amount: { type: Number },
