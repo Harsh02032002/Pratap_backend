@@ -481,6 +481,41 @@ app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
     }
 });
 
+// ── TEST ENDPOINT: Reactivate move-out / inactive tenant for testing ──
+app.get('/api/test/reactivate-tenant/:loginId', async (req, res) => {
+    try {
+        const Tenant = require('./models/Tenant');
+        const User = require('./models/user');
+        const loginId = String(req.params.loginId || '').trim().toUpperCase();
+
+        const tenant = await Tenant.findOne({ loginId });
+        if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+
+        tenant.status = 'active';
+        tenant.kycStatus = 'verified';
+        tenant.isDeleted = false;
+        tenant.moveoutRequest = { status: 'none', requestedDate: null, reason: '', submittedAt: null, duesAtMoveout: 0, refundAmount: 0, refundStatus: '' };
+        await tenant.save();
+
+        const user = await User.findOne({ loginId });
+        if (user) {
+            user.status = 'active';
+            user.isActive = true;
+            user.isDeleted = false;
+            await user.save();
+        }
+
+        res.json({
+            success: true,
+            message: `Tenant ${loginId} (${tenant.name}) reactivated successfully!`,
+            tenantStatus: tenant.status,
+            userActive: user ? user.isActive : false
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // Cache management endpoints (admin only - add auth later)
 app.get('/api/admin/cache-stats', (req, res) => {
     res.json({
