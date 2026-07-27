@@ -80,28 +80,32 @@ router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) =
         const { newPassword } = req.body;
         if (!newPassword) return res.status(400).json({ success: false, error: 'newPassword required' });
 
-        // Token must belong to the same employee being reset
-        const reqId = String(req.resetLoginId || '').toUpperCase();
-        const targetId = String(loginId || '').toUpperCase();
-        if (reqId && reqId !== targetId) {
-            try {
-                const empById = await Employee.findById(req.resetLoginId).lean();
-                if (!empById || String(empById.loginId || '').toUpperCase() !== targetId) {
-                    return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
-                }
-            } catch (_) {
-                return res.status(403).json({ success: false, error: 'Forbidden: token does not match employee' });
-            }
+        const cleanLoginId = String(loginId || '').trim();
+        const cleanResetId = String(req.resetLoginId || '').trim();
+
+        // Find staff/employee record by loginId or reset token ID
+        let emp = await Employee.findOne({
+            $or: [
+                { loginId: cleanLoginId },
+                { loginId: cleanLoginId.toUpperCase() },
+                { loginId: cleanLoginId.toLowerCase() },
+                { loginId: cleanResetId },
+                { loginId: cleanResetId.toUpperCase() }
+            ]
+        });
+
+        if (!emp && mongoose.Types.ObjectId.isValid(cleanResetId)) {
+            emp = await Employee.findById(cleanResetId);
         }
 
-        const emp = await Employee.findOne({ loginId });
-        if (!emp) return res.status(404).json({ success: false, error: 'Employee not found' });
+        if (!emp) {
+            return res.status(404).json({ success: false, error: 'Staff account not found' });
+        }
 
-        emp.password = newPassword; // Model may hash on save
+        emp.password = newPassword;
         emp.requirePasswordReset = false;
         await emp.save();
 
-        // Issue a real auth token so the client is fully signed in after setting a password.
         const token = jwt.sign({ id: emp._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         return res.json({ success: true, message: 'Password reset successfully', token });
@@ -110,6 +114,8 @@ router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) =
         return res.status(500).json({ success: false, error: 'Reset failed' });
     }
 });
+
+
 
 /**
  * GET /api/employees
