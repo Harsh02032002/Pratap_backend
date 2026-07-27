@@ -631,6 +631,7 @@ exports.getAllOwners = async (req, res) => {
                 checkinCancelledCheque: o.checkinCancelledCheque || checkinMap[o.loginId]?.ownerKyc?.cancelledCheque || null,
                 checkinOtpVerified: !!checkinMap[o.loginId]?.ownerKyc?.otpVerified,
                 checkinSubmittedAt: checkinMap[o.loginId]?.ownerSubmittedAt || null,
+                checkinTermsAcceptedAt: checkinMap[o.loginId]?.ownerTermsAcceptedAt || checkinMap[o.loginId]?.ownerSubmittedAt || o.createdAt || null,
                 // Merge profile data to top level (profile takes priority, then top-level field)
                 name: o.profile?.name || o.name || 'Unknown',
                 email: o.profile?.email || o.email || o.checkinEmail || (checkinMap[o.loginId]?.ownerProfile?.email || ''),
@@ -888,6 +889,7 @@ exports.getOwnerById = async (req, res) => {
             city: owner.profile?.city || owner.city || primaryProperty?.city || '',
             checkinOtpVerified: !!checkin?.ownerKyc?.otpVerified,
             checkinSubmittedAt: checkin?.ownerSubmittedAt || null,
+            checkinTermsAcceptedAt: checkin?.ownerTermsAcceptedAt || checkin?.ownerSubmittedAt || owner.createdAt || null,
             settings: {
                 checkoutTime: owner.settings?.checkoutTime || "10:00 AM",
                 checkinTime: owner.settings?.checkinTime || "11:00 AM",
