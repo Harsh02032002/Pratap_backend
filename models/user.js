@@ -20,7 +20,7 @@ const userSchema = new mongoose.Schema({
     locationCode: { type: String }, 
     
     // For Owners created via Visit
-    status: { type: String, enum: ['active', 'blocked'], default: 'active' },
+    status: { type: String, enum: ['active', 'pending', 'inactive', 'blocked', 'suspended'], default: 'pending' },
     isActive: { type: Boolean, default: true },
     requirePasswordReset: { type: Boolean, default: false },
     isDeleted: { type: Boolean, default: false },
