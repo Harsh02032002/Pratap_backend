@@ -1775,6 +1775,14 @@ router.post('/tenant/agreement', async (req, res) => {
         if (!tenant) {
             return res.status(404).json({ success: false, message: 'Tenant not found for this login ID' });
         }
+        const isMismatch = tenant?.kycStatus === 'mismatch_review' || record?.tenantKyc?.kycStatus === 'mismatch_review';
+        if (isMismatch) {
+            return res.status(400).json({
+                success: false,
+                message: "Data mismatch detected. Please check if you have uploaded the correct Aadhaar Card. If you are still facing a data mismatch issue, please contact your property owner."
+            });
+        }
+
         const kycVerified = Boolean(
             record?.tenantKyc?.otpVerified ||
             record?.tenantKyc?.digilockerVerified ||
