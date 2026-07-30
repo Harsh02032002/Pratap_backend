@@ -1204,6 +1204,30 @@ router.get('/:visitId', async (req, res) => {
     }
 });
 
+// ============================================================
+// DELETE: Delete a visit report by visitId or _id
+// ============================================================
+router.delete('/:visitId', async (req, res) => {
+    try {
+        const { visitId } = req.params;
+        const mongoose = require('mongoose');
+        let query;
+        if (mongoose.Types.ObjectId.isValid(visitId) && visitId.match(/^[0-9a-fA-F]{24}$/)) {
+            query = { $or: [{ _id: visitId }, { visitId: visitId }] };
+        } else {
+            query = { visitId: visitId };
+        }
+        const deleted = await VisitData.findOneAndDelete(query);
+        if (!deleted) {
+            return res.status(404).json({ success: false, message: 'Visit not found' });
+        }
+        res.json({ success: true, message: 'Visit report deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting visit:', error);
+        res.status(500).json({ success: false, message: 'Error deleting visit', error: error.message });
+    }
+});
+
 
 
 // ============================================================

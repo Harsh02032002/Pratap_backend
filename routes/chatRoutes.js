@@ -167,8 +167,11 @@ router.post('/admin/leads/map', protect, authorize('superadmin'), chatManagement
 // Violations
 router.get('/admin/violations', protect, authorize('superadmin'), chatManagementController.getViolations);
 router.post('/admin/violations/:id/resolve', protect, authorize('superadmin'), chatManagementController.resolveViolation);
+router.post('/admin/violations/:id/action', protect, authorize('superadmin'), chatManagementController.adminActionOnViolation);
 
-// Booking Conversion Tracker
+// Blocked Owners
+router.get('/admin/blocked-owners', protect, authorize('superadmin'), chatManagementController.getBlockedOwners);
+router.post('/admin/blocked-owners/:loginId/unblock', protect, authorize('superadmin'), chatManagementController.unblockOwner);
 router.get('/admin/booking-tracker', protect, authorize('superadmin'), chatManagementController.getBookingTracker);
 
 // Analytics

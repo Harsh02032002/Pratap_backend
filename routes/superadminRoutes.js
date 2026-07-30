@@ -1575,6 +1575,7 @@ router.get('/reports/overview', protect, authorize('superadmin', 'areamanager', 
     const visitReportFilter = isScopedEmployee(req) ? { areaManager: req.user?._id } : {};
     const visitDataFilter = isScopedEmployee(req) ? { $or: [{ staffId: req.user?.loginId }, { submittedByLoginId: req.user?.loginId }] } : {};
 
+    const Tenant = require('../models/Tenant');
     const [
       totalProperties,
       totalTenants,
@@ -1587,8 +1588,8 @@ router.get('/reports/overview', protect, authorize('superadmin', 'areamanager', 
       totalVisitReports,
       visitDataRecords
     ] = await Promise.all([
-      Property.countDocuments(applyPropertyScope(req, {})),
-      User.countDocuments(applyTenantScope(req, { role: { $in: ['tenant', 'user'] } })),
+      Property.countDocuments(applyPropertyScope(req, { isDeleted: { $ne: true } })),
+      Tenant.countDocuments(applyTenantScope(req, { isDeleted: { $ne: true }, status: { $ne: 'deleted' } })),
       Room.find(roomFilter).lean(),
       PaymentTransaction.find(txFilter).lean(),
       Employee.find({ isDeleted: { $ne: true } }).lean(),

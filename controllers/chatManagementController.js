@@ -255,6 +255,7 @@ exports.getAnalytics = async (req, res) => {
     const now = new Date();
     const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
 
+    const Owner = require('../models/Owner');
     const [
       totalActiveChats,
       totalClosedChats,
@@ -265,7 +266,8 @@ exports.getAnalytics = async (req, res) => {
       contactSharingAttempts,
       commissionBypassAttempts,
       externalSettlementAttempts,
-      repeatedViolatorsResult
+      repeatedViolatorsResult,
+      blockedOwnersCount
     ] = await Promise.all([
       ChatRoom.countDocuments({ status: 'Active' }),
       ChatRoom.countDocuments({ status: 'Closed' }),
@@ -286,7 +288,8 @@ exports.getAnalytics = async (req, res) => {
         { $group: { _id: '$participantLoginId', count: { $sum: 1 } } },
         { $match: { count: { $gte: 2 } } },
         { $count: 'total' }
-      ])
+      ]),
+      Owner.countDocuments({ isActive: false })
     ]);
 
     const revenue = revenueResult[0]?.total || 0;
@@ -316,7 +319,8 @@ exports.getAnalytics = async (req, res) => {
         contactSharingAttempts,
         commissionBypassAttempts,
         externalSettlementAttempts,
-        repeatedViolators
+        repeatedViolators,
+        blockedOwnersCount
       },
       dailyTrend
     });
@@ -611,6 +615,72 @@ exports.adminActionOnViolation = async (req, res) => {
     });
 
     res.json({ success: true, violation });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── BLOCKED OWNERS ──────────────────────────────────────────────────────────
+exports.getBlockedOwners = async (req, res) => {
+  try {
+    const Owner = require('../models/Owner');
+    const ChatViolation = require('../models/ChatViolation');
+
+    const blockedOwners = await Owner.find({ isActive: false }).sort({ updatedAt: -1 }).lean();
+
+    const populated = await Promise.all(blockedOwners.map(async (owner) => {
+      const loginId = owner.loginId;
+      const violations = await ChatViolation.find({
+        $or: [
+          { ownerId: loginId },
+          { participantLoginId: loginId }
+        ]
+      }).sort({ createdAt: -1 }).lean();
+
+      return {
+        _id: owner._id,
+        loginId: owner.loginId,
+        name: owner.name || 'Owner',
+        email: owner.email || owner.profile?.email || 'N/A',
+        phone: owner.phone || owner.profile?.phone || 'N/A',
+        blockedAt: owner.updatedAt || owner.createdAt,
+        violationsCount: violations.length,
+        violationsSnippet: violations[0]?.messageSnippet || 'Auto-blocked due to 2 commission bypass / contact sharing violations',
+        status: 'blocked'
+      };
+    }));
+
+    res.json({ success: true, blockedOwners: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.unblockOwner = async (req, res) => {
+  try {
+    const { loginId } = req.params;
+    const Owner = require('../models/Owner');
+    const User = require('../models/user');
+    const AuditLog = require('../models/AuditLog');
+
+    const normalizedId = String(loginId).toUpperCase();
+    await Promise.all([
+      Owner.updateOne({ loginId: normalizedId }, { isActive: true }),
+      User.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active' })
+    ]);
+
+    await AuditLog.create({
+      actorId: req.user?.loginId || 'SUPER_ADMIN',
+      actorRole: 'superadmin',
+      module: 'Chat',
+      action: 'Unblock Owner',
+      method: 'POST',
+      path: req.originalUrl,
+      statusCode: 200,
+      payload: { ownerLoginId: normalizedId }
+    });
+
+    res.json({ success: true, message: `Owner ${normalizedId} unblocked successfully` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

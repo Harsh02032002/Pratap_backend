@@ -384,6 +384,39 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
     });
  
     await violation.save();
+
+    // Check violation count for this owner
+    const totalViolations = await ChatViolation.countDocuments({
+      $or: [
+        { ownerId },
+        { participantLoginId: ownerId }
+      ]
+    });
+
+    if (totalViolations >= 2) {
+      // Auto block owner account after 2 violations
+      await Promise.allSettled([
+        Owner.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { isActive: false }),
+        User.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { status: 'blocked', isActive: false })
+      ]);
+
+      const ChatMessage = mongoose.model('ChatMessage');
+      const blockWarningMsg = new ChatMessage({
+        room_id: receiverLoginId,
+        sender_login_id: 'system',
+        sender_name: 'Roomhy System',
+        sender_role: 'superadmin',
+        message: `🚨 ACCOUNT BLOCKED: Owner (${ownerName}) has been automatically suspended due to multiple policy violations (commission bypass). Chat is now closed.`,
+        message_type: 'system',
+        is_read: false
+      });
+      await blockWarningMsg.save();
+
+      if (global.io) {
+        global.io.to(receiverLoginId).emit('receive_message', blockWarningMsg);
+        global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations });
+      }
+    }
  
     // Trigger Super Admin Notification & WebSocket Alert
     await notifySuperAdminAlert(violation);

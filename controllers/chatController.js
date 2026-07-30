@@ -562,47 +562,113 @@ exports.getAllChats = async (req, res) => {
         }
     }
 
-    // 3. Enhance names with all possible sources
-    const [websiteEnquiries, owners, users, bookingRequests] = await Promise.all([
+    // 3. Enhance names & participant details with all possible sources
+    const [websiteEnquiries, owners, users, bookingRequests, chatViolations] = await Promise.all([
         WebsiteEnquiry.find({}).lean(),
         Owner.find({}).lean(),
         User.find({}).lean(),
-        BookingRequest.find({}).lean()
+        BookingRequest.find({}).lean(),
+        require('../models/ChatViolation').find({}).lean()
     ]);
 
-    const getName = (id) => {
-        if (!id) return "Unknown";
+    const getParticipantDetails = (id) => {
+        if (!id) return { isOwner: false, loginId: 'N/A', name: 'Unknown', phone: 'N/A', email: 'N/A', propertyTitle: 'Property Enquiry' };
         const cleanId = String(id).trim().toUpperCase();
-        if (cleanId === 'SUPER_ADMIN') return "Super Admin";
+        if (cleanId === 'SUPER_ADMIN') return { isOwner: false, loginId: 'SUPER_ADMIN', name: 'Super Admin', phone: 'N/A', email: 'admin@roomhy.com', propertyTitle: 'Roomhy Admin' };
 
         // Try Owners (KO01, etc)
-        const ownerMatch = owners.find(o => String(o.loginId || "").toUpperCase() === cleanId);
-        if (ownerMatch) return ownerMatch.name || ownerMatch.owner_name;
+        const ownerMatch = owners.find(o => String(o.loginId || "").toUpperCase() === cleanId || String(o._id).toUpperCase() === cleanId);
+        if (ownerMatch) {
+            return {
+                isOwner: true,
+                loginId: ownerMatch.loginId || cleanId,
+                name: ownerMatch.name || ownerMatch.owner_name || 'Property Owner',
+                phone: ownerMatch.phone || ownerMatch.owner_phone || 'N/A',
+                email: ownerMatch.email || ownerMatch.owner_email || 'N/A',
+                propertyTitle: ownerMatch.propertyName || ownerMatch.propertyTitle || ownerMatch.city || 'Property',
+                isBlocked: ownerMatch.isActive === false
+            };
+        }
 
         // Try Users (LoginId)
-        const userMatch = users.find(u => String(u.loginId || "").toUpperCase() === cleanId);
-        if (userMatch) return userMatch.name || `${userMatch.firstName || ""} ${userMatch.lastName || ""}`.trim();
+        const userMatch = users.find(u => String(u.loginId || "").toUpperCase() === cleanId || String(u._id).toUpperCase() === cleanId);
+        if (userMatch) {
+            return {
+                isOwner: userMatch.role === 'owner',
+                loginId: userMatch.loginId || cleanId,
+                name: userMatch.name || userMatch.fullName || `${userMatch.firstName || ""} ${userMatch.lastName || ""}`.trim() || 'Tenant',
+                phone: userMatch.phone || 'N/A',
+                email: userMatch.email || 'N/A',
+                propertyTitle: 'Property Enquiry',
+                isBlocked: userMatch.status === 'blocked' || userMatch.isActive === false
+            };
+        }
 
         // Try matching by Email Hash for website users (roomhywebXXXXXX)
-        const websiteMatch = websiteEnquiries.find(enq => enq.owner_email && generateWebsiteUserIdFromEmail(enq.owner_email).toUpperCase() === cleanId) ||
-                             bookingRequests.find(br => br.email && generateWebsiteUserIdFromEmail(br.email).toUpperCase() === cleanId);
-        if (websiteMatch) return websiteMatch.owner_name || websiteMatch.userName || websiteMatch.name;
+        const bookingMatch = bookingRequests.find(br => 
+            String(br.user_id || '').toUpperCase() === cleanId || 
+            (br.email && generateWebsiteUserIdFromEmail(br.email).toUpperCase() === cleanId) ||
+            String(br.phone || '').toUpperCase() === cleanId
+        );
+        if (bookingMatch) {
+            return {
+                isOwner: false,
+                loginId: cleanId,
+                name: bookingMatch.name || bookingMatch.userName || 'Tenant',
+                phone: bookingMatch.phone || 'N/A',
+                email: bookingMatch.email || 'N/A',
+                propertyTitle: bookingMatch.property_name || 'Property Enquiry',
+                isPaid: bookingMatch.booking_status === 'booked' || bookingMatch.payment_status === 'paid'
+            };
+        }
 
-        // Try matching by ID directly in Enquiries/Bookings (if the ID itself was used as email/phone)
-        const directMatch = websiteEnquiries.find(enq => String(enq.owner_phone || "").toUpperCase() === cleanId) ||
-                            bookingRequests.find(br => String(br.phone || "").toUpperCase() === cleanId);
-        if (directMatch) return directMatch.owner_name || directMatch.userName || directMatch.name;
+        const websiteMatch = websiteEnquiries.find(enq => 
+            (enq.owner_email && generateWebsiteUserIdFromEmail(enq.owner_email).toUpperCase() === cleanId) ||
+            String(enq.owner_phone || '').toUpperCase() === cleanId
+        );
+        if (websiteMatch) {
+            return {
+                isOwner: false,
+                loginId: cleanId,
+                name: websiteMatch.owner_name || 'Tenant',
+                phone: websiteMatch.owner_phone || 'N/A',
+                email: websiteMatch.owner_email || 'N/A',
+                propertyTitle: websiteMatch.property_name || 'Property Enquiry'
+            };
+        }
 
-        return id; // Fallback to ID
+        return {
+            isOwner: false,
+            loginId: cleanId,
+            name: id,
+            phone: 'N/A',
+            email: `${cleanId.toLowerCase()}@roomhy.user`,
+            propertyTitle: 'Property Enquiry'
+        };
     };
 
     const result = Array.from(summaryMap.values()).map(item => {
-        const name1 = getName(item.user1);
-        const name2 = getName(item.user2);
+        const p1 = getParticipantDetails(item.user1);
+        const p2 = getParticipantDetails(item.user2);
+
+        const owner_details = p1.isOwner ? p1 : (p2.isOwner ? p2 : p1);
+        const tenant_details = !p1.isOwner ? p1 : (!p2.isOwner ? p2 : p2);
+
+        // Calculate conversation status:
+        // Closed if:
+        // 1. Owner account is blocked (due to violations/suspension)
+        // 2. Tenant paid for booking via chat link
+        const ownerViolations = chatViolations.filter(v => v.ownerId === owner_details.loginId || v.participantLoginId === owner_details.loginId).length;
+        const isClosed = owner_details.isBlocked || tenant_details.isBlocked || tenant_details.isPaid || ownerViolations >= 2;
+
         return {
             ...item,
-            participant_name: `${name1 || item.user1 || 'User'} ↔ ${name2 || item.user2 || 'User'}`,
-            search_blob: `${name1} ${name2} ${item.user1} ${item.user2} ${item.last_message}`.toLowerCase()
+            status: isClosed ? 'closed' : 'open',
+            close_reason: owner_details.isBlocked || ownerViolations >= 2 ? 'Owner Account Blocked (Violations)' : (tenant_details.isPaid ? 'Tenant Paid' : null),
+            tenant_details,
+            owner_details,
+            participant_name: `${tenant_details.name} ↔ ${owner_details.name}`,
+            search_blob: `${tenant_details.name} ${owner_details.name} ${tenant_details.phone} ${owner_details.phone} ${item.user1} ${item.user2} ${item.last_message}`.toLowerCase()
         };
     }).sort((a, b) => new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0));
 
