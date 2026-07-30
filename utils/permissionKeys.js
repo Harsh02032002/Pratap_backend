@@ -81,10 +81,52 @@ const RESTRICTED_KEYS = {
   SP_RESOLUTION:          'sp_resolution',
 };
 
-// ─── Default Restricted Modules ───────────────────────────────────────────────
-// All restricted modules are blocked by default for new employees.
-// Superadmin can selectively unblock by removing keys from this list.
-const DEFAULT_RESTRICTED_MODULES = Object.values(RESTRICTED_KEYS);
+// ─── Default Restricted Modules for Area Operations / Field Verification Employee ───
+const FIELD_VERIFICATION_RESTRICTED_MODULES = [
+  // Dashboard & Home
+  RESTRICTED_KEYS.DASHBOARD_REVENUE,
+  RESTRICTED_KEYS.DASHBOARD_ANALYTICS,
+  RESTRICTED_KEYS.HOME_REVENUE,
+  RESTRICTED_KEYS.HOME_PENDING_RENT,
+
+  // User Management
+  RESTRICTED_KEYS.UM_TEAM_MANAGEMENT,
+  RESTRICTED_KEYS.UM_ROLES_PERMISSIONS,
+  RESTRICTED_KEYS.UM_OWNER_SUBSCRIPTIONS,
+  RESTRICTED_KEYS.UM_KYC,
+
+  // Property Management
+  RESTRICTED_KEYS.PM_ADD_PROPERTY,
+  RESTRICTED_KEYS.PM_APPROVE,
+  RESTRICTED_KEYS.PM_LEADS,
+  RESTRICTED_KEYS.PM_CATEGORIES,
+
+  // Accounting (All)
+  RESTRICTED_KEYS.ACC_OVERVIEW,
+  RESTRICTED_KEYS.ACC_REVENUE_OVERVIEW,
+  RESTRICTED_KEYS.ACC_PAYMENT_HISTORY,
+  RESTRICTED_KEYS.ACC_OWNER_PAYOUTS,
+  RESTRICTED_KEYS.ACC_REFUNDS,
+  RESTRICTED_KEYS.ACC_ROOMHY_REVENUE,
+  RESTRICTED_KEYS.ACC_OWNER_REVENUE,
+  RESTRICTED_KEYS.ACC_PROFIT_LOSS,
+  RESTRICTED_KEYS.ACC_CASHFLOW,
+
+  // Chat Management
+  RESTRICTED_KEYS.CHAT_ALERTS,
+
+  // Reports
+  RESTRICTED_KEYS.RPT_LOCATIONS,
+  RESTRICTED_KEYS.RPT_OCCUPANCY,
+  RESTRICTED_KEYS.RPT_GROWTH,
+  RESTRICTED_KEYS.RPT_STAFF,
+  RESTRICTED_KEYS.RPT_REVENUE,
+
+  // Reviews
+  RESTRICTED_KEYS.RV_ANALYTICS,
+];
+
+const DEFAULT_RESTRICTED_MODULES = FIELD_VERIFICATION_RESTRICTED_MODULES;
 
 // ─── Employee Types ───────────────────────────────────────────────────────────
 const EMPLOYEE_TYPES = [
@@ -92,12 +134,15 @@ const EMPLOYEE_TYPES = [
   'Area Manager',
   'Marketing Executive',
   'Verification Officer',
+  'Area Operations / Field Verification Employee',
 ];
 
 // ─── Roles that REQUIRE assignedProperties to be non-empty ───────────────────
 const ROLES_REQUIRING_ASSIGNED_PROPERTIES = [
   'Field Executive',
   'Verification Officer',
+  'Area Manager',
+  'Area Operations / Field Verification Employee',
 ];
 
 // ─── Flat list of all valid module keys (for validation) ─────────────────────
