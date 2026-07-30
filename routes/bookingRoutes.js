@@ -115,9 +115,12 @@ router.post('/bulk-create', formLimiter, bookingController.createBulkBookingRequ
 // Create booking request or bid (legacy)
 router.post('/requests', formLimiter, bookingController.createBookingRequest);
 
+const { protect } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 // Get all booking requests (filtered by area, request_type, status)
-router.get('/', bookingController.getBookingRequests);
-router.get('/requests', bookingController.getBookingRequests);
+router.get('/', protect, applyEmployeeScope, bookingController.getBookingRequests);
+router.get('/requests', protect, applyEmployeeScope, bookingController.getBookingRequests);
 
 // Get user bookings (tenant's mystays page) - MUST BE BEFORE /requests/:id route
 router.get('/user/:userId', bookingController.getUserBookings);

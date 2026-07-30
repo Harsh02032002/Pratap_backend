@@ -11,6 +11,25 @@ const PaymentTransaction = require('../models/PaymentTransaction');
 const Room = require('../models/Room');
 const Employee = require('../models/Employee');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const {
+  applyPropertyScope,
+  applyOwnerScope,
+  applyTenantScope,
+  applyBookingScope,
+  applyComplaintScope,
+  applyVisitScope,
+  applyReportScope,
+  applyReviewScope,
+  applyRoomScope,
+  applyLeadScope,
+  applySupportScope,
+  applyTransactionScope,
+  applyRentScope,
+  isScopedEmployee,
+  employeeBlocksRevenue,
+  resolveScopedPropertyContext,
+} = require('../utils/scopeHelpers');
 
 // Get platform overview stats (Main Dashboard)
 router.get('/diagnostic-db', protect, authorize('superadmin'), async (req, res) => {
@@ -35,8 +54,13 @@ router.get('/diagnostic-db', protect, authorize('superadmin'), async (req, res) 
   }
 });
 
-router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), async (req, res) => {
+router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
+    const propFilter = applyPropertyScope(req, { isDeleted: { $ne: true } });
+    const tenantFilter = applyTenantScope(req, { role: { $in: ['tenant', 'user'] }, isDeleted: { $ne: true } });
+    const ownerFilter = applyOwnerScope(req, { isDeleted: { $ne: true } });
+    const bookingFilter = applyBookingScope(req, {});
+
     const [
       totalProperties,
       totalTenants,
@@ -44,49 +68,56 @@ router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee',
       totalBookings,
       totalRents
     ] = await Promise.all([
-      Property.countDocuments({ isDeleted: { $ne: true } }),
-      User.countDocuments({ role: { $in: ['tenant', 'user'] }, isDeleted: { $ne: true } }),
-      Owner.countDocuments({ isDeleted: { $ne: true } }),
-      Booking.countDocuments(),
-      Rent.countDocuments()
+      Property.countDocuments(propFilter),
+      User.countDocuments(tenantFilter),
+      Owner.countDocuments(ownerFilter),
+      Booking.countDocuments(bookingFilter),
+      Rent.countDocuments(bookingFilter)
     ]);
 
-    const rents = await Rent.find({});
+    const rents = await Rent.find(bookingFilter);
     let totalBookingAmount = 0;
     let platformCommission = 0;
     let serviceFee = 0;
     const monthBuckets = {};
 
-    rents.forEach((rent) => {
-      const rentAmount = Number(rent.rentAmount || rent.totalDue || 0);
-      const commission = Number(rent.commissionAmount || (rentAmount * 0.10));
-      const fee = Number(rent.serviceFeeAmount || 50);
-      const month = (rent.collectionMonth || "").trim() || "Unknown";
+    if (!employeeBlocksRevenue(req)) {
+      rents.forEach((rent) => {
+        const rentAmount = Number(rent.rentAmount || rent.totalDue || 0);
+        const commission = Number(rent.commissionAmount || (rentAmount * 0.10));
+        const fee = Number(rent.serviceFeeAmount || 50);
+        const month = (rent.collectionMonth || "").trim() || "Unknown";
 
-      totalBookingAmount += rentAmount;
-      platformCommission += commission;
-      serviceFee += fee;
-      monthBuckets[month] = (monthBuckets[month] || 0) + commission + fee;
-    });
+        totalBookingAmount += rentAmount;
+        platformCommission += commission;
+        serviceFee += fee;
+        monthBuckets[month] = (monthBuckets[month] || 0) + commission + fee;
+      });
+    }
 
     const netRevenue = platformCommission + serviceFee;
-    const recentSignups = await User.find({ role: 'tenant' })
+    const recentSignups = await User.find({ ...tenantFilter, role: 'tenant' })
       .sort({ createdAt: -1 })
       .limit(5)
       .select('name email createdAt kycStatus');
 
+    const statsPayload = {
+      tenants: totalTenants,
+      properties: totalProperties,
+      owners: totalOwners,
+      totalBookings,
+    };
+
+    if (!employeeBlocksRevenue(req)) {
+      statsPayload.totalBookingAmount = totalBookingAmount;
+      statsPayload.platformCommission = platformCommission;
+      statsPayload.serviceFee = serviceFee;
+      statsPayload.netRevenue = netRevenue;
+    }
+
     res.json({
       success: true,
-      stats: {
-        tenants: totalTenants,
-        properties: totalProperties,
-        owners: totalOwners,
-        totalBookings,
-        totalBookingAmount,
-        platformCommission,
-        serviceFee,
-        netRevenue
-      },
+      stats: statsPayload,
       recentSignups: recentSignups.map(user => ({
         name: user.name,
         email: user.email,
@@ -94,35 +125,37 @@ router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee',
         moveInDate: user.createdAt?.toISOString().split('T')[0] || new Date().toISOString().split('T')[0],
         kycStatus: user.kycStatus || 'pending'
       })),
-      monthlyRevenue: monthBuckets
+      ...(employeeBlocksRevenue(req) ? {} : { monthlyRevenue: monthBuckets }),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch stats', error: error.message });
   }
 });
 
-// Home Overview Stats
-router.get('/home/overview', protect, authorize('superadmin'), async (req, res) => {
+// Home Overview Stats (Scoped for employees)
+router.get('/home/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Tenant = require('../models/Tenant');
     const { city } = req.query;
 
-    let propFilter = { isDeleted: { $ne: true } };
+    // Apply employee scope on top of city filter
+    let basePropFilter = { isDeleted: { $ne: true } };
     if (city && city !== 'All Cities') {
-      propFilter.city = city;
+      basePropFilter.city = city;
     }
+    let propFilter = applyPropertyScope(req, basePropFilter);
 
-    // Resolve property IDs in city
+    // Resolve property IDs in scope
     const propertiesList = await Property.find(propFilter).select('_id status isLiveOnWebsite').lean();
     const propIds = propertiesList.map(p => p._id);
 
-    // --- Core counts (exclude deleted) ---
-    let tenantFilter = { isDeleted: { $ne: true } };
-    let rentFindFilter = {};
-    if (city && city !== 'All Cities') {
-      tenantFilter.property = { $in: propIds };
-      rentFindFilter.propertyId = { $in: propIds };
+    // Core counts scoped
+    let baseTenantFilter = { isDeleted: { $ne: true } };
+    if (propIds.length > 0) {
+      baseTenantFilter.property = { $in: propIds };
     }
+    let tenantFilter = applyTenantScope(req, baseTenantFilter);
+    let rentFindFilter = applyBookingScope(req, propIds.length > 0 ? { propertyId: { $in: propIds } } : {});
 
     const [propertiesCount, tenantsCount, rents] = await Promise.all([
       Property.countDocuments(propFilter),
@@ -130,14 +163,12 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       Rent.find(rentFindFilter).lean()
     ]);
 
-    // --- Only count pending rents for active (non-deleted) tenants ---
-    let activeTenantQuery = {
+    // Only count pending rents for active (non-deleted) tenants in scope
+    let activeTenantQuery = applyTenantScope(req, {
       isDeleted: { $ne: true },
-      status: { $nin: ['inactive', 'suspended'] }
-    };
-    if (city && city !== 'All Cities') {
-      activeTenantQuery.property = { $in: propIds };
-    }
+      status: { $nin: ['inactive', 'suspended'] },
+      ...(propIds.length > 0 ? { property: { $in: propIds } } : {})
+    });
 
     const activeTenants = await Tenant.find(activeTenantQuery).select('_id loginId').lean();
     const activeTenantIds = activeTenants.map(t => t._id);
@@ -150,7 +181,7 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
         { tenantLoginId: { $in: activeTenantLoginIds } }
       ]
     };
-    if (city && city !== 'All Cities') {
+    if (propIds.length > 0) {
       pendingRentFilter.propertyId = { $in: propIds };
     }
 
@@ -159,58 +190,44 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       Rent.find(pendingRentFilter).limit(10).sort({ createdAt: -1 })
     ]);
 
-    // --- Revenue calculation (PaymentTransaction commission + fallback to active tenant rents) ---
-    const txs = await PaymentTransaction.find({}).lean();
-    let txCommission = 0;
-    txs.forEach(t => {
-      txCommission += (t.commission_amount || 0);
-    });
-
+    // Revenue calculation — superadmin only
     const activeIdSet = new Set(activeTenantIds.map(String));
     const activeLoginSet = new Set(activeTenantLoginIds);
     let totalRevenue = 0;
-    rents.forEach(rent => {
-      const tid = rent.tenantId ? String(rent.tenantId) : '';
-      const login = rent.tenantLoginId || '';
-      if (!activeIdSet.has(tid) && !activeLoginSet.has(login)) return;
-      const rentAmount = Number(rent.rentAmount || rent.totalDue || 0);
-      const commission = Number(rent.commissionAmount || (rentAmount * 0.10));
-      const fee = Number(rent.serviceFeeAmount || 50);
-      totalRevenue += (commission + fee);
-    });
-
-    const finalRevenue = txCommission > 0 ? txCommission : totalRevenue;
-
-    // --- Revenue trend (last 5 months) ---
-    let trendMatch = {};
-    if (city && city !== 'All Cities') {
-      trendMatch = { propertyId: { $in: propIds } };
+    if (!employeeBlocksRevenue(req)) {
+      rents.forEach(rent => {
+        const tid = rent.tenantId ? String(rent.tenantId) : '';
+        const login = rent.tenantLoginId || '';
+        if (!activeIdSet.has(tid) && !activeLoginSet.has(login)) return;
+        const rentAmount = Number(rent.rentAmount || rent.totalDue || 0);
+        const commission = Number(rent.commissionAmount || (rentAmount * 0.10));
+        const fee = Number(rent.serviceFeeAmount || 50);
+        totalRevenue += (commission + fee);
+      });
     }
 
-    const trends = await Rent.aggregate([
-      ...(Object.keys(trendMatch).length > 0 ? [{ $match: trendMatch }] : []),
-      { $group: { 
-          _id: { month: { $month: "$createdAt" }, year: { $year: "$createdAt" } }, 
-          revenue: { $sum: { $add: [ { $ifNull: ["$commissionAmount", { $multiply: ["$rentAmount", 0.10] }] }, { $ifNull: ["$serviceFeeAmount", 50] } ] } } 
-      }},
-      { $sort: { "_id.year": -1, "_id.month": -1 } },
-      { $limit: 5 }
-    ]);
+    // Revenue trend (last 5 months) — superadmin only
+    let formattedTrends = [];
+    if (!employeeBlocksRevenue(req)) {
+      const trendMatch = propIds.length > 0 ? { propertyId: { $in: propIds } } : {};
+      const trends = await Rent.aggregate([
+        ...(Object.keys(trendMatch).length > 0 ? [{ $match: trendMatch }] : []),
+        { $group: {
+            _id: { month: { $month: "$createdAt" }, year: { $year: "$createdAt" } },
+            revenue: { $sum: { $add: [ { $ifNull: ["$commissionAmount", { $multiply: ["$rentAmount", 0.10] }] }, { $ifNull: ["$serviceFeeAmount", 50] } ] } }
+        }},
+        { $sort: { "_id.year": -1, "_id.month": -1 } },
+        { $limit: 5 }
+      ]);
 
-    const formattedTrends = trends.reverse().map(t => ({
-      name: `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][t._id.month-1]} ${t._id.year}`,
-      revenue: Math.round(t.revenue)
-    }));
+      formattedTrends = trends.reverse().map(t => ({
+        name: `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][t._id.month-1]} ${t._id.year}`,
+        revenue: Math.round(t.revenue)
+      }));
+    }
 
-    // --- Properties by Status (live on website + approval state) ---
-    const statusBuckets = {
-      Live: 0,
-      Active: 0,
-      Pending: 0,
-      Inactive: 0,
-      Blocked: 0
-    };
-
+    // Properties by Status (scoped)
+    const statusBuckets = { Live: 0, Active: 0, Pending: 0, Inactive: 0, Blocked: 0 };
     propertiesList.forEach((p) => {
       const status = String(p.status || '').toLowerCase();
       if (status === 'blocked') statusBuckets.Blocked += 1;
@@ -227,26 +244,16 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       Inactive: { label: 'Inactive', color: '#94A3B8' },
       Blocked: { label: 'Blocked', color: '#EF4444' }
     };
-
-    const totalProps = Object.values(statusBuckets).reduce((s, n) => s + n, 0) || 1;
+    const totalPropsForPct = Object.values(statusBuckets).reduce((s, n) => s + n, 0) || 1;
     const propertiesByStatus = Object.entries(statusBuckets)
       .filter(([, count]) => count > 0)
       .map(([key, count]) => {
         const mapped = statusColorMap[key];
-        return {
-          name: mapped.label,
-          value: count,
-          color: mapped.color,
-          percent: `${((count / totalProps) * 100).toFixed(1)}%`
-        };
+        return { name: mapped.label, value: count, color: mapped.color, percent: `${((count / totalPropsForPct) * 100).toFixed(1)}%` };
       });
 
-    // --- Tenants by Type (occupation) aggregation ---
-    let occMatch = { isDeleted: { $ne: true }, status: { $nin: ['inactive', 'suspended'] } };
-    if (city && city !== 'All Cities') {
-      occMatch.property = { $in: propIds };
-    }
-
+    // Tenants by Type (scoped)
+    const occMatch = { ...tenantFilter, status: { $nin: ['inactive', 'suspended'] } };
     const occAgg = await Tenant.aggregate([
       { $match: occMatch },
       { $group: { _id: { $ifNull: ['$occupation', 'Not Specified'] }, count: { $sum: 1 } } },
@@ -262,17 +269,23 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
       percent: `${((r.count / totalTenantCount) * 100).toFixed(1)}%`
     }));
 
+    const summaryPayload = {
+      totalProperties: propertiesCount,
+      totalTenants: tenantsCount,
+      alerts: totalAlerts,
+    };
+    if (!employeeBlocksRevenue(req)) {
+      summaryPayload.monthlyRevenue = Math.round(totalRevenue);
+    }
+
     res.json({
       success: true,
-      summary: {
-        totalProperties: propertiesCount,
-        totalTenants: tenantsCount,
-        monthlyRevenue: Math.round(finalRevenue),
-        alerts: totalAlerts
-      },
-      revenueTrend: formattedTrends.length > 0 ? formattedTrends : [
-        { name: 'Jan', revenue: 0 }, { name: 'Feb', revenue: 0 }, { name: 'Mar', revenue: 0 }
-      ],
+      summary: summaryPayload,
+      ...(employeeBlocksRevenue(req) ? {} : {
+        revenueTrend: formattedTrends.length > 0 ? formattedTrends : [
+          { name: 'Jan', revenue: 0 }, { name: 'Feb', revenue: 0 }, { name: 'Mar', revenue: 0 }
+        ],
+      }),
       propertiesByStatus: propertiesByStatus.length > 0 ? propertiesByStatus : [
         { name: 'No Data', value: 1, color: '#CBD5E1', percent: '100%' }
       ],
@@ -301,18 +314,25 @@ router.get('/home/overview', protect, authorize('superadmin'), async (req, res) 
 
 
 // Property Management Overview
-router.get('/properties/overview', protect, authorize('superadmin'), async (req, res) => {
+router.get('/properties/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
+    const propFilter = applyPropertyScope(req, { isDeleted: { $ne: true } });
+    const scopedPropIds = isScopedEmployee(req)
+      ? (await Property.find(propFilter).select('_id').lean()).map(p => p._id)
+      : null;
+
     const [total, approved, pending, rejected, newThisMonth] = await Promise.all([
-      Property.countDocuments({ isDeleted: { $ne: true } }),
-      ApprovedProperty.countDocuments(),
-      Property.countDocuments({ status: 'pending', isDeleted: { $ne: true } }),
-      Property.countDocuments({ status: 'rejected', isDeleted: { $ne: true } }),
-      Property.countDocuments({ createdAt: { $gte: startOfMonth }, isDeleted: { $ne: true } })
+      Property.countDocuments(propFilter),
+      scopedPropIds
+        ? ApprovedProperty.countDocuments({ _id: { $in: scopedPropIds } })
+        : ApprovedProperty.countDocuments(),
+      Property.countDocuments({ ...propFilter, status: 'pending' }),
+      Property.countDocuments({ ...propFilter, status: 'rejected' }),
+      Property.countDocuments({ ...propFilter, createdAt: { $gte: startOfMonth } })
     ]);
 
     res.json({
@@ -331,21 +351,33 @@ router.get('/properties/overview', protect, authorize('superadmin'), async (req,
 });
 
 // User Management Overview
-router.get('/users/overview', protect, authorize('superadmin'), async (req, res) => {
+router.get('/users/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Tenant = require('../models/Tenant');
     const Employee = require('../models/Employee');
-    const [userTeamCount, empCount, owners, tenants] = await Promise.all([
-      User.countDocuments({ role: { $in: ['employee', 'areamanager', 'manager', 'admin'] }, isDeleted: { $ne: true } }),
-      Employee.countDocuments({ isDeleted: { $ne: true } }),
-      Owner.countDocuments({ isDeleted: { $ne: true } }),
-      User.countDocuments({ role: 'tenant', isDeleted: { $ne: true } })
+
+    const ownerFilter = applyOwnerScope(req, { isDeleted: { $ne: true } });
+    const tenantFilter = applyTenantScope(req, { isDeleted: { $ne: true } });
+
+    let team = 0;
+    let empCount = 0;
+    if (!isScopedEmployee(req)) {
+      const [userTeamCount, employeeCount] = await Promise.all([
+        User.countDocuments({ role: { $in: ['employee', 'areamanager', 'manager', 'admin'] }, isDeleted: { $ne: true } }),
+        Employee.countDocuments({ isDeleted: { $ne: true } }),
+      ]);
+      team = userTeamCount + employeeCount;
+      empCount = employeeCount;
+    }
+
+    const [owners, tenants] = await Promise.all([
+      Owner.countDocuments(ownerFilter),
+      User.countDocuments({ ...tenantFilter, role: 'tenant' })
     ]);
-    const team = userTeamCount + empCount;
     const total = team + owners + tenants;
 
     // Fetch recent signups
-    const recentSignups = await User.find({ isDeleted: { $ne: true }, role: { $ne: 'superadmin' } })
+    const recentSignups = await User.find({ ...tenantFilter, role: { $ne: 'superadmin' } })
       .sort({ createdAt: -1 })
       .limit(5)
       .select('name email role createdAt kycStatus')
@@ -360,19 +392,19 @@ router.get('/users/overview', protect, authorize('superadmin'), async (req, res)
       initial: (u.name || 'U').split(' ').map(n => n[0]).join('').toUpperCase()
     }));
 
-    // Approvals queue
-    const pendingOwnersCount = await User.countDocuments({ role: 'owner', kycStatus: { $in: ['pending', 'submitted'] } });
-    const pendingTenantsCount = await Tenant.countDocuments({ isDeleted: { $ne: true }, kycStatus: { $in: ['pending', 'submitted'] } });
-    const pendingDocsCount = await Tenant.countDocuments({ isDeleted: { $ne: true }, kycStatus: 'submitted' });
+    // Approvals queue (scoped)
+    const pendingOwnersCount = await Owner.countDocuments({ ...ownerFilter, kycStatus: { $in: ['pending', 'submitted'] } });
+    const pendingTenantsCount = await Tenant.countDocuments({ ...tenantFilter, kycStatus: { $in: ['pending', 'submitted'] } });
+    const pendingDocsCount = await Tenant.countDocuments({ ...tenantFilter, kycStatus: 'submitted' });
 
-    // KYC Status Counts
+    // KYC Status Counts (scoped)
     const [verifiedOwners, verifiedTenants, pendingOwners, pendingTenants, rejectedOwners, rejectedTenants] = await Promise.all([
-      User.countDocuments({ role: 'owner', kycStatus: 'verified' }),
-      Tenant.countDocuments({ isDeleted: { $ne: true }, kycStatus: 'verified' }),
-      User.countDocuments({ role: 'owner', kycStatus: 'pending' }),
-      Tenant.countDocuments({ isDeleted: { $ne: true }, kycStatus: 'pending' }),
-      User.countDocuments({ role: 'owner', kycStatus: 'rejected' }),
-      Tenant.countDocuments({ isDeleted: { $ne: true }, kycStatus: 'rejected' }),
+      Owner.countDocuments({ ...ownerFilter, kycStatus: 'verified' }),
+      Tenant.countDocuments({ ...tenantFilter, kycStatus: 'verified' }),
+      Owner.countDocuments({ ...ownerFilter, kycStatus: 'pending' }),
+      Tenant.countDocuments({ ...tenantFilter, kycStatus: 'pending' }),
+      Owner.countDocuments({ ...ownerFilter, kycStatus: 'rejected' }),
+      Tenant.countDocuments({ ...tenantFilter, kycStatus: 'rejected' }),
     ]);
 
     const kycStatusStats = {
@@ -548,12 +580,16 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
   }
 });
 
-// Bookings Overview
-router.get('/bookings/overview', protect, authorize('superadmin'), async (req, res) => {
+// Bookings Overview (Scoped for employees)
+router.get('/bookings/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
     const PaymentTransaction = require('../models/PaymentTransaction');
+
+    const leadFilter = applyLeadScope(req, {});
+    const bookingFilter = applyBookingScope(req, {});
+    const txFilter = applyTransactionScope(req, {});
 
     const now = new Date();
     const todayStart = new Date(now);
@@ -575,17 +611,17 @@ router.get('/bookings/overview', protect, authorize('superadmin'), async (req, r
       enquiries,
       bookingsList
     ] = await Promise.all([
-      Enquiry.countDocuments({ ts: { $gte: todayStart } }),
-      Enquiry.countDocuments({ ts: { $gte: weekAgo } }),
-      Enquiry.countDocuments({ ts: { $gte: monthAgo } }),
-      BookingRequest.countDocuments({ created_at: { $gte: todayStart } }),
-      BookingRequest.countDocuments({ created_at: { $gte: weekAgo } }),
-      BookingRequest.countDocuments({ created_at: { $gte: monthAgo } }),
-      BookingRequest.countDocuments({ created_at: { $gte: todayStart }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
-      BookingRequest.countDocuments({ created_at: { $gte: weekAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
-      BookingRequest.countDocuments({ created_at: { $gte: monthAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
-      Enquiry.find({}).sort({ ts: -1 }).lean(),
-      BookingRequest.find({}).sort({ created_at: -1 }).lean()
+      Enquiry.countDocuments({ ...leadFilter, ts: { $gte: todayStart } }),
+      Enquiry.countDocuments({ ...leadFilter, ts: { $gte: weekAgo } }),
+      Enquiry.countDocuments({ ...leadFilter, ts: { $gte: monthAgo } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: todayStart } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: weekAgo } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: monthAgo } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: todayStart }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: weekAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
+      BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: monthAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
+      Enquiry.find(leadFilter).sort({ ts: -1 }).lean(),
+      BookingRequest.find(bookingFilter).sort({ created_at: -1 }).lean()
     ]);
 
     const totalLeads = enquiries.length + bookingsList.length;
@@ -698,12 +734,14 @@ router.get('/bookings/overview', protect, authorize('superadmin'), async (req, r
       pct: totalLeads > 0 ? `${((statusCounts[name]/totalLeads)*100).toFixed(1)}%` : '0%'
     }));
 
-    // 6. Bookings Value
-    const txsList = await PaymentTransaction.find({}).lean();
+    // 6. Bookings Value — superadmin only
     let bookingsValue = 0;
-    txsList.forEach(t => {
-      bookingsValue += (t.booking_amount || 0);
-    });
+    if (!employeeBlocksRevenue(req)) {
+      const txsList = await PaymentTransaction.find(txFilter).lean();
+      txsList.forEach(t => {
+        bookingsValue += (t.booking_amount || 0);
+      });
+    }
 
     // 7. Top Locations
     const locationCounts = {};
@@ -754,14 +792,16 @@ router.get('/bookings/overview', protect, authorize('superadmin'), async (req, r
   }
 });
 
-// Reviews Overview
-router.get('/reviews/overview', protect, authorize('superadmin'), async (req, res) => {
+// Reviews Overview (Scoped for employees)
+router.get('/reviews/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Review = require('../models/Review');
     const now = new Date();
     const todayStart = new Date(now.setHours(0, 0, 0, 0));
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const approvedMatch = applyReviewScope(req, { status: 'Approved', isVerifiedStay: true });
 
     const [
       totalVerifiedStayReviews,
@@ -771,13 +811,13 @@ router.get('/reviews/overview', protect, authorize('superadmin'), async (req, re
       monthCount,
       avgRatingResult
     ] = await Promise.all([
-      Review.countDocuments({ status: 'Approved', isVerifiedStay: true }),
-      Review.countDocuments({ status: 'Pending' }),
-      Review.countDocuments({ status: 'Approved', isVerifiedStay: true, createdAt: { $gte: todayStart } }),
-      Review.countDocuments({ status: 'Approved', isVerifiedStay: true, createdAt: { $gte: weekAgo } }),
-      Review.countDocuments({ status: 'Approved', isVerifiedStay: true, createdAt: { $gte: monthAgo } }),
+      Review.countDocuments(approvedMatch),
+      Review.countDocuments(applyReviewScope(req, { status: 'Pending' })),
+      Review.countDocuments(applyReviewScope(req, { status: 'Approved', isVerifiedStay: true, createdAt: { $gte: todayStart } })),
+      Review.countDocuments(applyReviewScope(req, { status: 'Approved', isVerifiedStay: true, createdAt: { $gte: weekAgo } })),
+      Review.countDocuments(applyReviewScope(req, { status: 'Approved', isVerifiedStay: true, createdAt: { $gte: monthAgo } })),
       Review.aggregate([
-        { $match: { status: 'Approved', isVerifiedStay: true } },
+        { $match: approvedMatch },
         { $group: { _id: null, avgRating: { $avg: '$rating' } } }
       ])
     ]);
@@ -800,11 +840,15 @@ router.get('/reviews/overview', protect, authorize('superadmin'), async (req, re
   }
 });
 
-// Booking Conversion Rate Stats
-router.get('/booking/conversion-stats', protect, authorize('superadmin'), async (req, res) => {
+// Booking Conversion Rate Stats (Scoped for employees)
+router.get('/booking/conversion-stats', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
+
+    const leadFilter = applyLeadScope(req, {});
+    const bookingFilter = applyBookingScope(req, {});
+
     const [
       totalEnquiriesCount,
       enquiryInterested,
@@ -812,16 +856,16 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
       initiatedBookings,
       confirmedBookings
     ] = await Promise.all([
-      Enquiry.countDocuments(),
-      Enquiry.countDocuments({ status: { $in: ['accepted', 'approved', 'confirmed'] } }),
-      Enquiry.countDocuments({ visitAllowed: true }),
-      BookingRequest.countDocuments(),
-      BookingRequest.countDocuments({ status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } })
+      Enquiry.countDocuments(leadFilter),
+      Enquiry.countDocuments({ ...leadFilter, status: { $in: ['accepted', 'approved', 'confirmed'] } }),
+      Enquiry.countDocuments({ ...leadFilter, visitAllowed: true }),
+      BookingRequest.countDocuments(bookingFilter),
+      BookingRequest.countDocuments({ ...bookingFilter, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } })
     ]);
 
     const totalLeads = totalEnquiriesCount + initiatedBookings;
     const interestedLeads = enquiryInterested + initiatedBookings;
-    const bookingVisits = await BookingRequest.countDocuments({ visit_status: { $in: ['scheduled', 'completed'] } });
+    const bookingVisits = await BookingRequest.countDocuments({ ...bookingFilter, visit_status: { $in: ['scheduled', 'completed'] } });
     const viewedLeads = enquiryViewed + bookingVisits;
 
     const pctLeads = 100;
@@ -839,12 +883,13 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
       const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
 
       const [mLeadsCount, mInitiated] = await Promise.all([
-        Enquiry.countDocuments({ ts: { $gte: start, $lte: end } }),
-        BookingRequest.countDocuments({ createdAt: { $gte: start, $lte: end } })
+        Enquiry.countDocuments({ ...leadFilter, ts: { $gte: start, $lte: end } }),
+        BookingRequest.countDocuments({ ...bookingFilter, createdAt: { $gte: start, $lte: end } })
       ]);
       const mLeads = mLeadsCount + mInitiated;
 
       const mConfirmed = await BookingRequest.countDocuments({ 
+        ...bookingFilter,
         createdAt: { $gte: start, $lte: end }, 
         status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } 
       });
@@ -854,21 +899,19 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
     }
 
     const propertyConvRaw = await BookingRequest.aggregate([
-      { $match: { status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } } },
+      { $match: { ...bookingFilter, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } } },
       { $group: { _id: '$propertyName', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 5 }
     ]);
 
-    const propertyConv = [];
-    for (const item of propertyConvRaw) {
-      if (!item._id) continue;
-      const totalPropLeads = await Enquiry.countDocuments({ propertyName: item._id }) + await BookingRequest.countDocuments({ property_name: item._id });
-      const rate = totalPropLeads > 0 ? Number(((item.count / totalPropLeads) * 100).toFixed(1)) : 0;
-      propertyConv.push({ name: item._id, rate: rate || 0 });
-    }
+    const propertyConv = propertyConvRaw.map(p => ({
+      name: p._id || 'Unknown',
+      rate: totalLeads > 0 ? Number(((p.count / totalLeads) * 100).toFixed(1)) : 0
+    }));
 
     const locationConvRaw = await Enquiry.aggregate([
+      { $match: leadFilter },
       { $group: { _id: '$location', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 5 }
@@ -877,8 +920,9 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
     const locationConv = [];
     for (const item of locationConvRaw) {
       if (!item._id) continue;
-      const totalLocLeads = await Enquiry.countDocuments({ location: item._id }) + await BookingRequest.countDocuments({ city: item._id });
+      const totalLocLeads = await Enquiry.countDocuments({ ...leadFilter, location: item._id }) + await BookingRequest.countDocuments({ ...bookingFilter, city: item._id });
       const totalLocConfirmed = await BookingRequest.countDocuments({ 
+        ...bookingFilter,
         city: item._id, 
         status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } 
       });
@@ -900,8 +944,8 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
       locationConv,
       metrics: {
         overallRate: totalLeads > 0 ? `${((confirmedBookings / totalLeads) * 100).toFixed(1)}%` : "0%",
-        directRate: totalLeads > 0 ? `${((await BookingRequest.countDocuments({ request_type: 'direct', status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }) / totalLeads) * 100).toFixed(1)}%` : "0%",
-        onlineRate: totalLeads > 0 ? `${((await BookingRequest.countDocuments({ request_type: { $ne: 'direct' }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }) / totalLeads) * 100).toFixed(1)}%` : "0%",
+        directRate: totalLeads > 0 ? `${((await BookingRequest.countDocuments({ ...bookingFilter, request_type: 'direct', status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }) / totalLeads) * 100).toFixed(1)}%` : "0%",
+        onlineRate: totalLeads > 0 ? `${((await BookingRequest.countDocuments({ ...bookingFilter, request_type: { $ne: 'direct' }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }) / totalLeads) * 100).toFixed(1)}%` : "0%",
         avgTime: "4.2 Days"
       }
     });
@@ -910,15 +954,18 @@ router.get('/booking/conversion-stats', protect, authorize('superadmin'), async 
   }
 });
 
-// Leads List API
-router.get('/booking/leads', protect, authorize('superadmin'), async (req, res) => {
+// Leads List API (Scoped for employees)
+router.get('/booking/leads', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
 
+    const leadFilter = applyLeadScope(req, {});
+    const bookingFilter = applyBookingScope(req, {});
+
     const [enquiries, bookingRequests] = await Promise.all([
-      Enquiry.find().sort({ ts: -1 }).lean(),
-      BookingRequest.find().sort({ created_at: -1 }).lean()
+      Enquiry.find(leadFilter).sort({ ts: -1 }).lean(),
+      BookingRequest.find(bookingFilter).sort({ created_at: -1 }).lean()
     ]);
 
     const leads = enquiries.map(e => ({
@@ -958,17 +1005,21 @@ router.get('/booking/leads', protect, authorize('superadmin'), async (req, res) 
   }
 });
 
-// Locations Performance API
-router.get('/booking/locations', protect, authorize('superadmin'), async (req, res) => {
+// Locations Performance API (Scoped for employees)
+router.get('/booking/locations', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const Enquiry = require('../models/Enquiry');
     const BookingRequest = require('../models/BookingRequest');
     const ApprovedProperty = require('../models/ApprovedProperty');
 
+    const leadFilter = applyLeadScope(req, {});
+    const bookingFilter = applyBookingScope(req, {});
+    const propFilter = applyPropertyScope(req, {});
+
     const [enquiries, bookingsList, properties] = await Promise.all([
-      Enquiry.find().lean(),
-      BookingRequest.find().lean(),
-      ApprovedProperty.find().lean()
+      Enquiry.find(leadFilter).lean(),
+      BookingRequest.find(bookingFilter).lean(),
+      ApprovedProperty.find(propFilter).lean()
     ]);
 
     const locationMap = {};
@@ -1506,8 +1557,8 @@ router.post('/revenue/payout/:id/transfer', protect, authorize('superadmin'), as
   }
 });
 
-// Reports Overview
-router.get('/reports/overview', protect, authorize('superadmin'), async (req, res) => {
+// Reports Overview (Scoped for employees)
+router.get('/reports/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   const fs = require('fs');
   const path = require('path');
   const logPath = path.join(__dirname, '../reports-debug.log');
@@ -1517,6 +1568,12 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
     fs.appendFileSync(logPath, `[${new Date().toISOString()}] DB connection status: ${mongoose.connection.readyState}\n`);
 
     const BookingRequest = require('../models/BookingRequest');
+
+    const bookingFilter = applyBookingScope(req, {});
+    const roomFilter = applyRoomScope(req, { isDeleted: { $ne: true } });
+    const txFilter = applyTransactionScope(req, {});
+    const visitReportFilter = isScopedEmployee(req) ? { areaManager: req.user?._id } : {};
+    const visitDataFilter = isScopedEmployee(req) ? { $or: [{ staffId: req.user?.loginId }, { submittedByLoginId: req.user?.loginId }] } : {};
 
     const [
       totalProperties,
@@ -1530,18 +1587,18 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
       totalVisitReports,
       visitDataRecords
     ] = await Promise.all([
-      Property.countDocuments(),
-      User.countDocuments({ role: { $in: ['tenant', 'user'] } }),
-      Room.find({ isDeleted: { $ne: true } }).lean(),
-      PaymentTransaction.find({}).lean(),
+      Property.countDocuments(applyPropertyScope(req, {})),
+      User.countDocuments(applyTenantScope(req, { role: { $in: ['tenant', 'user'] } })),
+      Room.find(roomFilter).lean(),
+      PaymentTransaction.find(txFilter).lean(),
       Employee.find({ isDeleted: { $ne: true } }).lean(),
       mongoose.modelNames().includes('MaintenanceTask') 
         ? mongoose.model('MaintenanceTask').countDocuments({ status: { $ne: 'completed' } })
         : Promise.resolve(0),
-      BookingRequest.countDocuments(),
-      BookingRequest.countDocuments({ $or: [{ status: 'confirmed' }, { booking_status: 'confirmed' }, { payment_status: 'Paid' }, { payment_status: 'completed' }] }),
-      mongoose.model('VisitReport').find({}).populate('areaManager', 'name role email').lean(),
-      mongoose.model('VisitData').find({}).lean()
+      BookingRequest.countDocuments(bookingFilter),
+      BookingRequest.countDocuments({ ...bookingFilter, $or: [{ status: 'confirmed' }, { booking_status: 'confirmed' }, { payment_status: 'Paid' }, { payment_status: 'completed' }] }),
+      mongoose.model('VisitReport').find(visitReportFilter).populate('areaManager', 'name role email').lean(),
+      mongoose.model('VisitData').find(visitDataFilter).lean()
     ]);
     
     fs.appendFileSync(logPath, `[${new Date().toISOString()}] ✅ Query results: ${JSON.stringify({ 
@@ -1563,7 +1620,7 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
     const occupancyPct = totalBeds > 0 ? Number(((occupiedBeds / totalBeds) * 100).toFixed(1)) : 0;
     const vacantBeds = totalBeds - occupiedBeds;
 
-    // Calculate Revenues (Total and Monthly)
+    // Calculate Revenues (Total and Monthly) - hidden for employees
     let totalRev = 0;
     let totalCommission = 0;
     
@@ -1571,16 +1628,18 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
     const currentMonthStr = now.toLocaleDateString('en-IN', { month: 'short' }); // e.g. "Jun"
     
     const monthlyTrendMap = {};
-    txs.forEach(t => {
-      const amt = t.booking_amount || 0;
-      totalRev += amt;
-      totalCommission += (t.commission_amount || 0);
+    if (!employeeBlocksRevenue(req)) {
+      txs.forEach(t => {
+        const amt = t.booking_amount || 0;
+        totalRev += amt;
+        totalCommission += (t.commission_amount || 0);
 
-      if (t.payment_date) {
-        const monthName = new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short' });
-        monthlyTrendMap[monthName] = (monthlyTrendMap[monthName] || 0) + amt;
-      }
-    });
+        if (t.payment_date) {
+          const monthName = new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short' });
+          monthlyTrendMap[monthName] = (monthlyTrendMap[monthName] || 0) + amt;
+        }
+      });
+    }
 
     const monthlyRevenue = monthlyTrendMap[currentMonthStr] || 0;
     
@@ -1593,11 +1652,11 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
     const revenueOverviewData = last6Months.map(l => ({
       name: l,
       rev: monthlyTrendMap[l] || 0,
-      prof: Math.round((monthlyTrendMap[l] || 0) * 0.10) // 10% commission estimation
+      prof: Math.round((monthlyTrendMap[l] || 0) * 0.10)
     }));
 
-    // Resolve property cities dynamically
-    const activePropertiesList = await Property.find({ isDeleted: { $ne: true } }).select('_id city title').lean();
+    // Resolve property cities dynamically (scoped)
+    const activePropertiesList = await Property.find(applyPropertyScope(req, { isDeleted: { $ne: true } })).select('_id city title').lean();
     const propIdToCity = {};
     activePropertiesList.forEach(p => {
       propIdToCity[String(p._id)] = p.city || 'Other';
@@ -1721,6 +1780,7 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
       success: true,
       summary: {
         totalProperties,
+        totalRooms: rooms.length,
         totalTenants,
         occupancyRate: totalBeds > 0 ? occupancyPct : 0,
         monthlyRevenue,
@@ -1730,14 +1790,10 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
       },
       charts: {
         revenueOverviewData,
-        occupancyData: totalBeds > 0 ? [
+        occupancyData: [
           { name: "Occupied", value: occupiedBeds, color: "#3B82F6", percent: `${occupancyPct}%` },
-          { name: "Vacant", value: vacantBeds, color: "#10B981", percent: `${(100 - occupancyPct).toFixed(1)}%` },
-          { name: "Maintenance", value: maintenanceTasksCount, color: "#F59E0B", percent: "0%" }
-        ] : [
-          { name: "Occupied", value: 80, color: "#3B82F6", percent: "80%" },
-          { name: "Vacant", value: 15, color: "#10B981", percent: "15%" },
-          { name: "Maintenance", value: 5, color: "#F59E0B", percent: "5%" }
+          { name: "Vacant", value: Math.max(0, vacantBeds), color: "#10B981", percent: `${totalBeds > 0 ? (100 - occupancyPct).toFixed(1) : 0}%` },
+          { name: "Maintenance", value: maintenanceTasksCount || 0, color: "#F59E0B", percent: "0%" }
         ],
         propertyPerformance,
         locationWiseData,
@@ -1754,18 +1810,20 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
   }
 });
 
-// Support Overview
-router.get('/support/overview', protect, authorize('superadmin'), async (req, res) => {
+// Support Overview (Scoped for employees)
+router.get('/support/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
+    const { applySupportScope } = require('../utils/scopeHelpers');
+    const filter = applySupportScope(req, {});
     const [total, open, resolved, overdue] = await Promise.all([
-      SupportTicket.countDocuments(),
-      SupportTicket.countDocuments({ status: { $in: ['Open', 'Assigned', 'In Progress'] } }),
-      SupportTicket.countDocuments({ status: { $in: ['Resolved', 'Closed'] } }),
-      SupportTicket.countDocuments({ sla_breached: true, status: { $nin: ['Resolved', 'Closed'] } })
+      SupportTicket.countDocuments(filter),
+      SupportTicket.countDocuments({ ...filter, status: { $in: ['Open', 'Assigned', 'In Progress'] } }),
+      SupportTicket.countDocuments({ ...filter, status: { $in: ['Resolved', 'Closed'] } }),
+      SupportTicket.countDocuments({ ...filter, sla_breached: true, status: { $nin: ['Resolved', 'Closed'] } })
     ]);
 
-    const resolvedTickets = await SupportTicket.find({ status: { $in: ['Resolved', 'Closed'] } }).lean();
+    const resolvedTickets = await SupportTicket.find({ ...filter, status: { $in: ['Resolved', 'Closed'] } }).lean();
     let avgTime = 'No Data Available';
     if (resolvedTickets.length > 0) {
       let totalMs = 0;
@@ -1790,11 +1848,12 @@ router.get('/support/overview', protect, authorize('superadmin'), async (req, re
   }
 });
 
-// GET support tickets
-router.get('/support/tickets', protect, authorize('superadmin', 'owner'), async (req, res) => {
+// GET support tickets (Scoped for employees)
+router.get('/support/tickets', protect, authorize('superadmin', 'areamanager', 'employee', 'manager', 'owner'), applyEmployeeScope, async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
-    let query = {};
+    const { applySupportScope } = require('../utils/scopeHelpers');
+    let query = applySupportScope(req, {});
     if (req.user.role === 'owner') {
       query.raised_by = req.user.loginId || String(req.user._id);
     }
@@ -1938,98 +1997,108 @@ router.put('/support/tickets/:id', protect, authorize('superadmin'), async (req,
   }
 });
 
-// GET support resolution-data
-router.get('/support/resolution-data', protect, authorize('superadmin'), async (req, res) => {
+// GET support resolution-data (Scoped for employees)
+router.get('/support/resolution-data', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
-    const tickets = await SupportTicket.find({}).sort({ created_at: -1 }).lean();
+    const { applySupportScope } = require('../utils/scopeHelpers');
+    const filter = applySupportScope(req, {});
+    const tickets = await SupportTicket.find(filter).sort({ created_at: -1 }).lean();
 
     const total = tickets.length;
     const resolved = tickets.filter(t => ['Resolved', 'Closed'].includes(t.status)).length;
     const pending = tickets.filter(t => ['Open', 'Assigned', 'In Progress', 'Waiting For Response'].includes(t.status)).length;
-    const escalated = tickets.filter(t => t.status === 'In Progress' || t.sla_breached).length;
+    const escalated = tickets.filter(t => t.escalation_status === 'Escalated' || t.sla_breached).length;
 
-    const resRate = total > 0 ? ((resolved / total) * 100).toFixed(0) : '0';
+    const resRate = total > 0 ? `${((resolved / total) * 100).toFixed(1)}%` : '0%';
 
-    let totalMs = 0;
-    let resolvedCount = 0;
-    tickets.forEach(tk => {
-      if (['Resolved', 'Closed'].includes(tk.status)) {
-        const end = tk.resolved_at || tk.closed_at || tk.updated_at || new Date();
-        const start = tk.created_at || (tk._id ? new Date(parseInt(tk._id.toString().substring(0, 8), 16) * 1000) : new Date());
-        totalMs += (new Date(end) - new Date(start));
-        resolvedCount++;
+    const resolvedWithTime = tickets.filter(t => ['Resolved', 'Closed'].includes(t.status) && (t.resolved_at || t.closed_at || t.updated_at));
+    let avgTimeStr = 'No Data Available';
+    if (resolvedWithTime.length > 0) {
+      let totalTimeMs = 0;
+      resolvedWithTime.forEach(t => {
+        const start = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : new Date());
+        const end = t.resolved_at || t.closed_at || t.updated_at;
+        totalTimeMs += (new Date(end) - new Date(start));
+      });
+      const avgHours = (totalTimeMs / resolvedWithTime.length) / (1000 * 60 * 60);
+      if (avgHours < 24) {
+        avgTimeStr = `${Math.round(avgHours)} Hours`;
+      } else {
+        avgTimeStr = `${(avgHours / 24).toFixed(1)} Days`;
       }
-    });
-    const avgTimeDays = resolvedCount > 0 ? ((totalMs / resolvedCount) / (1000 * 60 * 60 * 24)).toFixed(1) : 'No Data Available';
-    const avgTimeStr = avgTimeDays !== 'No Data Available' ? `${avgTimeDays} Days` : 'No Data Available';
+    }
 
-    const categoryCounts = {};
-    tickets.forEach(t => {
-      const type = t.ticket_type || 'Other';
-      categoryCounts[type] = (categoryCounts[type] || 0) + 1;
-    });
-
-    const COLORS_MAP = ["#3B82F6", "#10B981", "#F59E0B", "#6366F1", "#EC4899", "#94A3B8"];
-    const categoryData = Object.keys(categoryCounts).map((name, idx) => ({
-      name,
-      value: categoryCounts[name],
-      color: COLORS_MAP[idx % COLORS_MAP.length]
-    }));
-
-    const typeResolutionTimes = {};
-    tickets.forEach(tk => {
-      if (['Resolved', 'Closed'].includes(tk.status)) {
-        const type = tk.ticket_type || 'Other';
-        const end = tk.resolved_at || tk.closed_at || tk.updated_at || new Date();
-        const start = tk.created_at || (tk._id ? new Date(parseInt(tk._id.toString().substring(0, 8), 16) * 1000) : new Date());
-        const diffDays = (new Date(end) - new Date(start)) / (1000 * 60 * 60 * 24);
-        if (!typeResolutionTimes[type]) {
-          typeResolutionTimes[type] = { totalDays: 0, count: 0 };
-        }
-        typeResolutionTimes[type].totalDays += diffDays;
-        typeResolutionTimes[type].count += 1;
-      }
-    });
-
-    const resolutionTime = Object.keys(typeResolutionTimes).map(type => ({
-      type,
-      days: Number((typeResolutionTimes[type].totalDays / typeResolutionTimes[type].count).toFixed(1))
-    }));
-
-    const monthlyTrendMap = {};
+    // Resolution Trend (Past 5 Months)
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const now = new Date();
-    const last6Months = [];
-    for (let i = 5; i >= 0; i--) {
+    const trendMap = {};
+    const last5Months = [];
+    for (let i = 4; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const label = months[d.getMonth()];
-      last6Months.push(label);
-      monthlyTrendMap[label] = { raised: 0, resolved: 0 };
+      last5Months.push(label);
+      trendMap[label] = { opened: 0, resolved: 0 };
     }
 
     tickets.forEach(t => {
-      const start = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : null);
-      if (!start) return;
-      const createdMonth = months[new Date(start).getMonth()];
-      if (monthlyTrendMap[createdMonth]) {
-        monthlyTrendMap[createdMonth].raised += 1;
+      const createdDate = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : null);
+      if (createdDate) {
+        const mLabel = months[new Date(createdDate).getMonth()];
+        if (trendMap[mLabel]) {
+          trendMap[mLabel].opened += 1;
+        }
       }
       if (['Resolved', 'Closed'].includes(t.status)) {
-        const resolvedDate = t.resolved_at || t.closed_at || t.updated_at || new Date();
-        if (resolvedDate) {
-          const resolvedMonth = months[new Date(resolvedDate).getMonth()];
-          if (monthlyTrendMap[resolvedMonth]) {
-            monthlyTrendMap[resolvedMonth].resolved += 1;
+        const endDate = t.resolved_at || t.closed_at || t.updated_at;
+        if (endDate) {
+          const mLabel = months[new Date(endDate).getMonth()];
+          if (trendMap[mLabel]) {
+            trendMap[mLabel].resolved += 1;
           }
         }
       }
     });
 
-    const resolutionTrend = last6Months.map(m => ({
-      m,
-      raised: monthlyTrendMap[m].raised,
-      resolved: monthlyTrendMap[m].resolved
+    const resolutionTrend = last5Months.map(name => ({
+      name,
+      opened: trendMap[name].opened,
+      resolved: trendMap[name].resolved
+    }));
+
+    // Issues by Category
+    const categoryCounts = {};
+    tickets.forEach(t => {
+      const cat = t.category || t.ticket_type || 'Other';
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+    });
+    const categoryCOLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
+    const categoryData = Object.keys(categoryCounts).map((name, idx) => ({
+      name,
+      value: categoryCounts[name],
+      color: categoryCOLORS[idx % categoryCOLORS.length],
+      percent: total > 0 ? `${((categoryCounts[name] / total) * 100).toFixed(1)}%` : '0%'
+    }));
+
+    // Resolution Time Distribution
+    const resolutionTimeBuckets = { '< 24 Hours': 0, '1 - 2 Days': 0, '3 - 5 Days': 0, '5+ Days': 0 };
+    resolvedWithTime.forEach(t => {
+      const start = t.created_at || (t._id ? new Date(parseInt(t._id.toString().substring(0, 8), 16) * 1000) : new Date());
+      const end = t.resolved_at || t.closed_at || t.updated_at;
+      const hours = (new Date(end) - new Date(start)) / (1000 * 60 * 60);
+      if (hours < 24) resolutionTimeBuckets['< 24 Hours'] += 1;
+      else if (hours <= 48) resolutionTimeBuckets['1 - 2 Days'] += 1;
+      else if (hours <= 120) resolutionTimeBuckets['3 - 5 Days'] += 1;
+      else resolutionTimeBuckets['5+ Days'] += 1;
+    });
+
+    const timeCOLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444'];
+    const totalResolvedCount = resolvedWithTime.length || 1;
+    const resolutionTime = Object.keys(resolutionTimeBuckets).map((name, idx) => ({
+      name,
+      value: resolutionTimeBuckets[name],
+      color: timeCOLORS[idx % timeCOLORS.length],
+      percent: `${((resolutionTimeBuckets[name] / totalResolvedCount) * 100).toFixed(1)}%`
     }));
 
     const issues = tickets.map(t => {
@@ -2080,12 +2149,16 @@ router.get('/support/resolution-data', protect, authorize('superadmin'), async (
 });
 
 // User distribution for charts
-router.get('/user-distribution', protect, authorize('superadmin'), async (req, res) => {
+router.get('/user-distribution', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
+    const { applyTenantScope, applyOwnerScope, isScopedEmployee } = require('../utils/scopeHelpers');
+    const tenantFilter = applyTenantScope(req, { role: { $in: ['tenant', 'user'] } });
+    const ownerFilter = applyOwnerScope(req, { role: 'owner' });
+
     const [tenants, owners, staff] = await Promise.all([
-      User.countDocuments({ role: { $in: ['tenant', 'user'] } }),
-      User.countDocuments({ role: 'owner' }),
-      User.countDocuments({ role: { $in: ['employee', 'admin', 'superadmin'] } })
+      User.countDocuments(tenantFilter),
+      User.countDocuments(ownerFilter),
+      isScopedEmployee(req) ? Promise.resolve(1) : User.countDocuments({ role: { $in: ['employee', 'admin', 'superadmin'] } })
     ]);
     res.json({ success: true, distribution: { labels: ['Tenants', 'Owners', 'Staff'], data: [tenants, owners, staff] } });
   } catch (error) {
@@ -2151,10 +2224,12 @@ router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) 
   }
 });
 
-// Get all owners
-router.get('/owners', protect, authorize('superadmin'), async (req, res) => {
+// Get all owners (Scoped for employees)
+router.get('/owners', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
-    const owners = await User.find({ role: 'owner' }).select('name phone loginId email');
+    const { applyOwnerScope } = require('../utils/scopeHelpers');
+    const filter = applyOwnerScope(req, { role: 'owner' });
+    const owners = await User.find(filter).select('name phone loginId email');
     res.json({ success: true, data: owners });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -2410,11 +2485,12 @@ function computeTrialStatus(owner, trialDays) {
   };
 }
 
-// GET /api/superadmin/owner-subscriptions — all owners with trial/subscription status
-router.get('/owner-subscriptions', protect, authorize('superadmin'), async (req, res) => {
+// GET /api/superadmin/owner-subscriptions — all owners with trial/subscription status (Scoped for employees)
+router.get('/owner-subscriptions', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
+    const ownerFilter = applyOwnerScope(req, { isDeleted: { $ne: true } });
     const [owners, settings] = await Promise.all([
-      Owner.find({ isDeleted: { $ne: true } })
+      Owner.find(ownerFilter)
         .select('loginId name email phone createdAt subscription isActive')
         .lean(),
       getSettings()
@@ -2560,6 +2636,28 @@ router.put('/subscription-settings', protect, authorize('superadmin'), async (re
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Test Email Route for SMTP Verification
+router.get('/test-email', async (req, res) => {
+  try {
+    const to = req.query.to || process.env.SUPERADMIN_EMAIL || 'helloroomhy@gmail.com';
+    const { sendMail, getMailerConfig } = require('../utils/mailer');
+    const cfg = getMailerConfig();
+    const result = await sendMail(
+      to,
+      'RoomHy SMTP Test Email',
+      'This is a test email sent from RoomHy backend to test updated SMTP credentials.',
+      '<h3>RoomHy SMTP Test Email</h3><p>This is a test email sent from RoomHy backend to test updated SMTP credentials.</p>'
+    );
+    return res.json({
+      success: result,
+      recipient: to,
+      config: { host: cfg.smtpHost, port: cfg.smtpPort, user: cfg.smtpUser }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

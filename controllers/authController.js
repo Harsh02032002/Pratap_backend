@@ -733,26 +733,51 @@ exports.login = async (req, res) => {
         
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
         
-        // Build query based on identifier type
-        let query = {};
-        if (isEmail) {
-            query = { email: normalizedIdentifier.toLowerCase() };
-        } else if (isPhone) {
-            query = { phone: normalizedIdentifier };
-        } else if (isLoginId) {
-            query = { loginId: normalizedIdentifier.toUpperCase() };
-        } else {
-            // Try all three
-            query = { 
-                $or: [
-                    { email: normalizedIdentifier.toLowerCase() }, 
-                    { loginId: normalizedIdentifier.toUpperCase() },
-                    { phone: normalizedIdentifier }
-                ] 
-            };
-        }
+        // Build comprehensive query based on identifier
+        let query = {
+            $or: [
+                { email: normalizedIdentifier.toLowerCase() },
+                { loginId: normalizedIdentifier.toUpperCase() },
+                { loginId: normalizedIdentifier.toLowerCase() },
+                { loginId: normalizedIdentifier },
+                { phone: normalizedIdentifier }
+            ]
+        };
         
         let user = await User.findOne(query);
+
+        // Fallback: If not in User collection, check KYCVerification (website signups)
+        if (!user) {
+            const kycUser = await KYCVerification.findOne({
+                $or: [
+                    { email: normalizedIdentifier.toLowerCase() },
+                    { phone: normalizedIdentifier },
+                    { loginId: normalizedIdentifier.toLowerCase() },
+                    { loginId: normalizedIdentifier.toUpperCase() }
+                ]
+            });
+            if (kycUser) {
+                const bcrypt = require('bcryptjs');
+                const kycPasswordMatch = kycUser.password === password || (kycUser.password && await bcrypt.compare(password, kycUser.password).catch(() => false));
+                if (kycPasswordMatch) {
+                    try {
+                        user = await User.create({
+                            name: `${kycUser.firstName || ''} ${kycUser.lastName || ''}`.trim() || kycUser.email?.split('@')[0] || 'User',
+                            email: kycUser.email || normalizedIdentifier.toLowerCase(),
+                            phone: kycUser.phone || normalizedIdentifier,
+                            password: password,
+                            role: kycUser.role === 'propertyowner' ? 'owner' : (kycUser.role || 'tenant'),
+                            loginId: kycUser.loginId || normalizedIdentifier.toUpperCase()
+                        });
+                    } catch (e) {
+                        user = await User.findOne({
+                            $or: [{ email: kycUser.email }, { loginId: kycUser.loginId }]
+                        });
+                    }
+                }
+            }
+        }
+        
         let isMatch = false;
 
         if (user) {
@@ -835,8 +860,14 @@ exports.login = async (req, res) => {
             }
 
             // Owners can login using email, loginId, or phone
-
             isMatch = await user.matchPassword(password);
+            
+            // Plain-text password fallback for legacy records
+            if (!isMatch && user.password && String(user.password) === String(password)) {
+                isMatch = true;
+                user.password = password; // Will be re-hashed by pre-save hook
+                await user.save().catch(() => {});
+            }
             
             if (isMatch) {
                 // Check if Owner model or User model requires reset
@@ -925,7 +956,23 @@ exports.login = async (req, res) => {
             }
         }
 
-        if (!user || !isMatch) return res.status(401).json({ message: 'Invalid credentials' });
+        if (user && ['employee', 'areamanager', 'manager', 'staff'].includes(user.role)) {
+            try {
+                const empRecord = await Employee.findOne({
+                    $or: [
+                        { loginId: user.loginId },
+                        { email: user.email },
+                        { _id: user._id }
+                    ]
+                }).lean();
+                if (empRecord) {
+                    user.permissions = empRecord.permissions || user.permissions || [];
+                    user.restrictedModules = empRecord.restrictedModules || [];
+                    user.assignedProperties = empRecord.assignedProperties || [];
+                    user.assignedOwners = empRecord.assignedOwners || [];
+                }
+            } catch (e) {}
+        }
 
         const token = generateToken(user);
         res.json({ 
@@ -938,7 +985,10 @@ exports.login = async (req, res) => {
                 role: user.role,
                 team: user.team,
                 loginId: user.loginId,
-                permissions: user.permissions 
+                permissions: user.permissions || [],
+                restrictedModules: user.restrictedModules || [],
+                assignedProperties: user.assignedProperties || [],
+                assignedOwners: user.assignedOwners || []
             } 
         });
     } catch (err) {
@@ -951,6 +1001,30 @@ exports.login = async (req, res) => {
 exports.me = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ message: 'Not authorized' });
+        
+        let permissions = req.user.permissions || [];
+        let restrictedModules = req.user.restrictedModules || [];
+        let assignedProperties = [];
+        let assignedOwners = [];
+
+        if (['employee', 'areamanager', 'manager', 'staff'].includes(req.user.role)) {
+            try {
+                const empRecord = await Employee.findOne({
+                    $or: [
+                        { loginId: req.user.loginId },
+                        { email: req.user.email },
+                        { _id: req.user._id }
+                    ]
+                }).lean();
+                if (empRecord) {
+                    permissions = empRecord.permissions || permissions;
+                    restrictedModules = empRecord.restrictedModules || restrictedModules;
+                    assignedProperties = empRecord.assignedProperties || [];
+                    assignedOwners = empRecord.assignedOwners || [];
+                }
+            } catch (e) {}
+        }
+
         res.json({
             user: {
                 id: req.user._id,
@@ -960,7 +1034,10 @@ exports.me = async (req, res) => {
                 role: req.user.role,
                 team: req.user.team,
                 loginId: req.user.loginId,
-                permissions: req.user.permissions
+                permissions,
+                restrictedModules,
+                assignedProperties,
+                assignedOwners
             }
         });
     } catch (err) {

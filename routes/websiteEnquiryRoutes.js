@@ -9,6 +9,8 @@ const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { formLimiter, captchaProtection } = require('../middleware/security');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { applyLeadScope } = require('../utils/scopeHelpers');
 
 // ============================================================
 // POST: Submit a new website enquiry
@@ -112,11 +114,12 @@ router.post('/submit', formLimiter, captchaProtection({ required: false }), asyn
 });
 
 // ============================================================
-// GET: Fetch all website enquiries
+// GET: Fetch all website enquiries (Scoped for employees)
 // ============================================================
-router.get('/all', async (req, res) => {
+router.get('/all', applyEmployeeScope, async (req, res) => {
     try {
-        const enquiries = await WebsiteEnquiry.find().sort({ created_at: -1 });
+        const query = applyLeadScope(req, {});
+        const enquiries = await WebsiteEnquiry.find(query).sort({ created_at: -1 });
 
         res.status(200).json({
             success: true,
@@ -442,13 +445,13 @@ router.get('/assigned-to/:loginId', async (req, res) => {
 });
 
 // ============================================================
-// GET: Fetch enquiries by owner email/id and status (for chat integration)
+// GET: Fetch enquiries by owner email/id and status (for chat integration, Scoped for employees)
 // ============================================================
-router.get('/', async (req, res) => {
+router.get('/', applyEmployeeScope, async (req, res) => {
     try {
         const { owner_email, owner_id, status } = req.query;
 
-        let query = {};
+        let query = applyLeadScope(req, {});
         if (owner_email) {
             query.owner_email = owner_email;
         } else if (owner_id) {

@@ -79,13 +79,16 @@ router.get(
     tenantController.getMyProfile
 );
 
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 // ══ 3. ADMIN: ALL TENANTS ════════════════════════════════════════════════════
 // Restricted to privileged roles. Sensitive fields excluded via projection
 // in getAllTenants controller (ALWAYS_EXCLUDED_PROJECTION).
 router.get(
     '/',
     protect,
-    authorize('superadmin', 'areamanager'),
+    authorize('superadmin', 'areamanager', 'employee', 'manager'),
+    applyEmployeeScope,
     tenantController.getAllTenants
 );
 

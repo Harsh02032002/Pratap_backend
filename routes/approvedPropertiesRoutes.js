@@ -348,24 +348,19 @@ router.post('/save', async (req, res) => {
 
 // GET: Fetch all approved properties (for website display)
 
-// ============================================================
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { applyPropertyScope } = require('../utils/scopeHelpers');
 
-router.get('/all', async (req, res) => {
-
+router.get('/all', applyEmployeeScope, async (req, res) => {
     try {
-
         console.log('🔍 [approved-properties/all] Fetching all approved properties...');
 
-        
+        const filter = applyPropertyScope(req, { status: { $in: ['approved', 'live'] } });
 
         // Get total count first
-        const totalCount = await ApprovedProperty.countDocuments({ 
-            status: { $in: ['approved', 'live'] }
-        });
+        const totalCount = await ApprovedProperty.countDocuments(filter);
         
-        const properties = await ApprovedProperty.find({ 
-            status: { $in: ['approved', 'live'] }
-        }).sort({ approvedAt: -1 });
+        const properties = await ApprovedProperty.find(filter).sort({ approvedAt: -1 });
 
         console.log('✅ [approved-properties/all] Found', properties.length, 'approved properties (Total:', totalCount + ')');
 

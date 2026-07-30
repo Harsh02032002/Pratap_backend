@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const Review = require('../models/Review');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { applyReviewScope } = require('../utils/scopeHelpers');
 
 // Safety/text moderation helper for review submissions
 function moderateReviewText(text) {
@@ -86,11 +88,12 @@ router.get('/', async (req, res) => {
 });
 
 // ============================================================
-// GET: Fetch all reviews for admin management (protected)
+// GET: Fetch all reviews for admin management (protected & scoped)
 // ============================================================
-router.get('/admin/all', protect, authorize('admin', 'superadmin'), async (req, res) => {
+router.get('/admin/all', protect, authorize('admin', 'superadmin', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
-    const reviews = await Review.find().sort({ createdAt: -1 });
+    const query = applyReviewScope(req, {});
+    const reviews = await Review.find(query).sort({ createdAt: -1 });
     res.status(200).json({
       success: true,
       data: reviews

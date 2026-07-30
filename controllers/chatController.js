@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const ChatMessage = require('../models/ChatMessage');
 const ChatRoom = require('../models/ChatRoom');
 const WebsiteEnquiry = require('../models/WebsiteEnquiry');
@@ -16,6 +17,24 @@ function generateWebsiteUserIdFromEmail(email) {
         hash = (hash * 31 + safeEmail.charCodeAt(i)) % 1000000;
     }
     return `roomhyweb${String(hash).padStart(6, '0')}`;
+}
+
+function isCallerIdMatch(user, targetId) {
+    if (!user || !targetId) return false;
+    if (user.role === 'superadmin' || user.role === 'admin') return true;
+
+    const target = String(targetId).trim().toUpperCase();
+    const userLoginId = String(user.loginId || '').trim().toUpperCase();
+    const userEmail = String(user.email || '').trim().toLowerCase();
+    const userId = String(user._id || user.id || '').trim().toUpperCase();
+    const emailHash = generateWebsiteUserIdFromEmail(user.email).toUpperCase();
+
+    return (
+        userLoginId === target ||
+        userEmail.toUpperCase() === target ||
+        userId === target ||
+        (Boolean(emailHash) && emailHash === target)
+    );
 }
 
 async function isCallerSuperadmin(req) {
@@ -39,8 +58,8 @@ async function isCallerSuperadmin(req) {
 exports.getInbox = async (req, res) => {
   try {
     const loginId = normalizeLoginId(req.params.login_id);
-    // IDOR protection: only allow callers to get their own inbox unless they are superadmin
-    if (req.user.role !== 'superadmin' && String(req.user.loginId || '').toUpperCase() !== String(loginId).toUpperCase()) {
+    // IDOR protection: allow callers to get their own inbox matching loginId, email, _id, or emailHash
+    if (!isCallerIdMatch(req.user, loginId)) {
         return res.status(403).json({ error: 'Forbidden: You cannot access other users\' inbox' });
     }
     const searchQuery = String(req.query.search || '').trim().toLowerCase();
@@ -236,11 +255,8 @@ exports.getConversation = async (req, res) => {
     const user1 = String(req.query.user1 || '').trim();
     const user2 = String(req.query.user2 || '').trim();
 
-    // IDOR protection: only allow user1 or user2 to fetch the conversation unless superadmin
-    const callerId = String(req.user.loginId || '').toUpperCase();
-    if (req.user.role !== 'superadmin' && 
-        callerId !== String(user1).toUpperCase() && 
-        callerId !== String(user2).toUpperCase()) {
+    // IDOR protection: allow user1 or user2 (or their email / emailHash) to fetch the conversation unless superadmin
+    if (!isCallerIdMatch(req.user, user1) && !isCallerIdMatch(req.user, user2)) {
         return res.status(403).json({ error: 'Forbidden: You cannot access this conversation' });
     }
 
@@ -294,8 +310,8 @@ exports.markAsRead = async (req, res) => {
     const { room_id } = req.params;
     const { sender } = req.query;
     
-    // IDOR protection: only allow caller to mark their own received messages as read
-    if (req.user.role !== 'superadmin' && String(req.user.loginId || '').toUpperCase() !== String(room_id).toUpperCase()) {
+    // IDOR protection: allow caller to mark their own received messages as read
+    if (!isCallerIdMatch(req.user, room_id)) {
         return res.status(403).json({ error: 'Forbidden' });
     }
     
@@ -590,9 +606,35 @@ exports.getAllChats = async (req, res) => {
         };
     }).sort((a, b) => new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0));
 
-    const filtered = searchQuery 
+    let filtered = searchQuery 
         ? result.filter(r => r.search_blob.includes(searchQuery))
         : result;
+
+    // Apply employee scoping if caller is field employee
+    if (req.employeeScope?.isEmployee) {
+      const { assignedOwners = [], visitOwnerIds = [] } = req.employeeScope;
+      const allowedOwnerLoginIds = new Set(
+        [...assignedOwners, ...visitOwnerIds].map(id => String(id).trim().toUpperCase())
+      );
+
+      // Filter owners that match employee's scope
+      const scopedOwnerLoginIds = new Set(
+        owners
+          .filter(o => allowedOwnerLoginIds.has(String(o._id).toUpperCase()) || allowedOwnerLoginIds.has(String(o.loginId || '').toUpperCase()))
+          .map(o => String(o.loginId || '').toUpperCase())
+      );
+
+      filtered = filtered.filter(item => {
+        const u1 = String(item.user1 || '').toUpperCase();
+        const u2 = String(item.user2 || '').toUpperCase();
+        return (
+          scopedOwnerLoginIds.has(u1) ||
+          scopedOwnerLoginIds.has(u2) ||
+          allowedOwnerLoginIds.has(u1) ||
+          allowedOwnerLoginIds.has(u2)
+        );
+      });
+    }
 
     res.json({
       success: true,

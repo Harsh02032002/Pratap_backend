@@ -3,6 +3,8 @@ const Tenant = require('../models/Tenant');
 const Room = require('../models/Room');
 const Property = require('../models/Property');
 const Complaint = require('../models/Complaint');
+const { applyPropertyScope, applyTenantScope, applyOwnerScope } = require('../utils/scopeHelpers');
+const { employeeBlocksRevenue } = require('../utils/scopeHelpers');
 
 exports.generateReport = async (req, res) => {
   try {
@@ -10,6 +12,15 @@ exports.generateReport = async (req, res) => {
 
     if (!ownerLoginId || !reportName) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+
+    // Block revenue reports for employees
+    if (employeeBlocksRevenue(req)) {
+      const reportNameLower = reportName.toLowerCase();
+      if (reportNameLower.includes('revenue') || reportNameLower.includes('financial') || 
+          reportNameLower.includes('collection') || reportNameLower.includes('payment')) {
+        return res.status(403).json({ success: false, message: 'Access denied: Revenue reports are restricted for employees' });
+      }
     }
 
     // Generate CSV content using the fields provided
@@ -20,12 +31,14 @@ exports.generateReport = async (req, res) => {
       // Try to fetch actual data based on report type
       const reportNameLower = reportName.toLowerCase();
       
-      // Fetch properties for owner
-      const properties = await Property.find({ ownerLoginId }).lean();
+      // Fetch properties for owner with employee scope applied
+      const propFilter = applyPropertyScope(req, { ownerLoginId });
+      const properties = await Property.find(propFilter).lean();
       const propertyIds = properties.map(p => p._id);
 
       if (reportNameLower.includes('tenant') || reportNameLower.includes('booking') || reportNameLower.includes('attendance')) {
-        const tenants = await Tenant.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
+        const tenantFilter = applyTenantScope(req, { property: { $in: propertyIds }, isDeleted: { $ne: true } });
+        const tenants = await Tenant.find(tenantFilter)
           .populate('room', 'title')
           .populate('property', 'title')
           .lean();
@@ -54,8 +67,11 @@ exports.generateReport = async (req, res) => {
            csvData += fields.map(() => '"No tenants found"').join(',') + '\n';
         }
       } else if (reportNameLower.includes('room') || reportNameLower.includes('property') || reportNameLower.includes('occupancy')) {
-        // Fetch Rooms
-        const rooms = await Room.find({ property: { $in: propertyIds } }).populate('property').lean();
+        // Fetch Rooms with employee scope
+        const roomFilter = { property: { $in: propertyIds } };
+        const { applyRoomScope } = require('../utils/scopeHelpers');
+        const scopedRoomFilter = applyRoomScope(req, roomFilter);
+        const rooms = await Room.find(scopedRoomFilter).populate('property').lean();
         if (rooms.length > 0) {
            for (const r of rooms) {
              const row = fields.map(f => {
@@ -72,8 +88,10 @@ exports.generateReport = async (req, res) => {
            csvData += fields.map(() => '"No rooms found"').join(',') + '\n';
         }
       } else if (reportNameLower.includes('complaint')) {
-        // Fetch Complaints
-        const complaints = await Complaint.find({ property: { $in: propertyIds } }).populate('tenant').populate('room').lean();
+        // Fetch Complaints with employee scope
+        const { applyComplaintScope } = require('../utils/scopeHelpers');
+        const complaintFilter = applyComplaintScope(req, { property: { $in: propertyIds } });
+        const complaints = await Complaint.find(complaintFilter).populate('tenant').populate('room').lean();
         if (complaints.length > 0) {
            for (const c of complaints) {
              const row = fields.map(f => {
@@ -121,7 +139,8 @@ exports.generateReport = async (req, res) => {
 exports.getPastReports = async (req, res) => {
   try {
     const { ownerLoginId } = req.params;
-    const reports = await Report.find({ ownerLoginId }).sort({ createdAt: -1 }).lean();
+    const ownerFilter = applyOwnerScope(req, { ownerLoginId });
+    const reports = await Report.find(ownerFilter).sort({ createdAt: -1 }).lean();
     res.status(200).json({ success: true, reports });
   } catch (error) {
     console.error('Error fetching past reports:', error);

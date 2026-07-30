@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Property = require('../models/Property');
 const Enquiry = require('../models/Enquiry');
 const Employee = require('../models/Employee');
@@ -181,7 +182,13 @@ exports.getPropertyById = async (req, res) => {
 // Get ALL Properties (For Super Admin & Area Manager lists) with Pagination
 exports.getAllProperties = async (req, res) => {
     try {
-        const filter = { isDeleted: { $ne: true } };
+        const { applyPropertyScope } = require('../utils/scopeHelpers');
+        let filter = { isDeleted: { $ne: true } };
+
+        if (req.employeeScope && req.employeeScope.isEmployee) {
+            filter = applyPropertyScope(req, filter);
+        }
+
         if (req.query.ownerLoginId) {
             filter.ownerLoginId = String(req.query.ownerLoginId).toUpperCase();
         }
@@ -192,10 +199,21 @@ exports.getAllProperties = async (req, res) => {
             filter['pendingChanges.status'] = 'pending';
         }
         if (req.query.assignedTo) {
-            filter.$or = [
-                { 'pendingChanges.assignedTo': req.query.assignedTo },
-                { 'assignedTo': req.query.assignedTo }
+            const assignedVal = String(req.query.assignedTo).trim();
+            const isObjId = mongoose.Types.ObjectId.isValid(assignedVal);
+            const assignedClause = [
+                { 'pendingChanges.assignedToName': new RegExp(`^${assignedVal}$`, 'i') },
+                { 'assignedToName': new RegExp(`^${assignedVal}$`, 'i') }
             ];
+            if (isObjId) {
+                assignedClause.push({ 'pendingChanges.assignedTo': new mongoose.Types.ObjectId(assignedVal) });
+                assignedClause.push({ 'assignedTo': new mongoose.Types.ObjectId(assignedVal) });
+            }
+            if (filter.$or) {
+                filter = { $and: [filter, { $or: assignedClause }] };
+            } else {
+                filter.$or = assignedClause;
+            }
         }
         
         const page = parseInt(req.query.page) || 1;

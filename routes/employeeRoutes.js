@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Employee = require('../models/Employee');
 const jwt = require('jsonwebtoken');
 const { protect, authorize, protectPasswordReset } = require('../middleware/authMiddleware');
+const { ROLES_REQUIRING_ASSIGNED_PROPERTIES, DEFAULT_RESTRICTED_MODULES } = require('../utils/permissionKeys');
 
 /**
  * POST /api/employees/login
@@ -40,6 +42,15 @@ router.post('/login', async (req, res) => {
                 role: emp.role,
                 parentLoginId: emp.parentLoginId,
                 permissions: emp.permissions || [],
+                restrictedModules: emp.restrictedModules || [],
+                employeeType: emp.employeeType || 'Field Executive',
+                assignedProperties: emp.assignedProperties || [],
+                assignedOwners: emp.assignedOwners || [],
+                city: emp.city || '',
+                area: emp.area || '',
+                areaCode: emp.areaCode || '',
+                cityId: emp.cityId || null,
+                areaId: emp.areaId || null,
                 assignedPropertyName: emp.assignedPropertyName || '',
                 photoDataUrl: emp.photoDataUrl || '',
                 requirePasswordReset,
@@ -119,29 +130,96 @@ router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) =
 
 /**
  * GET /api/employees
- * Get all employees (with optional filters)
- * Query params: area, role, isActive (true/false)
+ * Get all employees cleanly from Employee and User collections (excluding soft-deleted)
  */
 router.get('/', protect, authorize('superadmin', 'areamanager', 'owner', 'manager', 'employee'), async (req, res) => {
     try {
-        const { area, role, isActive } = req.query;
-        const filter = { isDeleted: { $ne: true } };
-        if (area) filter.area = area;
-        if (role) filter.role = role;
-        if (typeof isActive !== 'undefined') filter.isActive = isActive === 'true';
+        const { area, role, isActive, parentLoginId } = req.query;
+        const isOwner = req.user.role === 'owner';
+        const isAreaManager = req.user.role === 'areamanager';
 
-        // Areamanager/Owner scope: restrict to employees they manage; ignore any client-supplied parentLoginId
-        if (req.user.role === 'areamanager' || req.user.role === 'owner') {
-            filter.parentLoginId = String(req.user.loginId || '').toUpperCase();
-        } else if (req.user.role === 'manager' || req.user.role === 'employee') {
-            // Staff proxies fetching their co-workers
-            filter.parentLoginId = String(req.user.parentLoginId || '').toUpperCase();
-        } else if (req.query.parentLoginId) {
-            filter.parentLoginId = req.query.parentLoginId;
+        const empFilter = { isDeleted: { $ne: true } };
+        if (area) empFilter.area = area;
+        if (role) empFilter.role = role;
+        if (typeof isActive !== 'undefined') empFilter.isActive = isActive === 'true';
+
+        if (isOwner || isAreaManager) {
+            const ownerId = String(req.user.loginId || '').trim();
+            empFilter.$or = [
+                { parentLoginId: ownerId },
+                { parentLoginId: ownerId.toUpperCase() },
+                { parentLoginId: ownerId.toLowerCase() }
+            ];
+        } else if (parentLoginId) {
+            const pId = String(parentLoginId).trim();
+            empFilter.$or = [
+                { parentLoginId: pId },
+                { parentLoginId: pId.toUpperCase() },
+                { parentLoginId: pId.toLowerCase() }
+            ];
         }
 
-        const employees = await Employee.find(filter).select('-password').sort({ createdAt: -1 });
-        return res.status(200).json({ success: true, data: employees, count: employees.length });
+        // 1. Fetch active documents in Employee collection
+        const empDocs = await Employee.find(empFilter).select('-password').sort({ createdAt: -1 }).lean();
+
+        // 2. Fetch active documents in User collection with staff/employee roles
+        const User = require('../models/user');
+        const userFilter = isOwner 
+            ? { role: 'staff', isDeleted: { $ne: true } } 
+            : { role: { $in: ['employee', 'areamanager', 'manager', 'staff'] }, isDeleted: { $ne: true } };
+            
+        const userDocs = await User.find(userFilter).select('-password').sort({ _id: -1 }).lean();
+
+        const seenKeys = new Set();
+        const mergedEmployees = [];
+
+        // Add records from Employee collection first (using _id / loginId)
+        for (const e of empDocs) {
+            const idKey = String(e._id || e.loginId || e.email).toUpperCase().trim();
+            if (idKey && !seenKeys.has(idKey)) {
+                seenKeys.add(idKey);
+                if (e.email) seenKeys.add(String(e.email).toUpperCase().trim());
+                if (e.loginId) seenKeys.add(String(e.loginId).toUpperCase().trim());
+                mergedEmployees.push({
+                    ...e,
+                    role: e.role || 'Marketing Team',
+                    isActive: e.isActive !== false
+                });
+            }
+        }
+
+        // Add records from User collection if not already in Employee collection
+        for (const u of userDocs) {
+            const idKey = String(u._id || u.loginId || u.email).toUpperCase().trim();
+            const emailKey = u.email ? String(u.email).toUpperCase().trim() : '';
+            const loginKey = u.loginId ? String(u.loginId).toUpperCase().trim() : '';
+
+            if (idKey && !seenKeys.has(idKey) && (!emailKey || !seenKeys.has(emailKey)) && (!loginKey || !seenKeys.has(loginKey))) {
+                seenKeys.add(idKey);
+                if (emailKey) seenKeys.add(emailKey);
+                if (loginKey) seenKeys.add(loginKey);
+
+                mergedEmployees.push({
+                    _id: u._id,
+                    id: u._id,
+                    name: u.name || `${u.firstName || ''} ${u.lastName || ''}`.trim() || 'Staff Member',
+                    loginId: u.loginId || `EMP${String(u._id).slice(-4)}`,
+                    email: u.email || '',
+                    phone: u.phone || '',
+                    role: u.role === 'employee' ? 'Marketing Team' : (u.role === 'staff' ? 'Staff' : u.role),
+                    city: u.city || '',
+                    area: u.area || '',
+                    isActive: u.isActive !== false,
+                    permissions: u.permissions || [],
+                    restrictedModules: u.restrictedModules || [],
+                    createdAt: u.createdAt || new Date()
+                });
+            }
+        }
+
+        mergedEmployees.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+        return res.status(200).json({ success: true, data: mergedEmployees, count: mergedEmployees.length });
     } catch (err) {
         console.error('Get employees error:', err);
         return res.status(500).json({ error: 'Failed to fetch employees', details: err.message });
@@ -292,8 +370,20 @@ router.get('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner')
  */
 router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
-        const { name, loginId, email, phone, password, role, area, areaCode, city, locationCode, permissions = [], parentLoginId, photoDataUrl } = req.body;
+        const {
+            name, loginId, email, phone, password, role, area, areaCode, city,
+            locationCode, permissions = [], parentLoginId, photoDataUrl,
+            // ── New scope fields ────────────────────────────────────────────
+            employeeType = 'Field Executive',
+            assignedProperties = [],
+            assignedOwners = [],
+            restrictedModules,          // if not provided → use full default list
+            cityId, areaId,
+        } = req.body;
+
         if (!name || !loginId) return res.status(400).json({ error: 'Missing required fields: name, loginId' });
+
+
 
         // Area managers/owners cannot create superadmin or areamanager/owner accounts
         if (req.user.role === 'areamanager' || req.user.role === 'owner') {
@@ -335,8 +425,8 @@ router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async
         // Check loginId exists
         const exists = await Employee.findOne({ loginId: finalLoginId });
         if (exists) {
-            if (exists.isActive === false) {
-                exists.set({ name, loginId: finalLoginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
+            if (exists.isActive === false || exists.isDeleted) {
+                exists.set({ name, loginId: finalLoginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, isDeleted: false, updatedAt: new Date() });
                 const updated = await exists.save();
                 const emailResult = await sendStaffEmail(email, finalLoginId, password, role);
                 return res.status(201).json({ success: true, data: updated, reused: true, email: emailResult });
@@ -349,13 +439,13 @@ router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async
         let inactiveByPhone = null;
         if (normalizedEmail) {
             const found = await Employee.findOne({ email: normalizedEmail });
-            if (found && found.isActive === false) inactiveByEmail = found;
-            if (found && found.isActive !== false) return res.status(409).json({ error: 'Duplicate email', details: 'Email already in use' });
+            if (found && (found.isActive === false || found.isDeleted)) inactiveByEmail = found;
+            if (found && found.isActive !== false && !found.isDeleted) return res.status(409).json({ error: 'Duplicate email', details: 'Email already in use' });
         }
         if (phone) {
             const found = await Employee.findOne({ phone });
-            if (found && found.isActive === false) inactiveByPhone = found;
-            if (found && found.isActive !== false) return res.status(409).json({ error: 'Duplicate phone', details: 'Phone already in use' });
+            if (found && (found.isActive === false || found.isDeleted)) inactiveByPhone = found;
+            if (found && found.isActive !== false && !found.isDeleted) return res.status(409).json({ error: 'Duplicate phone', details: 'Phone already in use' });
         }
 
         // Reuse inactive by email/phone
@@ -365,7 +455,18 @@ router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async
             if (loginConflict && String(loginConflict._id) !== String(reuseTarget._id)) {
                 finalLoginId = await buildUniqueStaffLoginId(effectiveParentLoginId, finalLoginId);
             }
-            reuseTarget.set({ name, loginId: finalLoginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, updatedAt: new Date() });
+            reuseTarget.set({
+                name, loginId: finalLoginId, email: normalizedEmail || undefined, phone, password,
+                role, area, areaCode, city, locationCode, permissions,
+                parentLoginId: effectiveParentLoginId, photoDataUrl, isActive: true, isDeleted: false,
+                employeeType:      employeeType       || 'Field Executive',
+                assignedProperties: assignedProperties || [],
+                assignedOwners:     assignedOwners     || [],
+                restrictedModules:  restrictedModules !== undefined ? restrictedModules : DEFAULT_RESTRICTED_MODULES,
+                cityId:  cityId  || undefined,
+                areaId:  areaId  || undefined,
+                updatedAt: new Date()
+            });
             const updated = await reuseTarget.save();
             const emailResult = await sendStaffEmail(email, finalLoginId, password, role);
             return res.status(201).json({ success: true, data: updated, reused: true, email: emailResult });
@@ -374,13 +475,56 @@ router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async
         // Create fresh employee
         let employee;
         try {
-            employee = await Employee.create({ name, loginId: finalLoginId, email: normalizedEmail || undefined, phone, password, role, area, areaCode, city, locationCode, permissions, parentLoginId: effectiveParentLoginId, photoDataUrl, requirePasswordReset: true });
+            employee = await Employee.create({
+                name,
+                loginId:            finalLoginId,
+                email:              normalizedEmail || undefined,
+                phone,
+                password,
+                role,
+                area,
+                areaCode,
+                city,
+                locationCode,
+                permissions,
+                parentLoginId:      effectiveParentLoginId,
+                photoDataUrl,
+                requirePasswordReset: true,
+                // ── New scope fields ─────────────────────────────────────────
+                employeeType:       employeeType || 'Field Executive',
+                assignedProperties: assignedProperties || [],
+                assignedOwners:     assignedOwners     || [],
+                restrictedModules:  restrictedModules !== undefined ? restrictedModules : DEFAULT_RESTRICTED_MODULES,
+                cityId:             cityId   || undefined,
+                areaId:             areaId   || undefined,
+            });
         } catch (dbErr) {
             if (dbErr && dbErr.code === 11000) {
                 const dupField = dbErr.keyPattern ? Object.keys(dbErr.keyPattern)[0] : 'field';
                 return res.status(409).json({ error: `Duplicate ${dupField}`, details: dbErr.message });
             }
             throw dbErr;
+        }
+
+        try {
+            const User = require('../models/user');
+            await User.findOneAndUpdate(
+                { loginId: finalLoginId },
+                {
+                    name,
+                    loginId: finalLoginId,
+                    email: normalizedEmail || undefined,
+                    phone: phone || '0000000000',
+                    password: password || '123456',
+                    role: 'employee',
+                    city: city || '',
+                    isActive: true,
+                    isDeleted: false
+                },
+                { upsert: true, new: true }
+            );
+        } catch (uErr) {
+            console.warn('[employeeRoutes] Sync to User collection failed:', uErr.message);
         }
 
         const emailResult = await sendStaffEmail(email, finalLoginId, password, role);
@@ -423,8 +567,13 @@ router.patch('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner
         const COMMON_FIELDS = ['name', 'email', 'phone', 'status', 'department',
             'isActive', 'area', 'areaCode', 'city', 'locationCode',
             'password', 'photoDataUrl'];
-        // parentLoginId is superadmin-only: areamanager/owner must not overwrite the scope enforcement field
-        const SUPERADMIN_FIELDS = ['role', 'permissions', 'parentLoginId'];
+        // Superadmin-only writable fields
+        const SUPERADMIN_FIELDS = [
+            'role', 'permissions', 'parentLoginId',
+            // ── New scope fields (superadmin only) ──────────────────────────
+            'employeeType', 'assignedProperties', 'assignedOwners',
+            'restrictedModules', 'cityId', 'areaId',
+        ];
         const OWNER_FIELDS = ['role', 'permissions'];
 
         let allowedFields;
@@ -502,22 +651,39 @@ router.post('/:loginId/deactivate', protect, authorize('superadmin', 'areamanage
 
 /**
  * DELETE /api/employees/:loginId
- * Delete an employee (Soft Delete)
+ * Delete an employee (Soft Delete in both Employee & User collections)
  */
-router.delete('/:loginId', protect, authorize('superadmin'), async (req, res) => {
+router.delete('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { loginId } = req.params;
+        const targetStr = decodeURIComponent(loginId).trim();
+        const isValidId = mongoose.Types.ObjectId.isValid(targetStr);
+
+        const filterCond = {
+            $or: [
+                { loginId: targetStr },
+                { email: targetStr.toLowerCase() },
+                ...(isValidId ? [{ _id: targetStr }] : [])
+            ]
+        };
+
         const employee = await Employee.findOneAndUpdate(
-            { loginId },
+            filterCond,
             { $set: { isDeleted: true, isActive: false, updatedAt: new Date() } },
             { new: true }
         );
 
-        if (!employee) {
-            return res.status(404).json({ error: 'Employee not found' });
-        }
+        const User = require('../models/user');
+        await User.updateMany(
+            filterCond,
+            { $set: { isDeleted: true, isActive: false } }
+        );
 
-        return res.status(200).json({ success: true, message: 'Employee soft deleted successfully', data: employee });
+        return res.status(200).json({ 
+            success: true, 
+            message: 'Employee soft deleted successfully', 
+            data: employee || { loginId: targetStr } 
+        });
     } catch (err) {
         console.error('Delete employee error:', err);
         return res.status(500).json({ error: 'Failed to delete employee', details: err.message });

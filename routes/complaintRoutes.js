@@ -45,11 +45,14 @@ router.patch(
   complaintController.assignStaff
 );
 
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 // All complaints list — superadmin/areamanager (no filter) or owner (with ?ownerLoginId= query).
 router.get(
   '/',
   protect,
   authorize('superadmin', 'areamanager', 'owner', 'employee'),
+  applyEmployeeScope,
   complaintController.getAllComplaints
 );
 

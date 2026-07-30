@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Room = require('../models/Room');
 const Property = require('../models/Property');
 const Notification = require('../models/Notification');
@@ -187,8 +188,6 @@ exports.bulkCreateRooms = async (req, res) => {
 
 
 
-
-const mongoose = require('mongoose');
 
 exports.getRoomsByProperty = async (req, res) => {
     try {
@@ -645,17 +644,18 @@ exports.deleteRoom = async (req, res) => {
     }
 };
 
-// Get all rooms (Super Admin only - paginated, filtered, search)
+// Get all rooms (Super Admin / Employee / Manager - paginated, filtered, search)
 exports.getAllRooms = async (req, res) => {
     try {
+        const { applyRoomScope, applyPropertyScope } = require('../utils/scopeHelpers');
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const search = req.query.search || '';
         const propertyFilter = req.query.property || '';
         const sharingTypeFilter = req.query.sharingType || '';
 
-        // Build search query (excluding soft-deleted rooms)
-        const query = { isDeleted: { $ne: true } };
+        // Build search query with employee scope
+        const query = applyRoomScope(req, { isDeleted: { $ne: true } });
 
         if (req.query.pendingChanges === 'true') {
             query['pendingChanges.status'] = 'pending';
@@ -704,8 +704,9 @@ exports.getAllRooms = async (req, res) => {
             .sort({ createdAt: -1 })
             .lean();
 
-        // Calculate statistics across all active rooms (overall, not paginated)
-        const allActiveRooms = await Room.find({ isDeleted: { $ne: true } }).lean();
+        // Calculate statistics across active rooms (scoped for employees)
+        const activeRoomQuery = applyRoomScope(req, { isDeleted: { $ne: true } });
+        const allActiveRooms = await Room.find(activeRoomQuery).lean();
         
         let totalRoomsCount = allActiveRooms.length;
         let vacantRoomsCount = 0;
@@ -730,7 +731,8 @@ exports.getAllRooms = async (req, res) => {
         });
 
         const Property = require('../models/Property');
-        const totalPropertiesCount = await Property.countDocuments({ isDeleted: { $ne: true } });
+        const activePropQuery = applyPropertyScope(req, { isDeleted: { $ne: true } });
+        const totalPropertiesCount = await Property.countDocuments(activePropQuery);
 
         res.json({
             success: true,

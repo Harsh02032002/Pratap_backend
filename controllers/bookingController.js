@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const BookingRequest = require('../models/BookingRequest');
 const RefundRequest = require('../models/RefundRequest');
 const Notification = require('../models/Notification');
@@ -697,7 +698,8 @@ exports.createBulkBookingRequest = async (req, res) => {
 exports.getBookingRequests = async (req, res) => {
     try {
         const { area, manager_id, owner_id, user_id, email, type, status } = req.query;
-        let query = {};
+        const { applyBookingScope } = require('../utils/scopeHelpers');
+        let query = applyBookingScope(req, {});
 
         // ✅ NEW: Support email query param for website users
         if (email) {
@@ -728,14 +730,20 @@ exports.getBookingRequests = async (req, res) => {
                 propNames = ownerProps.map(p => p.propertyName || p.title).filter(Boolean);
             } catch (_) {}
 
-            query.$or = [
+            const ownerOr = [
                 { owner_id: cleanOwnerId },
                 { owner_ids: { $in: [cleanOwnerId] }, is_bulk_request: true }
             ];
 
-            if (propIds.length > 0) query.$or.push({ property_id: { $in: propIds } });
-            if (propVisitIds.length > 0) query.$or.push({ property_id: { $in: propVisitIds } });
-            if (propNames.length > 0) query.$or.push({ property_name: { $in: propNames } });
+            if (propIds.length > 0) ownerOr.push({ property_id: { $in: propIds } });
+            if (propVisitIds.length > 0) ownerOr.push({ property_id: { $in: propVisitIds } });
+            if (propNames.length > 0) ownerOr.push({ property_name: { $in: propNames } });
+
+            if (query.$or) {
+                query = { $and: [query, { $or: ownerOr }] };
+            } else {
+                query.$or = ownerOr;
+            }
         } else if (user_id) {
             query.user_id = user_id;
         } else if (manager_id) {
@@ -779,7 +787,9 @@ exports.getBookingRequests = async (req, res) => {
  */
 exports.getBookingRequestById = async (req, res) => {
     try {
-        const request = await BookingRequest.findById(req.params.id);
+        const { applyBookingScope } = require('../utils/scopeHelpers');
+        const filter = applyBookingScope(req, { _id: req.params.id });
+        const request = await BookingRequest.findOne(filter);
 
         if (!request) {
             return res.status(404).json({ 
@@ -829,7 +839,8 @@ exports.getUserBookings = async (req, res) => {
             emailFromQuery: emailFromQuery || null
         });
 
-        const bookings = await BookingRequest.find({
+        const { applyBookingScope } = require('../utils/scopeHelpers');
+        const baseFilter = {
             $and: [
                 {
                     $or: [
@@ -845,7 +856,9 @@ exports.getUserBookings = async (req, res) => {
                     ]
                 }
             ]
-        }).sort({ createdAt: -1, created_at: -1 });
+        };
+        const scopedFilter = applyBookingScope(req, baseFilter);
+        const bookings = await BookingRequest.find(scopedFilter).sort({ createdAt: -1, created_at: -1 });
 
         console.log(`Found ${bookings.length} bookings for user ${normalizedUserId}`);
 

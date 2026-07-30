@@ -16,10 +16,12 @@ router.get('/checkout', rentController.createOnboardingRazorpayOrder);
 // Secure all endpoints with authentication
 router.use(protect);
 
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 // Staff-only endpoints
 router.post('/test-tenant-email', authorize('superadmin'), rentController.testTenantEmail);
 router.post('/', authorize('superadmin', 'areamanager', 'employee'), rentController.createRent);
-router.get('/', authorize('superadmin', 'areamanager', 'employee'), rentController.getAllRents);
+router.get('/', authorize('superadmin', 'areamanager', 'employee'), applyEmployeeScope, rentController.getAllRents);
 router.post('/reminders/send', authorize('superadmin', 'areamanager', 'employee'), rentController.sendRentReminder);
 router.post('/reminders/delayed', authorize('superadmin', 'areamanager', 'employee'), rentController.sendDelayedPaymentReminder);
 router.post('/reminders/start-unpaid', authorize('superadmin', 'areamanager', 'employee'), rentController.startManualUnpaidReminders);

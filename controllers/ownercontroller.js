@@ -510,14 +510,12 @@ exports.getAllOwners = async (req, res) => {
         const pageSize = Math.min(parseInt(limit) || (search ? 10 : 50), 200);
         const skip = (Math.max(parseInt(page) || 1, 1) - 1) * pageSize;
 
-        let query = { isDeleted: { $ne: true } };
+        const { applyOwnerScope } = require('../utils/scopeHelpers');
+        let query = applyOwnerScope(req, { isDeleted: { $ne: true } });
 
         // Area Based Filtering
         if (locationCode) {
-            query.$or = [
-                { locationCode: { $regex: `^${locationCode}`, $options: 'i' } },
-                { 'profile.locationCode': { $regex: `^${locationCode}`, $options: 'i' } }
-            ];
+            query.locationCode = { $regex: `^${locationCode}`, $options: 'i' };
         }
 
         // Status Filtering
@@ -525,15 +523,23 @@ exports.getAllOwners = async (req, res) => {
             query['kyc.status'] = kycStatus;
         }
 
-        // Search — overrides locationCode $or if both provided (last write wins in MongoDB)
+        // Search
         if (search) {
-            query.$or = [
-                { name: { $regex: search, $options: 'i' } },
-                { loginId: { $regex: search, $options: 'i' } },
-                { phone: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } },
-                { 'profile.name': { $regex: search, $options: 'i' } }
-            ];
+            const searchRegex = new RegExp(search, 'i');
+            const searchClause = {
+                $or: [
+                    { name: searchRegex },
+                    { loginId: searchRegex },
+                    { phone: searchRegex },
+                    { email: searchRegex },
+                    { 'profile.name': searchRegex }
+                ]
+            };
+            if (query.$or) {
+                query = { $and: [query, searchClause] };
+            } else {
+                query.$or = searchClause.$or;
+            }
         }
 
         // Run count & data query in parallel

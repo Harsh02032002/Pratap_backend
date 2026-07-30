@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
 
 // Owners add rooms
 router.post('/', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.createRoom);
@@ -20,7 +21,7 @@ router.get('/:roomId/readings', roomController.getElectricityReadings);
 router.get('/owner/:ownerLoginId', roomController.getRoomsByOwner);
 
 // Get all rooms (Super Admin / Employee / Manager)
-router.get('/all', protect, authorize('superadmin', 'employee', 'manager'), roomController.getAllRooms);
+router.get('/all', protect, authorize('superadmin', 'employee', 'manager'), applyEmployeeScope, roomController.getAllRooms);
 
 // Toggle promoted status
 router.put('/:roomId/toggle-promoted', roomController.togglePromoted);

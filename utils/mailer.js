@@ -11,7 +11,7 @@ function getMailerConfig() {
     return {
         fromEmail: process.env.FROM_EMAIL || 'no-reply@roomhy.com',
         fromName: process.env.FROM_NAME || 'RoomHy',
-        smtpHost: (process.env.SMTP_HOST || 'smtp.gmail.com').trim(),
+        smtpHost: (process.env.SMTP_HOST || 'smtp.office365.com').trim(),
         smtpPort: Number(process.env.SMTP_PORT || 587),
         smtpSecure: parseBooleanEnv(process.env.SMTP_SECURE, false),
         smtpUser: (process.env.SMTP_USER || '').trim(),

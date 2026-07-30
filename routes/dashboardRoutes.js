@@ -1,25 +1,136 @@
 /**
- * Dashboard Aggregation Route
- * GET /api/dashboard/:ownerId
+ * Dashboard Aggregation Routes
  *
- * Replaces 8 separate HTTP round-trips with a single parallel-fetched response.
- * All sub-queries run via Promise.all; healOwnerProperties runs once, not on every sub-route.
+ * GET /api/dashboard/employee  — Secure employee dashboard (area-scoped, no revenue)
+ * GET /api/dashboard/:ownerId  — Owner dashboard (unchanged)
  */
 
 const express = require('express');
 const router = express.Router();
 
-const Owner = require('../models/Owner');
-const Property = require('../models/Property');
-const Room = require('../models/Room');
-const Tenant = require('../models/Tenant');
-const Enquiry = require('../models/Enquiry');
-const Notification = require('../models/Notification');
-const Complaint = require('../models/Complaint');
-const PaymentTransaction = require('../models/PaymentTransaction');
-const RentPayment = require('../models/RentPayment');
+const Owner               = require('../models/Owner');
+const Property            = require('../models/Property');
+const Room                = require('../models/Room');
+const Tenant              = require('../models/Tenant');
+const Enquiry             = require('../models/Enquiry');
+const Notification        = require('../models/Notification');
+const Complaint           = require('../models/Complaint');
+const PaymentTransaction  = require('../models/PaymentTransaction');
+const RentPayment         = require('../models/RentPayment');
+const VisitData           = require('../models/VisitData');
 
 const ownerController = require('../controllers/ownercontroller');
+const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');
+const { MODULE_KEYS } = require('../utils/permissionKeys');
+
+// ─── Employee Dashboard ───────────────────────────────────────────────────────
+/**
+ * GET /api/dashboard/employee
+ * Returns only area-scoped operational stats for the logged-in employee.
+ * NEVER includes revenue, company analytics, or platform-wide figures.
+ */
+router.get('/employee', protect, authorize('superadmin', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
+  try {
+    const scope = req.employeeScope;
+
+    // If superadmin accidentally hits this route, redirect to full stats
+    if (!scope || !scope.isEmployee) {
+      return res.json({ success: true, message: 'Use /api/admin/stats for superadmin dashboard', isEmployee: false });
+    }
+
+    const today      = new Date(); today.setHours(0, 0, 0, 0);
+    const tomorrow   = new Date(today); tomorrow.setDate(today.getDate() + 1);
+
+    const propFilter      = applyPropertyScope(req, {});
+    const visitFilter     = applyVisitScope(req, {});
+    const complaintFilter = applyComplaintScope(req, {});
+
+    const assignedPropIds = scope.assignedProperties || [];
+    const bookingFilter   = applyBookingScope(req, {});
+
+    const [
+      assignedPropertiesCount,
+      assignedOwnersCount,
+      pendingVisitsCount,
+      todayTasksCount,
+      assignedBookingsCount,
+      assignedLeadsCount,
+      assignedComplaintsCount,
+      recentNotifications,
+    ] = await Promise.allSettled([
+      // 1. Assigned Properties (active, not deleted)
+      Property.countDocuments({ ...propFilter }),
+
+      // 2. Assigned Owners
+      scope.assignedOwners?.length > 0
+        ? Owner.countDocuments({ _id: { $in: scope.assignedOwners } })
+        : Promise.resolve(0),
+
+      // 3. Pending Visits for this employee
+      VisitData.countDocuments({ ...visitFilter, status: { $in: ['pending', 'submitted', 'assigned'] } }),
+
+      // 4. Today's Tasks for this employee
+      require('../models/Task').countDocuments({
+        assignedTo: scope.employeeId,
+        dueDate: { $gte: today, $lt: tomorrow },
+        status: { $ne: 'completed' }
+      }),
+
+      // 5. Bookings in assigned properties / area
+      require('../models/BookingRequest').countDocuments({
+        ...bookingFilter,
+        status: { $in: ['pending', 'confirmed', 'new'] }
+      }),
+
+      // 6. Leads in assigned properties / area
+      require('../models/Enquiry').countDocuments({
+        ...(assignedPropIds.length > 0
+          ? { propertyId: { $in: assignedPropIds.map(String) } }
+          : { city: scope.city }),
+        status: { $nin: ['closed', 'rejected', 'converted'] }
+      }),
+
+      // 7. Complaints assigned to this employee or in their properties
+      Complaint.countDocuments({ ...complaintFilter, status: { $nin: ['Resolved', 'Closed'] } }),
+
+      // 8. Recent notifications for this employee only
+      Notification.find({
+        $or: [
+          { toLoginId: scope.loginId },
+          { toEmployeeId: scope.employeeId },
+        ]
+      }).sort({ createdAt: -1 }).limit(10).lean(),
+    ]);
+
+    const safe = (result) => (result.status === 'fulfilled' ? result.value : 0);
+
+    return res.json({
+      success: true,
+      isEmployee: true,
+      employeeType: scope.employeeType,
+      // ── Operational Stats (safe for employee view) ──────────────────────
+      assignedPropertiesCount: safe(assignedPropertiesCount),
+      assignedOwnersCount:     safe(assignedOwnersCount),
+      pendingVisitsCount:      safe(pendingVisitsCount),
+      todayTasksCount:         safe(todayTasksCount),
+      assignedBookingsCount:   safe(assignedBookingsCount),
+      assignedLeadsCount:      safe(assignedLeadsCount),
+      assignedComplaintsCount: safe(assignedComplaintsCount),
+      recentNotifications:     recentNotifications.status === 'fulfilled' ? recentNotifications.value : [],
+      // ── Revenue / Platform Analytics → explicitly NOT included ──────────
+      // totalRevenue: BLOCKED
+      // companyAnalytics: BLOCKED
+      // globalOwnerCount: BLOCKED
+      // globalPropertyCount: BLOCKED
+    });
+
+  } catch (err) {
+    console.error('[employee dashboard] error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 // Helper: compute rent totals from already-fetched data (no extra DB queries)
 function sumRent(enquiries, transactions, rentPayments) {

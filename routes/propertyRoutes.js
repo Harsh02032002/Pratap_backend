@@ -8,9 +8,10 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
 const { formLimiter } = require('../middleware/security');
 
-// Get All Properties
-// Made public for dashboard pages that don't send auth token consistently.
-router.get('/', propertyController.getAllProperties);
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
+// Get All Properties (Scoped for employees, public for website)
+router.get('/', applyEmployeeScope, propertyController.getAllProperties);
 
 // Add/Create new property with auto-geocoding
 router.post('/add', protect, formLimiter, auditTrail('properties'), propertyController.addProperty);

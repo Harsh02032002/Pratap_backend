@@ -11,13 +11,17 @@ const {
     getOwnerProperties,
 } = require('../utils/reportDataHelpers');
 
+const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 /**
  * POST /api/reports/generate
  * Generate report data with filters, store in report history
  */
-router.post('/generate', async (req, res) => {
+router.post('/generate', protect, applyEmployeeScope, async (req, res) => {
     try {
         const Report = require('../models/Report');
+        const { applyRentScope, applyTenantScope, applyRoomScope } = require('../utils/scopeHelpers');
         const { ownerLoginId, reportName, category, format, startDate, endDate, propertyId, status, staffId, tenantId } = req.body;
         
         // Build date filter
@@ -35,7 +39,8 @@ router.post('/generate', async (req, res) => {
         // ===== FINANCIAL REPORTS =====
         if (category === 'Financial' || reportName?.includes('Rent') || reportName?.includes('Collection')) {
             const Rent = require('../models/Rent');
-            const filter = { ownerLoginId };
+            let filter = {};
+            if (ownerLoginId) filter.ownerLoginId = ownerLoginId;
             if (propertyId) filter.propertyId = propertyId;
             if (Object.keys(dateFilter).length > 0) filter.createdAt = dateFilter;
             // Status filter — map friendly labels to actual enum values
@@ -45,7 +50,7 @@ router.post('/generate', async (req, res) => {
             }
 
             const Tenant = require('../models/Tenant');
-            const activeTenants = await Tenant.find({ isDeleted: { $ne: true } }).select('_id loginId');
+            const activeTenants = await Tenant.find(applyTenantScope(req, { isDeleted: { $ne: true } })).select('_id loginId');
             const activeTenantIds = activeTenants.map(t => t._id);
             const activeTenantLoginIds = activeTenants.map(t => t.loginId).filter(Boolean);
             filter.$or = [
@@ -53,7 +58,8 @@ router.post('/generate', async (req, res) => {
                 { tenantLoginId: { $in: activeTenantLoginIds } }
             ];
 
-            const rents = await Rent.find(filter).sort({ createdAt: -1 }).limit(500);
+            const scopedFilter = applyRentScope(req, filter);
+            const rents = await Rent.find(scopedFilter).sort({ createdAt: -1 }).limit(500);
             
             const totalCollected = rents.filter(r => r.paymentStatus === 'paid' || r.paymentStatus === 'completed').reduce((sum, r) => sum + (r.rentAmount || r.paidAmount || 0), 0);
             const totalPending = rents.filter(r => r.paymentStatus === 'pending' || r.paymentStatus === 'overdue').reduce((sum, r) => sum + (r.rentAmount || 0), 0);
@@ -525,16 +531,138 @@ router.get('/demand/:ownerLoginId', async (req, res) => {
  * GET /api/reports/superadmin/demand
  * Fetch global property demand stats for superadmin
  */
-const { protect, authorize } = require('../middleware/authMiddleware');
-router.get('/superadmin/demand', protect, authorize('superadmin'), async (req, res) => {
+const { checkModuleAccess, checkNotRestricted } = require('../middleware/employeeScope');
+const { applyPropertyScope, applyVisitScope, applyBookingScope, applyComplaintScope, applyReportScope } = require('../utils/scopeHelpers');
+const { MODULE_KEYS, RESTRICTED_KEYS } = require('../utils/permissionKeys');
+
+/**
+ * GET /api/reports/employee/performance
+ * ────────────────────────────────────────────────────────────────────────
+ * Area-scoped performance report for employees.
+ * Blocks revenue/growth/staff/company reports BEFORE any DB query runs.
+ *
+ * Query param: type = occupancy | leads | visits | complaints | location
+ */
+router.get(
+  '/employee/performance',
+  protect,
+  authorize('superadmin', 'employee', 'manager'),
+  applyEmployeeScope,
+  checkModuleAccess(MODULE_KEYS.REPORT_ANALYTICS),
+  async (req, res) => {
+    try {
+      const { type = 'occupancy' } = req.query;
+
+      // Map report type to its restricted key — return 403 BEFORE any query
+      const typeToRestrictedKey = {
+        revenue:  RESTRICTED_KEYS.RPT_REVENUE,
+        growth:   RESTRICTED_KEYS.RPT_GROWTH,
+        staff:    RESTRICTED_KEYS.RPT_STAFF,
+        company:  RESTRICTED_KEYS.RPT_COMPANY,
+      };
+
+      const restrictedKey = typeToRestrictedKey[type] || null;
+      const geoFilter = applyReportScope(req, res, restrictedKey);
+      if (geoFilter === null) return; // 403 already sent by applyReportScope
+
+      const scope = req.employeeScope;
+      const Property = require('../models/Property');
+      const VisitData = require('../models/VisitData');
+
+      // Allowed employee reports: occupancy, leads, visits, complaints, location
+      if (type === 'occupancy') {
+        const propFilter = applyPropertyScope(req, {});
+        const props = await Property.find(propFilter)
+          .select('title area city bedCount occupiedBeds status')
+          .limit(100)
+          .lean();
+
+        const data = props.map(p => ({
+          property: p.title,
+          area: p.area,
+          city: p.city,
+          totalBeds: p.bedCount || 0,
+          occupiedBeds: p.occupiedBeds || 0,
+          occupancyPct: p.bedCount > 0 ? Math.round((p.occupiedBeds || 0) / p.bedCount * 100) : 0,
+        }));
+
+        return res.json({ success: true, type, data });
+      }
+
+      if (type === 'visits') {
+        const visitFilter = applyVisitScope(req, {});
+        const visits = await VisitData.find(visitFilter)
+          .select('status propertyInfo.name submittedAt area')
+          .sort({ submittedAt: -1 })
+          .limit(200)
+          .lean();
+
+        return res.json({ success: true, type, data: visits });
+      }
+
+      if (type === 'leads') {
+        const Enquiry = require('../models/Enquiry');
+        const assignedIds = (scope?.assignedProperties || []).map(String);
+        const filter = assignedIds.length > 0
+          ? { propertyId: { $in: assignedIds } }
+          : { city: scope?.city || '' };
+
+        const leads = await Enquiry.find(filter)
+          .select('name phone propertyName status createdAt')
+          .sort({ createdAt: -1 })
+          .limit(200)
+          .lean();
+
+        return res.json({ success: true, type, data: leads });
+      }
+
+      if (type === 'complaints') {
+        const Complaint = require('../models/Complaint');
+        const complaintFilter = applyComplaintScope(req, {});
+        const complaints = await Complaint.find(complaintFilter)
+          .select('tenantName propertyName category priority status createdAt')
+          .sort({ createdAt: -1 })
+          .limit(200)
+          .lean();
+
+        return res.json({ success: true, type, data: complaints });
+      }
+
+      if (type === 'location') {
+        const propFilter = applyPropertyScope(req, {});
+        const locData = await Property.aggregate([
+          { $match: propFilter },
+          { $group: {
+            _id: { city: '$city', area: '$area' },
+            propertyCount: { $sum: 1 },
+            totalBeds: { $sum: '$bedCount' },
+            occupiedBeds: { $sum: '$occupiedBeds' },
+          }},
+          { $limit: 50 },
+        ]);
+        return res.json({ success: true, type, data: locData });
+      }
+
+      return res.status(400).json({ success: false, message: `Unknown report type: ${type}` });
+
+    } catch (err) {
+      console.error('[employee report] error:', err.message);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+);
+
+router.get('/superadmin/demand', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
     try {
         const Property = require('../models/Property');
         const Enquiry = require('../models/Enquiry');
         const BookingRequest = require('../models/BookingRequest');
 
-        // Fetch all properties, enquiries, and bookings
+        const propFilter = applyPropertyScope(req, { isDeleted: { $ne: true } });
+
+        // Fetch properties, enquiries, and bookings scoped to employee
         const [properties, enquiries, bookings] = await Promise.all([
-            Property.find({ isDeleted: { $ne: true } }).lean(),
+            Property.find(propFilter).lean(),
             Enquiry.find().lean(),
             BookingRequest.find().lean()
         ]);

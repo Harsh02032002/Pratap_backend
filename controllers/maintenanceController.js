@@ -15,13 +15,24 @@ exports.getOwnerTasks = async (req, res) => {
 
 exports.createTask = async (req, res) => {
     try {
-        const { ownerLoginId, title, frequency, scheduledDate, staff, createdByRole, createdById } = req.body;
+        const {
+            ownerLoginId, title, frequency, scheduledDate, staff,
+            assignedStaffId, assignedStaffName, createdByRole, createdById
+        } = req.body;
+
+        let finalAssignedStaffId = assignedStaffId || null;
+        if (finalAssignedStaffId === '') finalAssignedStaffId = null;
+
+        const finalStaffName = assignedStaffName || staff || 'Unassigned';
+
         const task = new MaintenanceTask({
             ownerLoginId: ownerLoginId ? String(ownerLoginId).toUpperCase() : '',
             title,
             frequency,
             scheduledDate,
-            staff,
+            staff: finalStaffName,
+            assignedStaffId: finalAssignedStaffId,
+            assignedStaffName: assignedStaffName || null,
             status: 'Scheduled',
             createdByRole: createdByRole || 'owner',
             createdById: createdById || (ownerLoginId ? String(ownerLoginId).toUpperCase() : '')
@@ -68,7 +79,7 @@ exports.assignStaff = async (req, res) => {
                 $set: {
                     assignedStaffId: assignedStaffId,
                     assignedStaffName: assignedStaffName,
-                    staff: assignedStaffName, // Keep original string field synced
+                    staff: assignedStaffName || 'Unassigned',
                     updatedAt: new Date()
                 }
             },

@@ -74,9 +74,11 @@ router.post('/', auditTrail('owners'), async (req, res) => {
     }
 });
 
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+
 // 2. List all owners (Updated for Dashboard & Area Manager Filtering)
 // Supports: ?locationCode=KO (prefix match), ?kycStatus=verified, ?search=...
-router.get('/', ownerController.getAllOwners);
+router.get('/', protect, applyEmployeeScope, ownerController.getAllOwners);
 
 // 2b. Request new owner (Employee Action)
 router.post('/request', auditTrail('owners'), ownerController.requestOwner);

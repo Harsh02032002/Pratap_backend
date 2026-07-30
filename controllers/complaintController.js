@@ -242,9 +242,10 @@ exports.assignStaff = async (req, res) => {
 exports.getAllComplaints = async (req, res) => {
     try {
         const { type, ownerLoginId } = req.query;
+        const { applyComplaintScope } = require('../utils/scopeHelpers');
         
-        // If ownerLoginId provided → filter for that owner only
-        const filter = {};
+        // Apply employee scope filter
+        const filter = applyComplaintScope(req, {});
         if (type) filter.type = type;
         if (ownerLoginId) {
             filter.ownerLoginId = { $regex: new RegExp('^' + ownerLoginId + '$', 'i') };
