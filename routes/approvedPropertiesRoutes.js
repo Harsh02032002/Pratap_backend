@@ -596,23 +596,18 @@ router.get('/public/approved', async (req, res) => {
 
 // ============================================================
 
-router.get('/approved/all', async (req, res) => {
-
+router.get('/approved/all', applyEmployeeScope, async (req, res) => {
     try {
-
-        console.log('🔍 [approved-properties/approved/all] Fetching all approved properties...');
-
-
-
-        const properties = await ApprovedProperty.find({
-
-            status: { $in: ['approved', 'live'] }
-
-        }).sort({ approvedAt: -1 });
-
-
+        console.log('🔍 [approved-properties/approved/all] Fetching approved properties...');
+        const filter = applyPropertyScope(req, { status: { $in: ['approved', 'live'] } });
+        const properties = await ApprovedProperty.find(filter).sort({ approvedAt: -1 });
 
         console.log('✅ [approved-properties/approved/all] Found', properties.length, 'approved properties');
+        res.status(200).json({
+            success: true,
+            count: properties.length,
+            properties: properties
+        });
 
 
 

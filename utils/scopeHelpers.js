@@ -232,6 +232,14 @@ function applyPropertyScope(req, baseFilter = {}) {
     orConditions.push({ ownerLoginId: { $in: ownerRegexes } });
   }
 
+  // 4. Properties matching employee's assigned Area/City/Zone
+  if (scope.area || scope.areaCode || scope.city) {
+    const locPattern = new RegExp(`^${String(scope.area || scope.areaCode || scope.city).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+    orConditions.push({ locationCode: locPattern });
+    orConditions.push({ area: locPattern });
+    orConditions.push({ city: locPattern });
+  }
+
   // If employee has NO assigned properties and NO visit properties, block unscoped access
   if (orConditions.length === 0) {
     return { ...baseFilter, _id: { $exists: false } };

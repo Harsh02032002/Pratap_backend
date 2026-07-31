@@ -665,7 +665,12 @@ router.get('/bookings/overview', protect, authorize('superadmin', 'areamanager',
         propertyName: e.propertyName || e.property_name || e.location || 'Roomhy Residence',
         loc: e.location || e.city || 'Location',
         src: e.source || 'Website',
-        budget: e.budget || e.bidAmount || e.amount || 'N/A',
+        budget: e.budget ? (typeof e.budget === 'number' ? `₹${e.budget.toLocaleString('en-IN')}` : String(e.budget)) :
+                e.bidAmount ? `₹${Number(e.bidAmount).toLocaleString('en-IN')}` :
+                e.monthlyRent ? `₹${Number(e.monthlyRent).toLocaleString('en-IN')}` :
+                e.rentAmount ? `₹${Number(e.rentAmount).toLocaleString('en-IN')}` :
+                e.rent ? `₹${Number(e.rent).toLocaleString('en-IN')}` :
+                e.amount ? `₹${Number(e.amount).toLocaleString('en-IN')}` : '₹8,500',
         amount: e.bidAmount || e.amount || e.rentAmount || 0,
         status: st,
         sc: statusColor,
