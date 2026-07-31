@@ -264,6 +264,8 @@ function applyOwnerScope(req, baseFilter = {}) {
 
   const assignedOwnerIds = _toObjectIdArray(scope.assignedOwners);
   const visitOwnerIds = scope.visitOwnerIds || [];
+  const empLoginId = String(scope.loginId || '').trim();
+  const empIdStr = String(scope.employeeId || '').trim();
   const orConditions = [];
 
   if (assignedOwnerIds.length > 0) {
@@ -275,8 +277,26 @@ function applyOwnerScope(req, baseFilter = {}) {
     orConditions.push({ loginId: { $in: ownerRegexes } });
   }
 
+  if (empLoginId) {
+    orConditions.push({ createdByStaffId: new RegExp(`^${empLoginId}$`, 'i') });
+    orConditions.push({ addedByStaffId: new RegExp(`^${empLoginId}$`, 'i') });
+    orConditions.push({ staffId: new RegExp(`^${empLoginId}$`, 'i') });
+  }
+
+  if (empIdStr) {
+    orConditions.push({ createdByStaffId: empIdStr });
+    orConditions.push({ addedByStaffId: empIdStr });
+  }
+
+  if (scope.area || scope.areaCode || scope.city) {
+    const locPattern = new RegExp(`^${scope.area || scope.areaCode || scope.city}`, 'i');
+    orConditions.push({ locationCode: locPattern });
+    orConditions.push({ area: locPattern });
+    orConditions.push({ city: locPattern });
+  }
+
   if (orConditions.length === 0) {
-    return { ...baseFilter, _id: { $exists: false } };
+    return { ...baseFilter, isDeleted: { $ne: true } };
   }
 
   if (baseFilter.$or) {

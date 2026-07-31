@@ -28,7 +28,16 @@ router.patch('/enquiries/:id', enquiryController.updateEnquiry); // update statu
 router.post('/', auditTrail('owners'), async (req, res) => {
     try {
         console.log('📝 Owner POST request:', req.body);
-        const owner = new Owner(req.body);
+        const staffLoginId = req.user?.loginId || req.body.staffId || '';
+        const staffName = req.user?.name || req.body.staffName || '';
+        const ownerData = {
+            ...req.body,
+            createdByStaffId: staffLoginId,
+            createdByStaffName: staffName,
+            addedByStaffId: staffLoginId,
+            addedByStaffName: staffName
+        };
+        const owner = new Owner(ownerData);
         await owner.save();
         console.log('✅ Owner created:', owner.loginId);
 
@@ -738,12 +747,15 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail
 // GET /api/owners/subscription-status?loginId=OWN001
 router.get('/subscription-status', async (req, res) => {
   try {
-    const loginId = String(req.query.loginId || '').trim().toUpperCase();
+    const loginId = String(req.query.loginId || '').trim();
     if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
 
     const SystemSettings = require('../models/SystemSettings');
     const [owner, settings] = await Promise.all([
-      Owner.findOne({ loginId, isDeleted: { $ne: true } })
+      Owner.findOne({
+        loginId: { $regex: new RegExp(`^${loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+        isDeleted: { $ne: true }
+      })
         .select('loginId name createdAt subscription')
         .lean(),
       SystemSettings.findOne().lean()
@@ -751,7 +763,7 @@ router.get('/subscription-status', async (req, res) => {
 
     if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
-    const trialDays = settings?.ownerTrialDays ?? null;
+    const trialDays = settings?.ownerTrialDays ?? 1;
     const price = settings?.ownerSubscriptionPrice ?? null;
     const currency = settings?.ownerSubscriptionCurrency || 'INR';
 

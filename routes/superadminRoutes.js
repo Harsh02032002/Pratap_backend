@@ -746,31 +746,38 @@ router.get('/bookings/overview', protect, authorize('superadmin', 'areamanager',
     // 7. Top Locations
     const locationCounts = {};
     enquiries.forEach(e => {
-      const loc = e.location || 'Multiple Locations';
-      if (!locationCounts[loc]) {
-        locationCounts[loc] = { leads: 0, bookings: 0 };
+      let loc = (e.location || e.city || e.area || '').trim();
+      if (!loc || loc.toLowerCase() === 'multiple locations' || loc.toLowerCase() === 'unknown, unknown' || loc.toLowerCase() === 'n/a') {
+        loc = 'Chandigarh';
       }
-      locationCounts[loc].leads += 1;
+      if (!locationCounts[loc]) {
+        locationCounts[loc] = { enquiries: 0, bookings: 0 };
+      }
+      locationCounts[loc].enquiries += 1;
     });
 
     bookingsList.forEach(b => {
-      const loc = b.city || 'Multiple Locations';
+      let loc = (b.city || b.area || b.location || '').trim();
+      if (!loc || loc.toLowerCase() === 'multiple locations' || loc.toLowerCase() === 'unknown, unknown' || loc.toLowerCase() === 'n/a') {
+        loc = 'Chandigarh';
+      }
       if (!locationCounts[loc]) {
-        locationCounts[loc] = { leads: 0, bookings: 0 };
+        locationCounts[loc] = { enquiries: 0, bookings: 0 };
       }
       locationCounts[loc].bookings += 1;
     });
 
     const topLocations = Object.keys(locationCounts).map(loc => {
-      const leads = locationCounts[loc].leads;
-      const bookings = locationCounts[loc].bookings;
-      const rate = leads > 0 ? ((bookings / leads) * 100).toFixed(2) + '%' : '0.00%';
+      const enqCount = locationCounts[loc].enquiries;
+      const bkCount = locationCounts[loc].bookings;
+      const totalLocLeads = enqCount + bkCount;
+      const convPct = totalLocLeads > 0 ? Math.min(100, Number(((bkCount / totalLocLeads) * 100).toFixed(2))) : 0;
       return {
         loc,
-        leads,
-        bookings,
-        rate,
-        w: leads > 0 ? Math.min(Math.round((bookings/leads)*100), 100) + '%' : '0%'
+        leads: totalLocLeads,
+        bookings: bkCount,
+        rate: `${convPct.toFixed(2)}%`,
+        w: `${convPct.toFixed(0)}%`
       };
     }).sort((a,b) => b.leads - a.leads).slice(0, 5);
 

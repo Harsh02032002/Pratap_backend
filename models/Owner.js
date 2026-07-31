@@ -173,6 +173,11 @@ const ownerSchema = new mongoose.Schema({
         extensionNote: { type: String }, // reason for extension
         lastExtendedAt: { type: Date }
     },
+    createdByStaffId: { type: String },
+    createdByStaffName: { type: String },
+    addedByStaffId: { type: String },
+    addedByStaffName: { type: String },
+    staffId: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
 
