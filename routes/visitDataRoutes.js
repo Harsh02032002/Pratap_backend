@@ -128,7 +128,7 @@ async function resolveRequestUser(req) {
 // ============================================================
 // POST: Save visit data (used by visit.html)
 // ============================================================
-router.post('/', async (req, res) => {
+router.post('/', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const visitData = req.body;
         console.log('?? [visits/POST] Received data visitId:', visitData._id || visitData.visitId);
@@ -216,7 +216,7 @@ router.post('/', async (req, res) => {
 // Used by Area Manager / Employee dashboard
 // Supports optional ?staffId / ?staffName parameters to filter by staff
 // ============================================================
-router.get('/', async (req, res) => {
+router.get('/', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const requester = await resolveRequestUser(req);
         const requestedStaffId = String(req.query.staffId || '').trim();
@@ -338,7 +338,7 @@ router.get('/', async (req, res) => {
 // ============================================================
 // GET: Pending visits (for superadmin enquiry)
 // ============================================================
-router.get('/pending', async (req, res) => {
+router.get('/pending', protect, authorize('superadmin'), async (req, res) => {
     try {
         const visits = await VisitData.find({
             status: { $in: ['submitted', 'pending_review'] }
@@ -380,7 +380,7 @@ router.get('/pending', async (req, res) => {
 // ============================================================
 // POST: Approve a visit
 // ============================================================
-router.post('/approve', async (req, res) => {
+router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { visitId, status, isLiveOnWebsite, loginId, tempPassword } = req.body;
         console.log('?? [visits/approve] Received request:', { visitId, status, isLiveOnWebsite });
@@ -730,7 +730,7 @@ router.post('/approve', async (req, res) => {
 // ============================================================
 // POST: Hold a visit
 // ============================================================
-router.post('/hold', async (req, res) => {
+router.post('/hold', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { visitId, holdReason, holdAction } = req.body;
 
@@ -781,7 +781,7 @@ router.post('/hold', async (req, res) => {
 // POST: Submit a new visit
 // Supports both old (Area Manager) and new (clean form) formats
 // ============================================================
-router.post('/submit', async (req, res) => {
+router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         let {
             visitorName,
@@ -1008,7 +1008,7 @@ router.get('/approved', protect, authorize('superadmin'), async (req, res) => {
 // POST: Send KYC link to property owner's email
 // Generates credentials, creates Owner record, sends digital-checkin link
 // ============================================================
-router.post('/:visitId/send-kyc-link', async (req, res) => {
+router.post('/:visitId/send-kyc-link', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const visit = await VisitData.findOne({ visitId: req.params.visitId });
         if (!visit) {
@@ -1211,7 +1211,7 @@ router.delete('/:visitId', async (req, res) => {
 // ============================================================
 // POST: Reject a visit with explicit reason and next action
 // ============================================================
-router.post('/reject', async (req, res) => {
+router.post('/reject', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { visitId, rejectReason, rejectAction } = req.body;
 
@@ -1260,7 +1260,7 @@ router.post('/reject', async (req, res) => {
 // ============================================================
 // PUT: Update visit status
 // ============================================================
-router.put('/:visitId/status', async (req, res) => {
+router.put('/:visitId/status', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { status } = req.body;
         
@@ -1302,7 +1302,7 @@ router.put('/:visitId/status', async (req, res) => {
 // ============================================================
 // PUT: Update full visit details (moved after status route to avoid interception)
 // ============================================================
-router.put('/:visitId', async (req, res) => {
+router.put('/:visitId', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const {
             propertyName,
@@ -1454,7 +1454,7 @@ router.put('/:visitId', async (req, res) => {
 // ============================================================
 // POST: Approve a visit (from enquiry.html)
 // ============================================================
-router.post('/:visitId/approve', async (req, res) => {
+router.post('/:visitId/approve', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { approvalNotes, approvedBy } = req.body;
         
@@ -1530,7 +1530,7 @@ router.post('/:visitId/approve', async (req, res) => {
 // ============================================================
 // POST: Reject a visit
 // ============================================================
-router.post('/:visitId/reject', async (req, res) => {
+router.post('/:visitId/reject', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const { approvalNotes, approvedBy } = req.body;
         

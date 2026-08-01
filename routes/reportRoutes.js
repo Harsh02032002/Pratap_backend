@@ -18,7 +18,7 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
  * POST /api/reports/generate
  * Generate report data with filters, store in report history
  */
-router.post('/generate', protect, applyEmployeeScope, async (req, res) => {
+router.post('/generate', protect, authorize('superadmin'), applyEmployeeScope, async (req, res) => {
     try {
         const Report = require('../models/Report');
         const { applyRentScope, applyTenantScope, applyRoomScope } = require('../utils/scopeHelpers');

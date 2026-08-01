@@ -733,18 +733,43 @@ exports.login = async (req, res) => {
         
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
         
-        // Build comprehensive query based on identifier
-        let query = {
-            $or: [
-                { email: normalizedIdentifier.toLowerCase() },
-                { loginId: normalizedIdentifier.toUpperCase() },
-                { loginId: normalizedIdentifier.toLowerCase() },
-                { loginId: normalizedIdentifier },
-                { phone: normalizedIdentifier }
-            ]
-        };
+        // Build comprehensive query based on identifier - use precise matching to avoid wrong user login
+        let user = null;
         
-        let user = await User.findOne(query);
+        console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone}, isLoginId: ${isLoginId}`);
+        
+        if (isEmail) {
+            // If identifier is email, only search by email
+            user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+            console.log(`[LOGIN DEBUG] Email search result:`, user ? { loginId: user.loginId, role: user.role, email: user.email } : 'No user found');
+        } else if (isPhone) {
+            // If identifier is phone, only search by phone
+            user = await User.findOne({ phone: normalizedIdentifier });
+            console.log(`[LOGIN DEBUG] Phone search result:`, user ? { loginId: user.loginId, role: user.role, phone: user.phone } : 'No user found');
+        } else if (isLoginId) {
+            // If identifier looks like loginId, only search by loginId
+            user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
+            if (!user) {
+                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            }
+            if (!user) {
+                user = await User.findOne({ loginId: normalizedIdentifier });
+            }
+            console.log(`[LOGIN DEBUG] LoginId search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
+        } else {
+            // Fallback: try all fields but prioritize exact matches
+            user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
+            if (!user) {
+                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            }
+            if (!user) {
+                user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+            }
+            if (!user) {
+                user = await User.findOne({ phone: normalizedIdentifier });
+            }
+            console.log(`[LOGIN DEBUG] Fallback search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
+        }
 
         // Fallback: If not in User collection, check KYCVerification (website signups)
         if (!user) {

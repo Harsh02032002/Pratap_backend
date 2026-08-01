@@ -10,7 +10,7 @@ const TenantSchema = new mongoose.Schema({
     guardianNumber: { type: String },
     
     // Reference to assigned property & room
-    property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
+    property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' },
     room: { type: mongoose.Schema.Types.ObjectId, ref: 'Room' },
     roomNo: { type: String }, // Store room number for quick reference
     building: { type: String },
