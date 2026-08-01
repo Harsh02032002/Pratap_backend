@@ -956,7 +956,12 @@ exports.login = async (req, res) => {
             }
         }
 
-        if (user && ['employee', 'areamanager', 'manager', 'staff'].includes(user.role)) {
+        // Guard: if no user found or password didn't match, return 401
+        if (!user || !isMatch) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        if (['employee', 'areamanager', 'manager', 'staff'].includes(user.role)) {
             try {
                 const empRecord = await Employee.findOne({
                     $or: [

@@ -246,13 +246,11 @@ exports.rejectVisit = async (req, res) => {
 exports.getStats = async (req, res) => {
     try {
         const areaCode = req.query.areaCode;
-        const { applyPropertyScope, applyOwnerScope, applyVisitScope, applyTenantScope, applyBookingScope } = require('../utils/scopeHelpers');
-        const { employeeBlocksRevenue } = require('../utils/scopeHelpers');
 
-        const propFilter = applyPropertyScope(req, {});
-        const ownerFilter = applyOwnerScope(req, {});
-        const visitFilter = applyVisitScope(req, {});
-        const tenantFilter = applyTenantScope(req, {});
+        const propFilter = {};
+        const ownerFilter = {};
+        const visitFilter = {};
+        const tenantFilter = {};
 
         if (areaCode) {
             propFilter.locationCode = { $regex: `^${areaCode}`, $options: 'i' };
@@ -267,19 +265,14 @@ exports.getStats = async (req, res) => {
         const pendingOwners = await Owner.countDocuments({ 'kyc.status': 'pending', ...ownerFilter });
         const activeTenants = await require('../models/Tenant').countDocuments(tenantFilter);
         const enquiryCount = await VisitReport.countDocuments(visitFilter);
+        const totalBookings = await BookingRequest.countDocuments();
         
-        const bookingFilter = applyBookingScope(req, {});
-        const totalBookings = await BookingRequest.countDocuments(bookingFilter);
-        
-        // Calculate Revenue from confirmed/paid bookings - HIDE for employees
-        let totalRevenue = 0;
-        if (!employeeBlocksRevenue(req)) {
-            const revenueAggregate = await BookingRequest.aggregate([
-                { $match: { ...bookingFilter, status: 'confirmed' } },
-                { $group: { _id: null, total: { $sum: '$amount' } } }
-            ]);
-            totalRevenue = revenueAggregate[0]?.total || 0;
-        }
+        // Calculate Revenue from confirmed/paid bookings
+        const revenueAggregate = await BookingRequest.aggregate([
+            { $match: { status: 'confirmed' } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const totalRevenue = revenueAggregate[0]?.total || 0;
 
         // Area-wise breakdown (simple aggregation)
         const areaAggregation = await Property.aggregate([
@@ -287,7 +280,7 @@ exports.getStats = async (req, res) => {
             { $group: { _id: '$locationCode', properties: { $sum: 1 } } }
         ]);
 
-        const response = {
+        res.json({
             totalProperties,
             pendingApprovals,
             activeOwners,
@@ -295,15 +288,9 @@ exports.getStats = async (req, res) => {
             activeTenants,
             enquiryCount,
             totalBookings,
+            totalRevenue,
             areaAggregation
-        };
-
-        // Only include revenue for non-employees
-        if (!employeeBlocksRevenue(req)) {
-            response.totalRevenue = totalRevenue;
-        }
-
-        res.json(response);
+        });
     } catch (err) {
         console.error('Stats Error:', err);
         res.status(500).json({ success: false, message: err.message });

@@ -787,9 +787,7 @@ exports.getBookingRequests = async (req, res) => {
  */
 exports.getBookingRequestById = async (req, res) => {
     try {
-        const { applyBookingScope } = require('../utils/scopeHelpers');
-        const filter = applyBookingScope(req, { _id: req.params.id });
-        const request = await BookingRequest.findOne(filter);
+        const request = await BookingRequest.findById(req.params.id);
 
         if (!request) {
             return res.status(404).json({ 
@@ -839,8 +837,7 @@ exports.getUserBookings = async (req, res) => {
             emailFromQuery: emailFromQuery || null
         });
 
-        const { applyBookingScope } = require('../utils/scopeHelpers');
-        const baseFilter = {
+        const bookings = await BookingRequest.find({
             $and: [
                 {
                     $or: [
@@ -856,9 +853,7 @@ exports.getUserBookings = async (req, res) => {
                     ]
                 }
             ]
-        };
-        const scopedFilter = applyBookingScope(req, baseFilter);
-        const bookings = await BookingRequest.find(scopedFilter).sort({ createdAt: -1, created_at: -1 });
+        }).sort({ createdAt: -1, created_at: -1 });
 
         console.log(`Found ${bookings.length} bookings for user ${normalizedUserId}`);
 

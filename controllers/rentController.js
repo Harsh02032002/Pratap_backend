@@ -182,7 +182,6 @@ exports.getRentsByOwner = async (req, res) => {
   try {
     let { ownerLoginId } = req.params;
     const { month, status } = req.query;
-    const { applyRentScope, applyOwnerScope, applyTenantScope } = require("../utils/scopeHelpers");
 
     // If /owner/me, use authenticated user's loginId
     if (ownerLoginId === 'me' || !ownerLoginId) {
@@ -192,18 +191,14 @@ exports.getRentsByOwner = async (req, res) => {
       }
     }
 
-    // Apply owner scope to ensure employee can only see assigned owners
-    const ownerFilter = applyOwnerScope(req, { ownerLoginId });
-    let query = { ...ownerFilter };
+    let query = { ownerLoginId };
     if (month) query.collectionMonth = month;
     if (status) query.paymentStatus = status;
 
-    // Apply tenant scope to active tenants query
-    const tenantFilter = applyTenantScope(req, {
+    const activeTenants = await Tenant.find({
       isDeleted: { $ne: true },
       status: { $nin: ["inactive", "suspended"] },
-    });
-    const activeTenants = await Tenant.find(tenantFilter).select("_id loginId");
+    }).select("_id loginId");
     const activeTenantIds = activeTenants.map((t) => t._id);
     const activeTenantLoginIds = activeTenants
       .map((t) => t.loginId)
@@ -214,9 +209,7 @@ exports.getRentsByOwner = async (req, res) => {
       { tenantLoginId: { $in: activeTenantLoginIds } },
     ];
 
-    // Apply rent scope to final query
-    const scopedQuery = applyRentScope(req, query);
-    const rents = await Rent.find(scopedQuery)
+    const rents = await Rent.find(query)
       .sort({ updatedAt: -1 })
       .populate("tenantId", "name email phone")
       .populate("propertyId", "title");
@@ -245,34 +238,30 @@ exports.getRentsByOwner = async (req, res) => {
 // Get all rents (superadmin / employee scoped view)
 exports.getAllRents = async (req, res) => {
   try {
-    const { applyRentScope, applyTenantScope } = require("../utils/scopeHelpers");
+    const { applyBookingScope } = require("../utils/scopeHelpers");
     const { month, status, ownerLoginId, paymentStatus } = req.query;
-    let baseQuery = {};
+    let query = applyBookingScope(req, {});
 
-    if (month) baseQuery.collectionMonth = month;
-    if (status) baseQuery.paymentStatus = status;
-    if (ownerLoginId) baseQuery.ownerLoginId = ownerLoginId;
-    if (paymentStatus) baseQuery.paymentStatus = paymentStatus;
+    if (month) query.collectionMonth = month;
+    if (status) query.paymentStatus = status;
+    if (ownerLoginId) query.ownerLoginId = ownerLoginId;
+    if (paymentStatus) query.paymentStatus = paymentStatus;
 
-    // Apply tenant scope to active tenants query
-    const tenantFilter = applyTenantScope(req, {
+    const activeTenants = await Tenant.find({
       isDeleted: { $ne: true },
       status: { $nin: ["inactive", "suspended"] },
-    });
-    const activeTenants = await Tenant.find(tenantFilter).select("_id loginId");
+    }).select("_id loginId");
     const activeTenantIds = activeTenants.map((t) => t._id);
     const activeTenantLoginIds = activeTenants
       .map((t) => t.loginId)
       .filter(Boolean);
 
-    baseQuery.$or = [
+    query.$or = [
       { tenantId: { $in: activeTenantIds } },
       { tenantLoginId: { $in: activeTenantLoginIds } },
     ];
 
-    const finalQuery = applyRentScope(req, baseQuery);
-
-    const rents = await Rent.find(finalQuery)
+    const rents = await Rent.find(query)
       .sort({ createdAt: -1 })
       .populate("tenantId", "name email phone")
       .populate("propertyId", "title");
@@ -280,7 +269,7 @@ exports.getAllRents = async (req, res) => {
     res.json({ success: true, rents });
   } catch (err) {
     console.error("Get all rents error:", err);
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({ error: err.message });
   }
 };
 

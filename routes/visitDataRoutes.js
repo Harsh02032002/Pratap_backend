@@ -8,6 +8,7 @@ const CheckinRecord = require('../models/CheckinRecord');
 const Property = require('../models/Property');
 const mailer = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
+const { protect, authorize } = require('../middleware/authMiddleware');
 const VISITS_QUERY_TIMEOUT_MS = 12000;
 const VISITS_CACHE_TTL_MS = 10000;
 const visitsListCache = new Map();
@@ -959,9 +960,9 @@ router.post('/submit', async (req, res) => {
 });
 
 // ============================================================
-// GET: Get all visits
+// GET: Get all visits - Superadmin only
 // ============================================================
-router.get('/all', async (req, res) => {
+router.get('/all', protect, authorize('superadmin'), async (req, res) => {
     try {
         const visits = await VisitData.find({}).sort({ submittedAt: -1 });
         res.json({
@@ -980,13 +981,11 @@ router.get('/all', async (req, res) => {
 });
 
 // ============================================================
-// GET: Get approved visits
+// GET: Get approved visits - Superadmin only
 // ============================================================
-// GET: Get approved visits (for public display on ourproperty.html)
-// ============================================================
-router.get('/public/approved', async (req, res) => {
+router.get('/approved', protect, authorize('superadmin'), async (req, res) => {
     try {
-        const visits = await VisitData.find({ 
+        const visits = await VisitData.find({
             status: 'approved'
         }).sort({ submittedAt: -1 });
         res.json({
@@ -994,27 +993,6 @@ router.get('/public/approved', async (req, res) => {
             count: visits.length,
             visits: visits,
             properties: visits  // Alias for compatibility
-        });
-    } catch (error) {
-        console.error('Error fetching public approved visits:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching approved visits',
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-router.get('/approved', async (req, res) => {
-    try {
-        const visits = await VisitData.find({ 
-            status: 'approved'
-        }).sort({ submittedAt: -1 });
-        res.json({
-            success: true,
-            count: visits.length,
-            visits: visits
         });
     } catch (error) {
         console.error('Error fetching approved visits:', error);

@@ -6,7 +6,7 @@ const { authLimiter, otpLimiter, authIpLimiter, otpIpLimiter, captchaProtection 
 
 // router.use(authLimiter); // Removed global auth limiter as it affects /me and other routes
 
-router.post('/login', authIpLimiter, authLimiter, authController.login);
+router.post('/login', authController.login);
 
 router.get('/debug-emp', async (req, res) => {
     try {

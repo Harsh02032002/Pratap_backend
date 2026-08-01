@@ -2072,16 +2072,14 @@ router.get('/reports/overview', protect, authorize('superadmin'), async (req, re
 router.get('/support/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
-    const { applySupportScope } = require('../utils/scopeHelpers');
-    const filter = applySupportScope(req, {});
     const [total, open, resolved, overdue] = await Promise.all([
-      SupportTicket.countDocuments(filter),
-      SupportTicket.countDocuments({ ...filter, status: { $in: ['Open', 'Assigned', 'In Progress'] } }),
-      SupportTicket.countDocuments({ ...filter, status: { $in: ['Resolved', 'Closed'] } }),
-      SupportTicket.countDocuments({ ...filter, sla_breached: true, status: { $nin: ['Resolved', 'Closed'] } })
+      SupportTicket.countDocuments(),
+      SupportTicket.countDocuments({ status: { $in: ['Open', 'Assigned', 'In Progress'] } }),
+      SupportTicket.countDocuments({ status: { $in: ['Resolved', 'Closed'] } }),
+      SupportTicket.countDocuments({ sla_breached: true, status: { $nin: ['Resolved', 'Closed'] } })
     ]);
 
-    const resolvedTickets = await SupportTicket.find({ ...filter, status: { $in: ['Resolved', 'Closed'] } }).lean();
+    const resolvedTickets = await SupportTicket.find({ status: { $in: ['Resolved', 'Closed'] } }).lean();
     let avgTime = 'No Data Available';
     if (resolvedTickets.length > 0) {
       let totalMs = 0;
@@ -2110,8 +2108,7 @@ router.get('/support/overview', protect, authorize('superadmin', 'areamanager', 
 router.get('/support/tickets', protect, authorize('superadmin', 'areamanager', 'employee', 'manager', 'owner'), applyEmployeeScope, async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
-    const { applySupportScope } = require('../utils/scopeHelpers');
-    let query = applySupportScope(req, {});
+    let query = {};
     if (req.user.role === 'owner') {
       query.raised_by = req.user.loginId || String(req.user._id);
     }

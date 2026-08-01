@@ -781,10 +781,9 @@ exports.getTenantsByOwner = async (req, res) => {
     try {
         const { ownerId } = req.params;
         const normalizedId = String(ownerId).toUpperCase();
-        const { applyTenantScope, applyPropertyScope } = require('../utils/scopeHelpers');
 
         // Resolve legacy property IDs (older records link via Property, not ownerLoginId)
-        let propQuery = applyPropertyScope(req, {});
+        let propQuery = {};
         if (require('mongoose').Types.ObjectId.isValid(ownerId)) {
             propQuery.owner = ownerId;
         } else {
@@ -795,15 +794,13 @@ exports.getTenantsByOwner = async (req, res) => {
 
         // Single query covering both direct (ownerLoginId) and legacy (property-linked)
         // tenants via $or, instead of two separate Tenant.find()+populate() round trips.
-        const baseFilter = {
+        const allTenants = await Tenant.find({
             isDeleted: { $ne: true },
             $or: [
                 { ownerLoginId: normalizedId },
                 ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : [])
             ]
-        };
-        const filter = applyTenantScope(req, baseFilter);
-        const allTenants = await Tenant.find(filter)
+        })
             .select(ALWAYS_EXCLUDED_PROJECTION)
             .populate('property', 'title roomType locationCode owner ownerLoginId')
             .populate('user', 'name email phone')
