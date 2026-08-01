@@ -1003,12 +1003,10 @@ router.get('/approved', protect, authorize('superadmin'), async (req, res) => {
         });
     }
 });
-
-// ============================================================
 // POST: Send KYC link to property owner's email
 // Generates credentials, creates Owner record, sends digital-checkin link
 // ============================================================
-router.post('/:visitId/send-kyc-link', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
+router.post('/:visitId/send-kyc-link', async (req, res) => {
     try {
         const visit = await VisitData.findOne({ visitId: req.params.visitId });
         if (!visit) {

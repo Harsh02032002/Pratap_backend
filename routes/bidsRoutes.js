@@ -15,8 +15,11 @@ router.post('/fast-bid', async (req, res) => {
     try {
         const { name, email, userId, gender, city, area, minPrice, maxPrice, propertyIds } = req.body;
 
+        console.log('[FAST BID] Received bid request:', { name, email, userId, gender, city, area, minPrice, maxPrice, propertyIds });
+
         if (!name || !email || !userId || !gender || !city || !area || !propertyIds || propertyIds.length === 0) {
-            return res.status(400).json({ error: 'Missing required fields' });
+            console.log('[FAST BID] Missing required fields');
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
         }
 
         // Store fast bid record
@@ -37,16 +40,16 @@ router.post('/fast-bid', async (req, res) => {
         };
 
         // Here you would save to database and send notifications to property owners
-        console.log('Fast Bid Received:', bidRecord);
+        console.log('[FAST BID] Bid processed successfully:', bidRecord);
 
         res.status(201).json({
             success: true,
-            message: `Bid sent to ${propertyIds.length} properties`,
+            message: `Bid sent successfully to ${propertyIds.length} properties`,
             bidData: bidRecord
         });
     } catch (error) {
-        console.error('Error processing fast bid:', error);
-        res.status(500).json({ error: 'Error processing bid' });
+        console.error('[FAST BID] Error processing fast bid:', error);
+        res.status(500).json({ success: false, error: 'Error processing bid' });
     }
 });
 
