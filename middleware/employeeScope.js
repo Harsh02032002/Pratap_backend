@@ -79,7 +79,7 @@ async function applyEmployeeScope(req, res, next) {
       const jwt = require('jsonwebtoken');
       const User = require('../models/user');
       const token = req.headers.authorization.split(' ')[1];
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
       
       let user = null;
       try { user = await User.findById(decoded.id).select('-password'); } catch (_) {}

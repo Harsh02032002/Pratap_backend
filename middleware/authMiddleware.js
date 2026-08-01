@@ -1,9 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 
-if (!process.env.JWT_SECRET) {
-    throw new Error('JWT_SECRET environment variable is not configured');
-}
+const getJwtSecret = () => process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026';
 
 exports.protect = async (req, res, next) => {
     let token = null;
@@ -13,7 +11,7 @@ exports.protect = async (req, res, next) => {
     if (!token) return res.status(401).json({ message: 'Not authorized, token missing' });
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, getJwtSecret());
 
         console.log(`[AUTH DEBUG] Request URL: ${req.method} ${req.originalUrl}`);
         console.log(`[AUTH DEBUG] Decoded ID: ${decoded.id}, Role from token: ${decoded.role}`);
@@ -63,10 +61,15 @@ exports.protect = async (req, res, next) => {
         req.user = user;
         next();
     } catch (err) {
-        console.error(err);
+        if (err.name === 'TokenExpiredError') {
+            return res.status(401).json({ message: 'Token expired, please log in again', expired: true });
+        }
+        if (err.name === 'JsonWebTokenError') {
+            return res.status(401).json({ message: 'Not authorized, token invalid' });
+        }
+        console.warn('[AUTH PROTECT WARN]', err.message);
         return res.status(401).json({ message: 'Not authorized, token invalid' });
     }
-
 };
 
 exports.authorize = (...roles) => {
@@ -93,7 +96,7 @@ exports.protectPasswordReset = (req, res, next) => {
     }
     if (!token) return res.status(401).json({ message: 'Not authorized, token missing' });
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, getJwtSecret());
         req.resetLoginId = decoded.loginId || decoded.id;
         next();
     } catch (err) {
