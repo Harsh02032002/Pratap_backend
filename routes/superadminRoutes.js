@@ -443,61 +443,155 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
   try {
     const Rent = require('../models/Rent');
     const PaymentTransaction = require('../models/PaymentTransaction');
+    const RentInvoice = require('../models/RentInvoice');
+    const RentPayment = require('../models/RentPayment');
+    const Tenant = require('../models/Tenant');
+    const Owner = require('../models/Owner');
 
-    // 1. Get transactions & calculate stats
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    // 1. Fetch raw data in parallel
+    const [rawTxs, rawRents, rawInvoices, rawRentPayments] = await Promise.all([
+      PaymentTransaction.find({ status: { $ne: 'Failed' } }).sort({ payment_date: -1 }).lean(),
+      Rent.find({}).lean(),
+      RentInvoice.find({}).lean(),
+      RentPayment.find({}).lean()
+    ]);
+
+    // 2. Unify all paid transactions (Collections & Payouts)
     let totalCollection = 0;
     let revenue = 0;
     let completedPayout = 0;
     let pendingPayout = 0;
 
-    txs.forEach(t => {
-      totalCollection += (t.booking_amount || 0);
-      revenue += (t.commission_amount || 0);
-      if (t.payout_status === 'Paid') {
-        completedPayout += (t.owner_amount || 0);
+    const unifiedTxs = [];
+
+    // Process PaymentTransaction
+    rawTxs.forEach(t => {
+      const collectionAmt = t.booking_amount || 0;
+      const commAmt = t.commission_amount || Math.round(collectionAmt * 0.10);
+      const ownerAmt = t.owner_amount || Math.round(collectionAmt * 0.90);
+      const isPaidOut = t.payout_status === 'Paid';
+
+      totalCollection += collectionAmt;
+      revenue += commAmt;
+      if (isPaidOut) {
+        completedPayout += ownerAmt;
       } else {
-        pendingPayout += (t.owner_amount || 0);
+        pendingPayout += ownerAmt;
+      }
+
+      unifiedTxs.push({
+        date: t.payment_date || t.created_at || new Date(),
+        desc: isPaidOut ? `Owner Payout - ${t.owner_name || 'Owner'}` : `Rent Collection - ${t.tenant_name || t.property_name || 'Tenant'}`,
+        type: isPaidOut ? 'Owner Payout' : 'Tenant Payment',
+        amount: isPaidOut ? `- ₹ ${ownerAmt.toLocaleString('en-IN')}` : `+ ₹ ${collectionAmt.toLocaleString('en-IN')}`,
+        status: isPaidOut ? 'Processed' : 'Success',
+        color: isPaidOut ? 'blue' : 'green',
+        rawCollection: collectionAmt,
+        rawPayout: isPaidOut ? ownerAmt : 0
+      });
+    });
+
+    // Process Rent paid (avoiding double count if paymentMethod === 'razorpay')
+    rawRents.forEach(r => {
+      if (r.paymentMethod === 'razorpay') return;
+      const paid = r.paidAmount || (['paid', 'completed'].includes(r.paymentStatus) ? (r.rentAmount || r.totalAmount || 0) : 0);
+      if (paid > 0) {
+        const comm = Math.round(paid * 0.10);
+        const ownerShare = Math.round(paid * 0.90);
+
+        totalCollection += paid;
+        revenue += comm;
+        completedPayout += ownerShare;
+
+        unifiedTxs.push({
+          date: r.paymentDate || r.updatedAt || r.createdAt || new Date(),
+          desc: `Rent Collection - ${r.tenantName || r.tenantLoginId || 'Tenant'}`,
+          type: 'Rent Collection',
+          amount: `+ ₹ ${paid.toLocaleString('en-IN')}`,
+          status: 'Success',
+          color: 'green',
+          rawCollection: paid,
+          rawPayout: ownerShare
+        });
       }
     });
 
-    // 2. Unpaid rents & due rent aging (active tenants only)
-    const Tenant = require('../models/Tenant');
-    const activeTenants = await Tenant.find({
-      isDeleted: { $ne: true },
-      status: { $nin: ['inactive', 'suspended'] }
-    }).select('_id loginId').lean();
-    const activeTenantIds = activeTenants.map(t => t._id);
-    const activeTenantLoginIds = activeTenants.map(t => t.loginId).filter(Boolean);
+    // Process RentInvoices paid
+    rawInvoices.forEach(inv => {
+      if (inv.paymentMethod === 'razorpay') return;
+      const paid = inv.paidAmount || (['PAID'].includes(inv.status) ? (inv.rentAmount || inv.totalAmount || 0) : 0);
+      if (paid > 0) {
+        const comm = Math.round(paid * 0.10);
+        const ownerShare = Math.round(paid * 0.90);
 
-    const unpaidRents = await Rent.find({
-      paymentStatus: { $nin: ['paid', 'completed'] },
-      $or: [
-        { tenantId: { $in: activeTenantIds } },
-        { tenantLoginId: { $in: activeTenantLoginIds } }
-      ]
-    }).lean();
+        totalCollection += paid;
+        revenue += comm;
+        completedPayout += ownerShare;
+
+        unifiedTxs.push({
+          date: inv.paymentDate || inv.updatedAt || inv.createdAt || new Date(),
+          desc: `Invoice Collection - ${inv.tenantName || inv.invoiceNumber || 'Tenant'}`,
+          type: 'Invoice Collection',
+          amount: `+ ₹ ${paid.toLocaleString('en-IN')}`,
+          status: 'Success',
+          color: 'green',
+          rawCollection: paid,
+          rawPayout: ownerShare
+        });
+      }
+    });
+
+    // Sort unifiedTxs by date descending
+    unifiedTxs.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // 3. Calculate Due Rent & Due Aging (All unpaid Rents + RentInvoices)
     let dueRent = 0;
     let age30 = 0;
     let age60 = 0;
     let age90 = 0;
     let age90Plus = 0;
-
+    let overdueCount = 0;
     const now = new Date();
-    unpaidRents.forEach(r => {
-      const due = (r.totalDue || r.rentAmount || 0) - (r.paidAmount || 0);
-      if (due > 0) {
-        dueRent += due;
-        const createdDate = r.createdAt || r.updatedAt || now;
-        const diffDays = Math.floor((now - new Date(createdDate)) / (1000 * 60 * 60 * 24));
-        if (diffDays <= 30) age30 += due;
-        else if (diffDays <= 60) age60 += due;
-        else if (diffDays <= 90) age90 += due;
-        else age90Plus += due;
+
+    // From Rent records
+    rawRents.forEach(r => {
+      if (!['paid', 'completed'].includes(r.paymentStatus)) {
+        const total = r.totalDue || r.rentAmount || r.totalAmount || 0;
+        const paid = r.paidAmount || 0;
+        const due = Math.max(0, total - paid);
+        if (due > 0) {
+          dueRent += due;
+          overdueCount++;
+          const dateRef = r.dueDate || r.createdAt || r.updatedAt || now;
+          const diffDays = Math.floor((now - new Date(dateRef)) / (1000 * 60 * 60 * 24));
+          if (diffDays <= 30) age30 += due;
+          else if (diffDays <= 60) age60 += due;
+          else if (diffDays <= 90) age90 += due;
+          else age90Plus += due;
+        }
       }
     });
 
-    // 3. Trends (payout vs collection) for past 5 months
+    // From RentInvoice records
+    rawInvoices.forEach(inv => {
+      if (!['PAID', 'CANCELLED'].includes(inv.status)) {
+        const total = inv.totalAmount || inv.rentAmount || 0;
+        const paid = inv.paidAmount || 0;
+        const due = Math.max(0, total - paid);
+        if (due > 0) {
+          dueRent += due;
+          overdueCount++;
+          const dateRef = inv.dueDate || inv.createdAt || now;
+          const diffDays = Math.floor((now - new Date(dateRef)) / (1000 * 60 * 60 * 24));
+          if (diffDays <= 30) age30 += due;
+          else if (diffDays <= 60) age60 += due;
+          else if (diffDays <= 90) age90 += due;
+          else age90Plus += due;
+        }
+      }
+    });
+
+    // 4. Trends (collections vs payout) for past 5 months
     const monthlyTrendMap = {};
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const last5Months = [];
@@ -508,14 +602,12 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
       monthlyTrendMap[label] = { collection: 0, payout: 0 };
     }
 
-    txs.forEach(t => {
-      if (!t.payment_date) return;
-      const mLabel = months[new Date(t.payment_date).getMonth()];
+    unifiedTxs.forEach(t => {
+      if (!t.date) return;
+      const mLabel = months[new Date(t.date).getMonth()];
       if (monthlyTrendMap[mLabel]) {
-        monthlyTrendMap[mLabel].collection += (t.booking_amount || 0);
-        if (t.payout_status === 'Paid') {
-          monthlyTrendMap[mLabel].payout += (t.owner_amount || 0);
-        }
+        monthlyTrendMap[mLabel].collection += (t.rawCollection || 0);
+        monthlyTrendMap[mLabel].payout += (t.rawPayout || 0);
       }
     });
 
@@ -525,20 +617,16 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
       payout: monthlyTrendMap[name].payout
     }));
 
-    // 4. Recent Ledger (Transactions)
-    const ledger = txs.slice(0, 10).map(t => {
-      const isPayout = t.payout_status === 'Paid';
-      return {
-        date: t.payment_date ? t.payment_date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A',
-        desc: isPayout ? `Owner Payout - ${t.owner_name}` : `Rent Payment - ${t.property_name}`,
-        type: isPayout ? 'Owner Payout' : 'Tenant Payment',
-        amount: isPayout ? `- ₹ ${t.owner_amount.toLocaleString('en-IN')}` : `+ ₹ ${t.booking_amount.toLocaleString('en-IN')}`,
-        status: isPayout ? 'Processed' : 'Success',
-        color: isPayout ? 'blue' : 'green'
-      };
-    });
+    // 5. Recent Ledger (top 10 formatted items)
+    const ledger = unifiedTxs.slice(0, 10).map(t => ({
+      date: t.date ? new Date(t.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A',
+      desc: t.desc,
+      type: t.type,
+      amount: t.amount,
+      status: t.status,
+      color: t.color
+    }));
 
-    const Owner = require('../models/Owner');
     const [totalTenants, totalOwners, totalInvoices, failedPayments] = await Promise.all([
       Tenant.countDocuments({ isDeleted: { $ne: true } }),
       Owner.countDocuments({ isDeleted: { $ne: true } }),
@@ -557,7 +645,7 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
         totalTenants,
         totalOwners,
         totalInvoices,
-        overdueTenants: unpaidRents.length,
+        overdueTenants: overdueCount,
         failedPayments
       },
       trends,
@@ -569,10 +657,10 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
         { name: "90+ Days", value: age90Plus, color: "#EF4444" }
       ],
       alerts: {
-        rentDue: 28,
-        paymentSuccess: 54,
-        paymentFailure: 6,
-        payoutProcessed: 18
+        rentDue: overdueCount,
+        paymentSuccess: unifiedTxs.length,
+        paymentFailure: failedPayments,
+        payoutProcessed: rawTxs.filter(t => t.payout_status === 'Paid').length
       }
     });
   } catch (error) {
@@ -1212,15 +1300,75 @@ router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
 // Get Revenue Intelligence Stats
 router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
-    
-    let totalRevenue = 0;      // booking_amount
-    let commissionEarned = 0;  // commission_amount
-    let ownerEarnings = 0;     // owner_amount
-    let pendingPayouts = 0;    // owner_amount where Pending/Processing
-    let paidPayouts = 0;       // owner_amount where Paid
+    const { period = '7days', startDate, endDate } = req.query;
 
-    txs.forEach(t => {
+    const Rent = require('../models/Rent');
+    const RentInvoice = require('../models/RentInvoice');
+    const RefundRequest = require('../models/RefundRequest');
+
+    const [rawTxs, rawRents, rawInvoices] = await Promise.all([
+      PaymentTransaction.find({ status: { $ne: 'Failed' } }).lean(),
+      Rent.find({ paymentStatus: { $in: ['paid', 'completed', 'partially_paid'] } }).lean(),
+      RentInvoice.find({ status: { $in: ['PAID', 'PARTIAL'] } }).lean()
+    ]);
+
+    function extractDate(doc) {
+      const d = doc.payment_date || doc.paymentDate || doc.created_at || doc.createdAt || doc.updated_at || doc.updatedAt;
+      if (d) {
+        const parsed = new Date(d);
+        if (!isNaN(parsed.getTime())) return parsed;
+      }
+      if (doc && doc._id) {
+        const idStr = doc._id.toString();
+        if (idStr.length === 24) {
+          const timestamp = parseInt(idStr.substring(0, 8), 16) * 1000;
+          if (!isNaN(timestamp)) return new Date(timestamp);
+        }
+      }
+      return new Date();
+    }
+
+    // Unified Txs
+    const unifiedTxs = [];
+    rawTxs.forEach(t => unifiedTxs.push({
+      booking_amount: t.booking_amount || 0,
+      commission_amount: t.commission_amount || Math.round((t.booking_amount || 0) * 0.10),
+      owner_amount: t.owner_amount || Math.round((t.booking_amount || 0) * 0.90),
+      payout_status: t.payout_status || 'Pending',
+      payment_date: extractDate(t)
+    }));
+
+    rawRents.forEach(r => {
+      if (r.paymentMethod === 'razorpay') return;
+      const amt = r.paidAmount || 0;
+      unifiedTxs.push({
+        booking_amount: amt,
+        commission_amount: Math.round(amt * 0.10),
+        owner_amount: Math.round(amt * 0.90),
+        payout_status: 'Paid',
+        payment_date: extractDate(r)
+      });
+    });
+
+    rawInvoices.forEach(i => {
+      if (i.paymentMethod === 'razorpay') return;
+      const amt = i.paidAmount || 0;
+      unifiedTxs.push({
+        booking_amount: amt,
+        commission_amount: Math.round(amt * 0.10),
+        owner_amount: Math.round(amt * 0.90),
+        payout_status: 'Paid',
+        payment_date: extractDate(i)
+      });
+    });
+
+    let totalRevenue = 0;
+    let commissionEarned = 0;
+    let ownerEarnings = 0;
+    let pendingPayouts = 0;
+    let paidPayouts = 0;
+
+    unifiedTxs.forEach(t => {
       totalRevenue += (t.booking_amount || 0);
       commissionEarned += (t.commission_amount || 0);
       ownerEarnings += (t.owner_amount || 0);
@@ -1232,54 +1380,78 @@ router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) 
       }
     });
 
-    // Wallet Balance = Total Payments Received - Completed Owner Payouts
     const walletBalance = totalRevenue - paidPayouts;
 
-    // Monthly trends (group by day-month of payment_date)
+    // Filter txs by Date Range for Chart Trend
+    const now = new Date();
+    let startBoundary = new Date();
+    let endBoundary = new Date();
+
+    if (period === 'month') {
+      startBoundary = new Date(now.getFullYear(), now.getMonth(), 1);
+      endBoundary = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    } else if (period === 'custom' && startDate && endDate) {
+      startBoundary = new Date(startDate);
+      endBoundary = new Date(endDate);
+      endBoundary.setHours(23, 59, 59, 999);
+    } else {
+      // 7days or week (Last 7 Days)
+      startBoundary = new Date();
+      startBoundary.setDate(now.getDate() - 6);
+      startBoundary.setHours(0, 0, 0, 0);
+      endBoundary = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    }
+
+    // Grouping by date
     const trendMap = {};
-    txs.forEach(t => {
-      if (!t.payment_date) return;
-      const date = new Date(t.payment_date);
-      const label = date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }); // "13 Jun"
-      if (!trendMap[label]) {
-        trendMap[label] = { collection: 0, payout: 0 };
+
+    if (period === 'month') {
+      const daysInMonth = endBoundary.getDate();
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateObj = new Date(now.getFullYear(), now.getMonth(), d);
+        const label = dateObj.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+        trendMap[label] = { revenue: 0, collection: 0, payout: 0, timestamp: dateObj.getTime() };
       }
-      trendMap[label].collection += (t.booking_amount || 0);
-      if (t.payout_status === 'Paid') {
-        trendMap[label].payout += (t.owner_amount || 0);
+    } else if (period === '7days' || period === 'week') {
+      for (let i = 6; i >= 0; i--) {
+        const dateObj = new Date();
+        dateObj.setDate(now.getDate() - i);
+        const label = dateObj.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+        trendMap[label] = { revenue: 0, collection: 0, payout: 0, timestamp: dateObj.getTime() };
+      }
+    }
+
+    unifiedTxs.forEach(t => {
+      if (!t.payment_date) return;
+      const d = new Date(t.payment_date);
+      if (d >= startBoundary && d <= endBoundary) {
+        const label = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+        if (!trendMap[label]) {
+          trendMap[label] = { revenue: 0, collection: 0, payout: 0, timestamp: d.getTime() };
+        }
+        const amt = t.booking_amount || 0;
+        trendMap[label].revenue += amt;
+        trendMap[label].collection += amt;
+        if (t.payout_status === 'Paid') {
+          trendMap[label].payout += (t.owner_amount || 0);
+        }
       }
     });
 
-    // Sort or format trend
-    const trendData = Object.keys(trendMap).map(k => ({
+    const trend = Object.keys(trendMap).map(k => ({
       name: k,
+      revenue: trendMap[k].revenue,
       collection: trendMap[k].collection,
-      payout: trendMap[k].payout
-    })).sort((a, b) => {
-      // Sort chronologically by date
-      const parseDate = (dStr) => {
-        const parts = dStr.split(' ');
-        const day = parseInt(parts[0], 10);
-        const months = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
-        const month = months[parts[1]] || 0;
-        return new Date(new Date().getFullYear(), month, day);
-      };
-      return parseDate(a.name) - parseDate(b.name);
-    }).slice(-7); // Keep last 7 days/points
-
-    if (trendData.length === 0) {
-      trendData.push({ name: 'No Data', collection: 0, payout: 0 });
-    }
-
-    const RefundRequest = require('../models/RefundRequest');
-    const RentInvoice = require('../models/RentInvoice');
+      payout: trendMap[k].payout,
+      _ts: trendMap[k].timestamp || 0
+    })).sort((a, b) => a._ts - b._ts);
 
     const [invoicesCount, refundsCount] = await Promise.all([
       RentInvoice.countDocuments(),
       RefundRequest.countDocuments()
     ]);
 
-    const payoutsCount = txs.filter(t => t.payout_status === 'Paid').length;
+    const payoutsCount = unifiedTxs.filter(t => t.payout_status === 'Paid').length;
     const settings = await SystemSettings.findOne();
     const gstPct = settings && typeof settings.gst_percentage === 'number' ? settings.gst_percentage : 18;
     const gstCollected = Math.round(commissionEarned * (gstPct / 100));
@@ -1293,13 +1465,13 @@ router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) 
         pendingPayouts,
         paidPayouts,
         walletBalance,
-        totalTransactions: txs.length,
+        totalTransactions: unifiedTxs.length,
         invoicesCount,
         payoutsCount,
         refundsCount,
         gstCollected
       },
-      trend: trendData
+      trend
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -2284,31 +2456,7 @@ router.get('/revenue-trends', protect, authorize('superadmin'), async (req, res)
   }
 });
 
-// ─── Revenue Stats ──────────────────────────────────────────────────────────
-router.get('/revenue/stats', protect, authorize('superadmin'), async (req, res) => {
-  try {
-    const txs = await PaymentTransaction.find({}).lean();
-    let totalRevenue = 0, commissionEarned = 0, ownerEarnings = 0, paidPayouts = 0, pendingPayouts = 0;
-    txs.forEach(t => {
-      totalRevenue    += (t.booking_amount || 0);
-      commissionEarned+= (t.commission_amount || 0);
-      ownerEarnings   += (t.owner_amount || 0);
-      if (t.payout_status === 'Paid') paidPayouts    += (t.owner_amount || 0);
-      else                            pendingPayouts  += (t.owner_amount || 0);
-    });
-    const walletBalance = totalRevenue - paidPayouts;
-    res.json({
-      success: true,
-      stats: {
-        totalRevenue, commissionEarned, ownerEarnings,
-        paidPayouts, pendingPayouts, walletBalance,
-        totalTransactions: txs.length
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+
 
 // Get all owners (Scoped for employees)
 router.get('/owners', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
