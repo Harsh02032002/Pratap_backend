@@ -934,6 +934,15 @@ exports.login = async (req, res) => {
             }
         } else {
             // Fallback for AreaManager
+            const query = {
+                $or: [
+                    { email: normalizedIdentifier.toLowerCase() },
+                    { loginId: normalizedIdentifier.toUpperCase() },
+                    { loginId: normalizedIdentifier.toLowerCase() },
+                    { loginId: normalizedIdentifier },
+                    { phone: normalizedIdentifier }
+                ]
+            };
             const areaManager = await AreaManager.findOne(query);
             if (areaManager) {
                 if (areaManager.isActive === false) return res.status(403).json({ message: 'Account disabled' });

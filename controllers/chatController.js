@@ -68,7 +68,30 @@ exports.getInbox = async (req, res) => {
       return res.status(400).json({ error: 'login_id is required' });
     }
 
-    const loginVariants = [...new Set([loginId, loginId.toLowerCase(), loginId.toUpperCase()])];
+    const loginVariantsSet = new Set([loginId, loginId.toLowerCase(), loginId.toUpperCase()]);
+    if (req.user) {
+      if (req.user.loginId) {
+        const lid = String(req.user.loginId).trim();
+        loginVariantsSet.add(lid);
+        loginVariantsSet.add(lid.toLowerCase());
+        loginVariantsSet.add(lid.toUpperCase());
+      }
+      if (req.user.email) {
+        const em = String(req.user.email).trim().toLowerCase();
+        loginVariantsSet.add(em);
+        loginVariantsSet.add(em.toUpperCase());
+        const hash = generateWebsiteUserIdFromEmail(em);
+        if (hash) {
+          loginVariantsSet.add(hash);
+          loginVariantsSet.add(hash.toLowerCase());
+          loginVariantsSet.add(hash.toUpperCase());
+        }
+      }
+      if (req.user._id || req.user.id) {
+        loginVariantsSet.add(String(req.user._id || req.user.id).trim());
+      }
+    }
+    const loginVariants = Array.from(loginVariantsSet);
 
     const messages = await ChatMessage.find({
       $or: [
