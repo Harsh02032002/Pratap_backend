@@ -6,18 +6,9 @@ const Owner = require('../models/Owner');
 const User = require('../models/user');
 const BookingRequest = require('../models/BookingRequest');
 const jwt = require('jsonwebtoken');
+const { generateWebsiteUserIdFromEmail, buildChatLookupVariants } = require('../utils/chatIdentity');
 
 const normalizeLoginId = (value) => String(value || '').trim();
-
-function generateWebsiteUserIdFromEmail(email) {
-    const safeEmail = String(email || '').trim().toLowerCase();
-    if (!safeEmail) return '';
-    let hash = 0;
-    for (let i = 0; i < safeEmail.length; i += 1) {
-        hash = (hash * 31 + safeEmail.charCodeAt(i)) % 1000000;
-    }
-    return `roomhyweb${String(hash).padStart(6, '0')}`;
-}
 
 function isCallerIdMatch(user, targetId) {
     if (!user || !targetId) return false;
@@ -70,6 +61,8 @@ exports.getInbox = async (req, res) => {
 
     const loginVariantsSet = new Set([loginId, loginId.toLowerCase(), loginId.toUpperCase()]);
     if (req.user) {
+      const variants = buildChatLookupVariants(loginId, req.user);
+      variants.forEach((value) => loginVariantsSet.add(value));
       if (req.user.loginId) {
         const lid = String(req.user.loginId).trim();
         loginVariantsSet.add(lid);
@@ -287,8 +280,8 @@ exports.getConversation = async (req, res) => {
       return res.status(400).json({ error: 'user1 and user2 are required' });
     }
 
-    const user1Variants = [...new Set([user1, user1.toLowerCase(), user1.toUpperCase()])];
-    const user2Variants = [...new Set([user2, user2.toLowerCase(), user2.toUpperCase()])];
+    const user1Variants = [...new Set(buildChatLookupVariants(user1, req.user))];
+    const user2Variants = [...new Set(buildChatLookupVariants(user2, req.user))];
 
     const isSuperadmin = await isCallerSuperadmin(req);
 
@@ -338,7 +331,8 @@ exports.markAsRead = async (req, res) => {
         return res.status(403).json({ error: 'Forbidden' });
     }
     
-    const query = { room_id, is_read: false };
+    const roomVariants = [...new Set(buildChatLookupVariants(room_id, req.user))];
+    const query = { room_id: { $in: roomVariants }, is_read: false };
     if (sender) {
       const senderVariants = [...new Set([sender, sender.toLowerCase(), sender.toUpperCase()])];
       query.sender_login_id = { $in: senderVariants };
@@ -360,9 +354,10 @@ exports.markAsRead = async (req, res) => {
 exports.getUnreadCount = async (req, res) => {
   try {
     const { room_id } = req.params;
+    const roomVariants = [...new Set(buildChatLookupVariants(room_id, req.user))];
     
     const count = await ChatMessage.countDocuments({
-      room_id,
+      room_id: { $in: roomVariants },
       is_read: false
     });
 

@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "npx nodemon server.js",
+    "dev": "npx nodemon --max-old-space-size=4096 server.js",
     "build": "echo 'Build completed'",
     "start:cluster": "pm2 start ../deploy/ecosystem.config.cjs --env production",
     "backup:db": "bash ../deploy/backup/backup_mongo.sh",
@@ -47,7 +47,8 @@
     "razorpay": "^2.9.6",
     "roomhy-root": "file:..",
     "socket.io": "^4.8.3",
-    "streamifier": "^0.1.1"
+    "streamifier": "^0.1.1",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

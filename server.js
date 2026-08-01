@@ -250,9 +250,55 @@ async function seedSuperAdminIfMissing() {
     }
 }
 
+async function fixFalselyVerifiedTenants() {
+    try {
+        const Tenant = require('./models/Tenant');
+        const res = await Tenant.updateMany(
+            {
+                isDeleted: { $ne: true },
+                kycStatus: 'verified',
+                kycVerificationResult: { $exists: false },
+                'digitalCheckin.submittedAt': { $exists: false },
+                'digitalCheckin.kyc.aadhaarNumber': { $exists: false }
+            },
+            {
+                $set: { kycStatus: 'pending', status: 'pending' }
+            }
+        );
+        if (res.modifiedCount > 0) {
+            console.log(`🔧 Corrected ${res.modifiedCount} falsely auto-verified tenant records back to pending.`);
+        }
+    } catch (err) {
+        console.warn('⚠️ Fix falsely verified tenants warning:', err.message);
+    }
+}
+
+async function syncCompletedDigitalCheckinTenants() {
+    try {
+        const Tenant = require('./models/Tenant');
+        const res = await Tenant.updateMany(
+            {
+                isDeleted: { $ne: true },
+                kycStatus: { $in: ['audit_pending', 'pending', 'pending_verification'] },
+                'digitalCheckin.submittedAt': { $exists: true }
+            },
+            {
+                $set: { kycStatus: 'verified' }
+            }
+        );
+        if (res.modifiedCount > 0) {
+            console.log(`✅ Synced ${res.modifiedCount} completed digital check-in tenants to kycStatus: verified.`);
+        }
+    } catch (err) {
+        console.warn('⚠️ Sync completed digital check-in tenants warning:', err.message);
+    }
+}
+
 mongoose.connection.on('connected', () => {
     console.log('✅ Mongoose connected');
     seedSuperAdminIfMissing();
+    fixFalselyVerifiedTenants();
+    syncCompletedDigitalCheckinTenants();
     if (!escalationJobStarted) {
         escalationJobStarted = true;
         startEscalationJob();

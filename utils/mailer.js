@@ -374,12 +374,16 @@ async function sendViaMailjetApi(recipients, subject, text, html, cfg, attachmen
 async function sendMail(to, subject, text, html, options = {}) {
     const cfg = getMailerConfig();
     
+    console.log('[MAILER DEBUG] sendMail called with:', { to, subject, hasHtml: !!html, hasAttachments: (options.attachments?.length || 0) });
+    
     const recipients = normalizeRecipients(to);
     const hasSmtp = isSmtpConfigured(cfg);
     const hasMailjet = isMailjetConfigured(cfg);
 
+    console.log('[MAILER DEBUG] Config check:', { hasSmtp, hasMailjet, recipientCount: recipients.length });
+
     if (!recipients.length) {
-        console.warn('sendMail skipped: no valid recipients');
+        console.warn('[MAILER DEBUG] sendMail skipped: no valid recipients');
         return false;
     }
     let emailSent = false;
@@ -394,23 +398,11 @@ async function sendMail(to, subject, text, html, options = {}) {
         ...(attachments.length ? { attachments } : {})
     };
 
-    // Priority 1: Mailjet API (More reliable than SMTP, bypasses port blocks)
-    if (!emailSent && isMailjetConfigured(cfg)) {
-        try {
-            emailSent = await sendViaMailjetApi(recipients, subject, text, html, cfg, attachments);
-            if (emailSent) {
-                fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] SUCCESS: Email to ${toStr} via Mailjet API\n`);
-            } else {
-                fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] FAILED: Mailjet API rejected the request (Check keys)\n`);
-            }
-        } catch (err) {
-            console.error('Mailjet API failed:', err && err.message);
-            fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] FAILED: Email to ${toStr} via Mailjet API. Error: ${err.message}\n`);
-        }
-    }
+    console.log('[MAILER DEBUG] Mail options prepared:', { from: mailOptions.from, to: mailOptions.to, subject: mailOptions.subject });
 
-    // Priority 2: Primary SMTP (Gmail/Custom)
+    // Priority 1: SMTP (Gmail)
     if (!emailSent && isSmtpConfigured(cfg)) {
+        console.log('[MAILER DEBUG] Attempting SMTP...');
         try {
             const isGmail = cfg.smtpHost.toLowerCase().includes('gmail');
             await sendViaSmtp({
@@ -421,15 +413,24 @@ async function sendMail(to, subject, text, html, options = {}) {
                 user: cfg.smtpUser,
                 pass: cfg.smtpPass,
                 label: 'SMTP',
-                service: '',
+                service: isGmail ? 'gmail' : (cfg.smtpService || ''),
                 name: cfg.smtpName
             }, mailOptions);
             emailSent = true;
             fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] SUCCESS: Email to ${toStr} via SMTP\n`);
+            console.log('[MAILER SUCCESS] Email sent via SMTP to', toStr);
         } catch (err) {
-            console.error('SMTP Delivery failed:', err && err.message);
+            console.error('[MAILER ERROR] SMTP Delivery failed:', err && err.message);
+            console.error('[MAILER ERROR] Stack:', err?.stack);
             fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] FAILED: Email to ${toStr} via SMTP. Error: ${err.message}\n`);
         }
+    } else {
+        console.log('[MAILER DEBUG] SMTP not configured, skipping');
+    }
+
+    if (!emailSent) {
+        console.error('[MAILER CRITICAL] No email method succeeded - email NOT sent to', toStr);
+        fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] CRITICAL: No email method succeeded for ${toStr}\n`);
     }
 
     // WhatsApp free-text copy — skipped when the caller handles WhatsApp
@@ -441,11 +442,12 @@ async function sendMail(to, subject, text, html, options = {}) {
             whatsappSent = whatsappDeliveredCount > 0;
             fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] WHATSAPP: Delivered to ${whatsappDeliveredCount} recipients\n`);
         } catch (err) {
-            console.warn('WhatsApp notification copy failed:', err && err.message);
+            console.warn('[MAILER WARN] WhatsApp notification copy failed:', err && err.message);
             fs.appendFileSync('mail_log.txt', `[${new Date().toISOString()}] WHATSAPP FAILED: ${err.message}\n`);
         }
     }
 
+    console.log('[MAILER FINAL] Result:', { emailSent, whatsappSent, to: toStr });
     return emailSent || whatsappSent;
 }
 

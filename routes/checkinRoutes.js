@@ -416,12 +416,13 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         signatureDataUrl: record.tenantAgreement?.signatureDataUrl || tenant.digitalCheckin.agreement?.signatureDataUrl || ''
     };
     tenant.digitalCheckin.submittedAt = new Date();
-    // After e-sign: preserve mismatch_review or set audit_pending so owner must review & approve KYC
+    // After e-sign: set kycStatus to 'pending' so owner must review & approve KYC
     // Only upgrade to 'verified' when owner explicitly approves via owner panel
+    // Never auto-set to 'verified' - tenant must complete digital KYC and owner must approve
     if (tenant.kycStatus === 'mismatch_review') {
         // preserve mismatch_review flag
-    } else if (tenant.kycStatus !== 'verified') {
-        tenant.kycStatus = 'audit_pending';
+    } else {
+        tenant.kycStatus = 'pending';
     }
 
     // Status remains 'pending' until onboarding payment is completed
@@ -432,10 +433,13 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
     // [PHASE 3 HOOK — Agreement Complete -> Payment Link]
     // After tenant signs the agreement, generate a tokenized payment link and email it.
     try {
-        if (tenant.paymentLinkStatus !== 'sent' && tenant.paymentLinkStatus !== 'paid') {
+        console.log(`[PAYMENT LINK HOOK] Starting for tenant ${tenant.loginId}, current paymentLinkStatus: ${tenant.paymentLinkStatus}`);
+        if (tenant.paymentLinkStatus !== 'paid') {
+            console.log(`[PAYMENT LINK] Creating payment link for ${tenant.loginId}`);
             const Rent = require('../models/Rent');
-            let rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+            let rent = await Rent.findOne({ tenantLoginId: tenant.loginId, paymentStatus: 'pending' }).sort({ createdAt: -1 });
             if (!rent) {
+                console.log(`[PAYMENT LINK] No pending rent found, creating new rent record`);
                 rent = new Rent({
                     tenantId: tenant._id,
                     tenantLoginId: tenant.loginId,
@@ -450,6 +454,7 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                     paymentStatus: 'pending'
                 });
                 await rent.save();
+                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}`);
             }
             const rentRecordId = rent._id;
             const jwtSecret = process.env.JWT_SECRET;
@@ -461,38 +466,67 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                 jwtSecret,
                 { expiresIn: '72h' }
             );
-            let appBase = process.env.APP_URL || APP_URL || 'http://localhost:5173';
+            let appBase = process.env.DIGITAL_CHECKIN_URL || 'http://localhost:5173';
             if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
-            const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
+            const paymentUrl = `/payment/gateway?token=${token}`;
+            tenant._paymentUrl = paymentUrl;
 
-            const subject = `Payment Required: Secure your booking for ${tenant.propertyTitle || 'RoomHy'}`;
-            const paymentHtml = `
-                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
-                    <div style="background:#6366f1;color:white;padding:20px;text-align:center;">
-                        <h2 style="margin:0;">RoomHy — Complete Your Onboarding</h2>
-                    </div>
-                    <div style="padding:25px;color:#374151;">
-                        <p>Hello <strong>${tenant.name || 'Tenant'}</strong>,</p>
-                        <p>Your KYC verification and agreement are complete! Please complete your pending onboarding payment to secure your booking.</p>
-                        <div style="text-align:center;margin:30px 0;">
-                            <a href="${paymentUrl}" style="background:#6366f1;color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">Click here to Pay</a>
-                        </div>
-                        <p style="color:#6b7280;font-size:13px;">This link expires in 72 hours. Do not share it with anyone.</p>
-                    </div>
-                </div>
-            `;
-            await sendMail(tenant.email, subject, `Pay here: ${paymentUrl}`, paymentHtml);
+            console.log(`[PAYMENT LINK] Generated payment URL: ${paymentUrl}`);
+
+            if (tenant.paymentLinkStatus !== 'sent') {
+            console.log(`[PAYMENT LINK] Sending email to: ${tenant.email}`);
+
+            const subject = `RoomHy Onboarding — ${tenant.propertyTitle || 'RoomHy Property'}`;
+            const paymentHtml = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f4;padding:40px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #dddddd;">
+        <tr><td style="padding:24px 32px;border-bottom:1px solid #dddddd;">
+          <p style="margin:0;font-size:20px;font-weight:700;color:#111111;">RoomHy</p>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:15px;color:#333333;">Dear <strong>${tenant.name || 'Tenant'}</strong>,</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#555555;line-height:1.7;">Your KYC verification and rental agreement have been completed successfully for <strong>${tenant.propertyTitle || 'RoomHy Property'}</strong>${tenant.roomNo ? ', Room ' + tenant.roomNo : ''}.</p>
+          <p style="margin:0 0 24px;font-size:14px;color:#555555;line-height:1.7;">To complete your onboarding, please proceed with the security deposit and first month payment using the link below.</p>
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="background:#111111;">
+              <a href="${paymentUrl}" style="display:inline-block;background:#111111;color:#ffffff;text-decoration:none;padding:13px 28px;font-size:14px;font-weight:600;font-family:Arial,Helvetica,sans-serif;">Proceed to Payment</a>
+            </td></tr>
+          </table>
+          <p style="margin:20px 0 0;font-size:12px;color:#888888;">If the button does not work, copy and paste this link in your browser:<br><span style="color:#333333;word-break:break-all;">${paymentUrl}</span></p>
+          <p style="margin:20px 0 0;font-size:12px;color:#888888;">This link is valid for 72 hours. Please do not share it with anyone.</p>
+        </td></tr>
+        <tr><td style="border-top:1px solid #dddddd;padding:20px 32px;background:#f9f9f9;">
+          <p style="margin:0;font-size:12px;color:#888888;line-height:1.8;"><strong style="color:#555555;">RoomHy Support Team</strong><br>Email: support@roomhy.com | Website: www.roomhy.com<br>&copy; ${new Date().getFullYear()} RoomHy. All rights reserved.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+            const paymentText = `Dear ${tenant.name || 'Tenant'},\n\nYour KYC and rental agreement for ${tenant.propertyTitle || 'RoomHy Property'} are complete.\n\nPlease proceed with your onboarding payment using the link below:\n${paymentUrl}\n\nThis link is valid for 72 hours.\n\nRoomHy Support Team\nsupport@roomhy.com`;
+            await sendMail(tenant.email, subject, paymentText, paymentHtml);
             tenant.paymentLinkStatus = 'sent';
             await tenant.save();
-            console.log(`[PAYMENT LINK] Sent to ${tenant.email} for ${tenant.loginId}`);
+            console.log(`[PAYMENT LINK] ✓ Successfully sent to ${tenant.email} for ${tenant.loginId}`);
+            } // end if not already sent
+        } else {
+            console.log(`[PAYMENT LINK] Skipped - paymentLinkStatus is paid`);
+            console.log(`[PAYMENT LINK] Skipped - paymentLinkStatus is ${tenant.paymentLinkStatus}`);
         }
     } catch (paymentLinkErr) {
         console.error('[PAYMENT LINK ERROR] Hook (agreement-complete) Failed:', paymentLinkErr.message);
+        console.error('[PAYMENT LINK ERROR] Stack:', paymentLinkErr.stack);
     }
 
     try {
-        const { settleTransactionMoveIn } = require('../controllers/bookingController');
-        await settleTransactionMoveIn(normalizedLoginId);
+        const bookingController = require('../controllers/bookingController');
+        if (typeof bookingController.settleTransactionMoveIn === 'function') {
+            await bookingController.settleTransactionMoveIn(normalizedLoginId);
+        }
     } catch (settleErr) {
         console.error('[TENANT AGREEMENT COMPLETE] Settle payment transaction error:', settleErr.message);
     }
@@ -630,7 +664,7 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         console.error('[TENANT AGREEMENT COMPLETE] WhatsApp PDF send error:', whatsAppDocErr.message);
     }
 
-    return { record, tenant, dashboardUrl, tenantLoginUrl, loginEmailSent };
+    return { record, tenant, dashboardUrl, tenantLoginUrl, loginEmailSent, paymentUrl: tenant._paymentUrl || null };
 }
 
 function isTenantKycVerified(record) {
@@ -1819,7 +1853,9 @@ router.post('/tenant/agreement', async (req, res) => {
             tenant: completion.tenant,
             agreementStatus: 'signed',
             provider: 'roomhy-esign',
-            nextUrl: `${DIGITAL_CHECKIN_URL}/digital-checkin/tenant-confirmation?loginId=${encodeURIComponent(normalizedLoginId)}&agreementSigned=1`
+            nextUrl: completion.paymentUrl
+                ? completion.paymentUrl
+                : `${DIGITAL_CHECKIN_URL}/digital-checkin/tenant-confirmation?loginId=${encodeURIComponent(normalizedLoginId)}&agreementSigned=1`
         });
     } catch (err) {
         console.error('tenant/agreement error:', err);

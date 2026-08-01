@@ -146,6 +146,10 @@ exports.listEnquiries = async (req, res) => {
         paidAmount: b.payment_amount || b.rent_amount || b.total_amount || 0,
         ts: b.created_at || b.createdAt || new Date(),
         source: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
+        type: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
+        interest: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
+        bidAmount: b.bid_amount || b.bid_max || null,
+        isBid: b.request_type === 'bid',
         budget: (() => {
           if (b.request_type === 'bid') {
             if (b.message) {
@@ -214,6 +218,11 @@ exports.updateEnquiry = async (req, res) => {
 
     // 2. Try to find and update in BookingRequest collection
     const BookingRequest = require('../models/BookingRequest');
+    const Owner = require('../models/Owner');
+    const ChatMessage = require('../models/ChatMessage');
+    const ChatRoom = require('../models/ChatRoom');
+    const { generateWebsiteUserIdFromEmail, buildChatLookupVariants } = require('../utils/chatIdentity');
+
     let bookingReq = await BookingRequest.findById(id);
     if (bookingReq) {
       const bStatus = update.status;
@@ -224,6 +233,64 @@ exports.updateEnquiry = async (req, res) => {
         updated_at: Date.now()
       };
       bookingReq = await BookingRequest.findByIdAndUpdate(id, bUpdate, { new: true });
+
+      // If accepting the bid, send welcome message
+      if (bStatus === 'accepted' && bookingReq) {
+        try {
+          const tenantName = bookingReq.name || 'Valued Guest';
+          const propertyName = bookingReq.property_name || 'Property';
+          const ownerDoc = await Owner.findOne({ loginId: String(bookingReq.owner_id || '').toUpperCase() });
+          const ownerName = ownerDoc?.profile?.name || ownerDoc?.name || bookingReq.owner_name || bookingReq.owner_id;
+
+          // Ensure chat rooms exist
+          const normalizedOwnerId = String(bookingReq.owner_id || '').trim().toUpperCase();
+          const normalizedUserId = generateWebsiteUserIdFromEmail(bookingReq.email) || bookingReq.user_id;
+
+          if (normalizedOwnerId && normalizedUserId) {
+            const participants = [
+              { loginId: normalizedOwnerId, role: 'property_owner' },
+              { loginId: normalizedUserId, role: 'website_user' }
+            ];
+
+            // Create chat rooms for both owner and user
+            await Promise.all([
+              ChatRoom.findOneAndUpdate(
+                { room_id: normalizedOwnerId },
+                {
+                  $set: { participants, updated_at: new Date() },
+                  $setOnInsert: { room_id: normalizedOwnerId, created_at: new Date() }
+                },
+                { new: true, upsert: true, setDefaultsOnInsert: true }
+              ),
+              ChatRoom.findOneAndUpdate(
+                { room_id: normalizedUserId },
+                {
+                  $set: { participants, updated_at: new Date() },
+                  $setOnInsert: { room_id: normalizedUserId, created_at: new Date() }
+                },
+                { new: true, upsert: true, setDefaultsOnInsert: true }
+              )
+            ]);
+
+            // Send welcome message to tenant's room
+            const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
+            await ChatMessage.create({
+              room_id: normalizedUserId,
+              sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
+              sender_name: ownerName,
+              sender_role: 'property_owner',
+              message: welcomeMsg,
+              message_type: 'text',
+              created_at: new Date(),
+              updated_at: new Date()
+            });
+            console.log('✅ Welcome message sent to tenant in room:', normalizedUserId);
+          }
+        } catch (chatErr) {
+          console.error('⚠️ Failed to send welcome message:', chatErr.message);
+        }
+      }
+
       return res.json({
         _id: bookingReq._id,
         ownerLoginId: bookingReq.owner_id,

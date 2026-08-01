@@ -135,7 +135,7 @@ const TenantSchema = new mongoose.Schema({
     // Onboarding Payment Tracking (Phase 4–6.5)
     paymentLinkStatus: {
         type: String,
-        enum: ['pending', 'paid'],
+        enum: ['pending', 'sent', 'paid', 'failed'],
         default: 'pending'
     },
     onboardingRentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Rent' },

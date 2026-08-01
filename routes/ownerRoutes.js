@@ -633,25 +633,6 @@ router.get('/:loginId/tenants', async (req, res) => {
         const propertyIds = properties.map((p) => p._id);
         const Tenant = require('../models/Tenant');
 
-        // Auto-heal tenants without mismatch: promote pending_verification -> verified & pending -> active
-        await Tenant.updateMany(
-            {
-                $or: [{ ownerLoginId: loginId }, { property: { $in: propertyIds } }],
-                isDeleted: { $ne: true },
-                kycStatus: { $ne: 'mismatch_review' },
-                'kyc.mismatchReasons': { $exists: false },
-                $or: [
-                    { kycStatus: 'pending_verification' },
-                    { kycStatus: 'pending' },
-                    { kycStatus: { $exists: false } },
-                    { status: 'pending' }
-                ]
-            },
-            {
-                $set: { kycStatus: 'verified', status: 'active' }
-            }
-        ).catch(() => {});
-
         const tenants = await Tenant.find({
             $or: [
                 { property: { $in: propertyIds } },

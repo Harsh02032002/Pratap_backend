@@ -12,6 +12,7 @@ const mailer = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { sendBookingConfirmationButtons, sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { generateAgreementPdfBuffer } = require('../utils/generateAgreementPdf');
+const { normalizeWebsiteUserId, generateWebsiteUserIdFromEmail } = require('../utils/chatIdentity');
 
 function resolveOwnerAgreementContact(ownerDoc = {}, request = {}) {
     const loginId = String(ownerDoc.loginId || request.owner_id || '').trim().toUpperCase();
@@ -247,24 +248,6 @@ function formatErrorDetails(err) {
         responseStatus: err.response?.status || null,
         responseData: err.response?.data || null
     };
-}
-
-function normalizeWebsiteUserId(raw) {
-    const value = String(raw || '').trim().toLowerCase();
-    if (/^roomhyweb\d{6}$/i.test(value)) return value;
-    const digits = value.replace(/\D/g, '').slice(-6);
-    if (digits.length === 6) return `roomhyweb${digits}`;
-    return '';
-}
-
-function generateWebsiteUserIdFromEmail(email) {
-    const safeEmail = String(email || '').trim().toLowerCase();
-    if (!safeEmail) return '';
-    let hash = 0;
-    for (let i = 0; i < safeEmail.length; i += 1) {
-        hash = (hash * 31 + safeEmail.charCodeAt(i)) % 1000000;
-    }
-    return `roomhyweb${String(hash).padStart(6, '0')}`;
 }
 
 async function ensureChatRoomsForBooking({ bookingId, ownerId, ownerName, userId, userName, userEmail, propertyName }) {

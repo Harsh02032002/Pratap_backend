@@ -2737,11 +2737,24 @@ exports.generateCashOtp = async (req, res) => {
       return res.status(429).json({ success: false, error: `Please wait ${waitTime} seconds before requesting a new OTP.` });
     }
 
-    const ownerDoc = await Owner.findOne({ loginId: String(rent.ownerLoginId || '').trim().toUpperCase() });
-    const ownerEmail = (ownerDoc && (ownerDoc.email || ownerDoc.profile?.email)) || '';
-    if (!ownerEmail) return res.status(400).json({ success: false, error: 'Property owner does not have a registered email to receive OTP.' });
-
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    let ownerLoginIdKey = String(rent.ownerLoginId || '').trim().toUpperCase();
+    if (!ownerLoginIdKey) {
+      const tenantDoc = await Tenant.findOne({ loginId: decoded.loginId });
+      ownerLoginIdKey = String(tenantDoc?.ownerLoginId || '').trim().toUpperCase();
+    }
+    let ownerEmail = '';
+    if (ownerLoginIdKey) {
+      const ownerDoc = await Owner.findOne({ loginId: ownerLoginIdKey });
+      ownerEmail = (ownerDoc && (ownerDoc.email || ownerDoc.profile?.email)) || '';
+      if (!ownerEmail) {
+        const User = require('../models/user');
+        const ownerUser = await User.findOne({ loginId: ownerLoginIdKey });
+        ownerEmail = (ownerUser && ownerUser.email) || '';
+      }
+    }
+    if (!ownerEmail) return res.status(400).json({ success: false, error: 'No email configured to receive OTP. Please contact support.' });
 
     rent.cashOtpCode = otpCode;
     rent.cashOtpExpiresAt = new Date(Date.now() + 10 * 60000); // 10 minutes
@@ -2871,31 +2884,41 @@ exports.verifyAuthCashOtp = async (req, res) => {
     if (!invoice) {
       // Create invoice if it doesn't exist
       console.log(`[CASH OTP] Creating new RentInvoice for tenant ${updatedRent.tenantId} month ${billingMonth}`);
-      const tenantDoc = await Tenant.findById(updatedRent.tenantId).lean();
-      const ownerDoc = updatedRent.ownerLoginId ? await Owner.findOne({ loginId: String(updatedRent.ownerLoginId).toUpperCase() }).lean() : null;
-      const ownerUserId = ownerDoc?._id || tenantDoc?.assignedBy || updatedRent.ownerId || null;
-      const propertyId = updatedRent.propertyId || tenantDoc?.property || null;
-      const invoiceNumber = `INV-${billingMonth}-${String(updatedRent.tenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-
-      invoice = await RentInvoice.create({
-        invoiceNumber,
-        ownerId: ownerUserId,
-        propertyId: propertyId,
-        tenantId: updatedRent.tenantId,
-        tenantName: updatedRent.tenantName || tenantDoc?.name || '',
-        tenantEmail: updatedRent.tenantEmail || tenantDoc?.email || '',
-        tenantPhone: updatedRent.tenantPhone || tenantDoc?.phone || '',
-        billingMonth: billingMonth,
-        rentAmount: rent.rentAmount || rent.totalDue || 0,
-        totalDue: rent.totalDue || rent.rentAmount || 0,
-        status: 'PAID',
-        paidAmount: rent.totalDue || rent.rentAmount || 0,
-        rentPaidAmount: rent.totalDue || rent.rentAmount || 0,
-        outstandingAmount: 0,
-        paymentDate: new Date(),
-        paymentMethod: actualPaymentMethod,
-        dueDate: new Date()
-      });
+      const tenantDoc = await Tenant.findOne({ loginId: decoded.loginId }).lean();
+      const resolvedTenantId = updatedRent.tenantId || tenantDoc?._id;
+      if (!resolvedTenantId) {
+        console.warn('[CASH OTP] Cannot create RentInvoice: tenantId not resolved, skipping invoice creation');
+      } else {
+        const ownerDoc = (updatedRent.ownerLoginId || tenantDoc?.ownerLoginId)
+          ? await Owner.findOne({ loginId: String(updatedRent.ownerLoginId || tenantDoc?.ownerLoginId).toUpperCase() }).lean()
+          : null;
+        const ownerUserId = ownerDoc?._id || null;
+        const propertyId = updatedRent.propertyId || tenantDoc?.property || null;
+        if (!ownerUserId || !propertyId) {
+          console.warn('[CASH OTP] Skipping RentInvoice creation: missing ownerId or propertyId');
+        } else {
+          const invoiceNumber = `INV-${billingMonth}-${String(resolvedTenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+          invoice = await RentInvoice.create({
+            invoiceNumber,
+            ownerId: ownerUserId,
+            propertyId,
+            tenantId: resolvedTenantId,
+            tenantName: updatedRent.tenantName || tenantDoc?.name || '',
+            tenantEmail: updatedRent.tenantEmail || tenantDoc?.email || '',
+            tenantPhone: updatedRent.tenantPhone || tenantDoc?.phone || '',
+            billingMonth,
+            rentAmount: rent.rentAmount || rent.totalDue || 0,
+            totalDue: rent.totalDue || rent.rentAmount || 0,
+            status: 'PAID',
+            paidAmount: rent.totalDue || rent.rentAmount || 0,
+            rentPaidAmount: rent.totalDue || rent.rentAmount || 0,
+            outstandingAmount: 0,
+            paymentDate: new Date(),
+            paymentMethod: actualPaymentMethod,
+            dueDate: new Date()
+          });
+        }
+      }
     } else {
       // Update existing invoice
       invoice = await RentInvoice.findByIdAndUpdate(

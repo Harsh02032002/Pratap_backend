@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const mailer = require('../utils/mailer');
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { enrichTenantsWithDues } = require('../services/tenantDuesService');
+const { validateDocumentType } = require('../utils/documentValidator');
 
 /**
  * Approve or reject tenant KYC verification
@@ -198,6 +199,22 @@ exports.assignTenant = async (req, res) => {
                 success: false,
                 message: `Missing required fields: ${missing.join(', ')}`
             });
+        }
+
+        // Document type validation - check if uploaded document matches selected type
+        if (idProof && idProof.type && idProof.file) {
+            console.log('[DOCUMENT VALIDATION] Validating document type:', idProof.type);
+            const validation = await validateDocumentType(idProof.file, idProof.type);
+            
+            if (!validation.valid) {
+                console.log('[DOCUMENT VALIDATION] Failed:', validation.message);
+                return res.status(400).json({
+                    success: false,
+                    message: validation.message,
+                    detectedType: validation.detectedType
+                });
+            }
+            console.log('[DOCUMENT VALIDATION] Passed:', validation.message);
         }
 
         // Indian mobile number validation: must be 10 digits starting with 6-9
@@ -1004,7 +1021,7 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
 
         updatedTenant = await Tenant.findOneAndUpdate(
             { loginId, paymentLinkStatus: { $ne: 'paid' } },
-            { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId, status: 'active' } },
+            { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId, status: 'active', kycStatus: 'verified' } },
             { new: true, session }
         );
 
@@ -1036,13 +1053,18 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
     // ── POST-COMMIT EMAIL DISPATCH ─────────────────────────────────────
     const { loginId: credLoginId, tempPassword } = credentialResult;
 
+    console.log(`[ONBOARDING EMAIL] Starting email dispatch for ${updatedTenant.loginId}`);
+    console.log(`[ONBOARDING EMAIL] Credential result:`, { credLoginId, hasTempPassword: !!tempPassword });
+
     // Email 1: Credentials
     try {
+        console.log(`[ONBOARDING EMAIL] Sending credentials to ${updatedTenant.email}`);
         await sendCredentials(updatedTenant.email, credLoginId, tempPassword, 'Tenant');
         await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'sent' } });
-        console.log(`[ONBOARDING EMAIL] Credentials sent to ${updatedTenant.email}`);
+        console.log(`[ONBOARDING EMAIL] ✓ Credentials sent to ${updatedTenant.email}`);
     } catch (credEmailErr) {
-        console.error(`[ONBOARDING EMAIL] Credentials FAILED for ${updatedTenant.email}:`, credEmailErr.message);
+        console.error(`[ONBOARDING EMAIL] ✗ Credentials FAILED for ${updatedTenant.email}:`, credEmailErr.message);
+        console.error(`[ONBOARDING EMAIL] Stack:`, credEmailErr.stack);
         await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed' } });
     }
 
