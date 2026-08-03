@@ -645,16 +645,31 @@ app.use((err, req, res, next) => {
 });
 
 // ── Admin Panel (SPA) — served at /admin ────────────────────────────────────
-const adminDistPath = path.join(__dirname, '../roomhy-admin-clone/dist');
 const fs = require('fs');
-if (fs.existsSync(adminDistPath)) {
+const possibleAdminPaths = [
+    path.join(__dirname, '../roomhy-admin-clone/dist'),   // sibling folder
+    path.join(__dirname, './admin-dist'),                  // same folder as backend
+    path.join(__dirname, '../admin-dist'),                 // one level up
+    '/var/www/roomhy-admin',                              // nginx default
+    '/var/www/html/admin',                                // nginx default 2
+];
+const adminDistPath = possibleAdminPaths.find(p => fs.existsSync(p) && fs.existsSync(path.join(p, 'index.html')));
+
+if (adminDistPath) {
     app.use('/admin', express.static(adminDistPath, { index: false }));
-    // SPA fallback: any /admin/* that doesn't match a static file → index.html
     app.get('/admin', (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
     app.get('/admin/*', (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
-    console.log('✅ Admin panel served at /admin (production build)');
+    console.log(`✅ Admin panel served at /admin from: ${adminDistPath}`);
 } else {
-    console.log('ℹ️  Admin panel build not found — run: cd roomhy-admin-clone && npm run build');
+    // Admin not built yet — return helpful message
+    app.get('/admin', (req, res) => res.send(`
+        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h2>Admin Panel Not Built</h2>
+        <p>Run on VPS: <code>cd roomhy-admin-clone && npm run build && cp -r dist ../Roomhy-Backend/admin-dist</code></p>
+        </body></html>
+    `));
+    app.get('/admin/*', (req, res) => res.redirect('/admin'));
+    console.log('ℹ️  Admin panel build not found. Build it first and place dist/ in one of the expected paths.');
 }
 
 // 404 handler for unmatched routes
