@@ -434,15 +434,30 @@ try {
     app.use('/api/finance', require('./routes/financeRoutes'));
     console.log('  ✓ financeRoutes');
     app.use('/api/amenities', require('./routes/amenityRoutes'));
-    console.log('  ? amenityRoutes');
+    console.log('  ✓ amenityRoutes');
     app.use('/api/pricing', require('./routes/pricingRoutes'));
-    console.log('  ? pricingRoutes');
+    console.log('  ✓ pricingRoutes');
     app.use('/api/featured', require('./routes/featuredRoutes'));
-    console.log('  ? featuredRoutes');
+    console.log('  ✓ featuredRoutes');
     app.use('/api', require('./routes/uploadRoutes'));
-    console.log('  ? uploadRoutes');
+    console.log('  ✓ uploadRoutes');
+
+    // ── Content & SEO routes (NEW) ──────────────────────────────────────────
+    app.use('/api/seo', require('./routes/seoRoutes'));
+    console.log('  ✓ seoRoutes');
+    app.use('/api/page-layouts', require('./routes/pageLayoutRoutes'));
+    console.log('  ✓ pageLayoutRoutes');
+    app.use('/api/blogs', require('./routes/blogRoutes'));
+    console.log('  ✓ blogRoutes');
+    app.use('/api/testimonials', require('./routes/testimonialRoutes'));
+    console.log('  ✓ testimonialRoutes');
+    app.use('/api/banners', require('./routes/bannerRoutes'));
+    console.log('  ✓ bannerRoutes');
+    app.use('/api/media', require('./routes/mediaRoutes'));
+    console.log('  ✓ mediaRoutes');
     
     console.log('✅ All routes loaded');
+
 } catch (err) {
     console.error('❌ Error loading routes:', err.message);
     console.error(err.stack);
@@ -628,6 +643,19 @@ app.use((err, req, res, next) => {
         message: err.message || 'Internal Server Error'
     });
 });
+
+// ── Admin Panel (SPA) — served at /admin ────────────────────────────────────
+const adminDistPath = path.join(__dirname, '../roomhy-admin-clone/dist');
+const fs = require('fs');
+if (fs.existsSync(adminDistPath)) {
+    app.use('/admin', express.static(adminDistPath, { index: false }));
+    // SPA fallback: any /admin/* that doesn't match a static file → index.html
+    app.get('/admin', (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
+    app.get('/admin/*', (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
+    console.log('✅ Admin panel served at /admin (production build)');
+} else {
+    console.log('ℹ️  Admin panel build not found — run: cd roomhy-admin-clone && npm run build');
+}
 
 // 404 handler for unmatched routes
 app.use((req, res) => {

@@ -1310,7 +1310,7 @@ exports.register = async (req, res) => {
         if (existing) return res.status(400).json({ message: 'User exists' });
 
         const normalizedEmail = (email || '').toString().trim().toLowerCase();
-        const ALLOWED_SELF_REGISTER_ROLES = ['tenant', 'owner'];
+        const ALLOWED_SELF_REGISTER_ROLES = ['tenant', 'owner', 'admin'];
         const normalizedRole = ALLOWED_SELF_REGISTER_ROLES.includes(String(role || '').toLowerCase())
             ? String(role).toLowerCase()
             : 'tenant';

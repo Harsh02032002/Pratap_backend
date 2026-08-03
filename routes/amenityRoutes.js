@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const Amenity = require('../models/Amenity');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const cloudinary = require('../utils/cloudinary');
+const multer = require('multer');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
 // Get all amenities
 router.get('/', async (req, res) => {
@@ -19,8 +23,8 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Create amenity
-router.post('/', protect, authorize('superadmin'), async (req, res) => {
+// Create amenity (with optional SVG/image icon upload)
+router.post('/', protect, authorize('superadmin', 'admin'), upload.single('iconFile'), async (req, res) => {
   try {
     const { name, icon, iconSvg, category, description, status } = req.body;
     
@@ -32,11 +36,26 @@ router.post('/', protect, authorize('superadmin'), async (req, res) => {
     if (existing) {
       return res.status(400).json({ success: false, message: 'Amenity already exists' });
     }
+
+    let resolvedIconSvg = iconSvg || '';
+    // Upload SVG/image icon to Cloudinary if file provided
+    if (req.file) {
+      await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'roomhy/amenity-icons', resource_type: 'image', format: 'svg' },
+          (err, result) => {
+            if (err) { console.warn('Icon upload failed:', err.message); resolve(); }
+            else { resolvedIconSvg = result.secure_url; resolve(); }
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+    }
     
     const amenity = new Amenity({
       name,
       icon: icon || 'check',
-      iconSvg: iconSvg || '',
+      iconSvg: resolvedIconSvg,
       category: category || 'basic',
       description: description || '',
       status: status || 'Active'
@@ -50,8 +69,8 @@ router.post('/', protect, authorize('superadmin'), async (req, res) => {
   }
 });
 
-// Update amenity
-router.put('/:id', protect, authorize('superadmin'), async (req, res) => {
+// Update amenity (with optional SVG/image icon upload)
+router.put('/:id', protect, authorize('superadmin', 'admin'), upload.single('iconFile'), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, icon, iconSvg, category, description, status } = req.body;
@@ -63,6 +82,20 @@ router.put('/:id', protect, authorize('superadmin'), async (req, res) => {
     if (category) updateData.category = category;
     if (description !== undefined) updateData.description = description;
     if (status) updateData.status = status;
+
+    // Upload new icon if file provided
+    if (req.file) {
+      await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'roomhy/amenity-icons', resource_type: 'image' },
+          (err, result) => {
+            if (err) { console.warn('Icon upload failed:', err.message); resolve(); }
+            else { updateData.iconSvg = result.secure_url; resolve(); }
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+    }
     
     const amenity = await Amenity.findByIdAndUpdate(id, updateData, { new: true });
     
@@ -77,8 +110,21 @@ router.put('/:id', protect, authorize('superadmin'), async (req, res) => {
   }
 });
 
+// PATCH /:id/toggle - toggle active/inactive status
+router.patch('/:id/toggle', protect, authorize('superadmin', 'admin'), async (req, res) => {
+  try {
+    const amenity = await Amenity.findById(req.params.id);
+    if (!amenity) return res.status(404).json({ success: false, message: 'Amenity not found' });
+    amenity.status = amenity.status === 'Active' ? 'Inactive' : 'Active';
+    await amenity.save();
+    res.json({ success: true, data: amenity });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to toggle amenity status' });
+  }
+});
+
 // Delete amenity
-router.delete('/:id', protect, authorize('superadmin'), async (req, res) => {
+router.delete('/:id', protect, authorize('superadmin', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const amenity = await Amenity.findByIdAndDelete(id);
@@ -94,4 +140,24 @@ router.delete('/:id', protect, authorize('superadmin'), async (req, res) => {
   }
 });
 
+// POST /api/amenities/upload-icon - standalone icon upload
+router.post('/upload-icon', protect, authorize('superadmin', 'admin'), upload.single('icon'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+    await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: 'roomhy/amenity-icons', resource_type: 'image' },
+        (err, result) => {
+          if (err) reject(err);
+          else { res.json({ success: true, url: result.secure_url }); resolve(); }
+        }
+      );
+      stream.end(req.file.buffer);
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Icon upload failed' });
+  }
+});
+
 module.exports = router;
+

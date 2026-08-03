@@ -77,6 +77,8 @@ exports.authorize = (...roles) => {
         if (!req.user) return res.status(401).json({ message: 'Not authenticated' });
         const expanded = roles.includes('superadmin') 
             ? [...roles, 'admin', 'employee', 'areamanager', 'manager'] 
+            : roles.includes('admin')
+            ? [...roles, 'superadmin', 'employee', 'areamanager', 'manager']
             : roles;
         console.log(`[AUTH DEBUG] Path: ${req.method} ${req.originalUrl} | Required: ${roles.join(',')} | User Role: ${req.user.role}`);
         if (!expanded.includes(req.user.role)) {

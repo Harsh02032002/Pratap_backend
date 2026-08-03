@@ -163,20 +163,20 @@ const defaultSeoPages = [
 const websitePageKeys = ['home', 'about', 'contact', 'list-property', 'faq', 'privacy', 'terms', 'login', 'register', 'our-property', 'property-details'];
 
 /**
- * LIST ALL REGISTERED SEO PAGES - Only website public pages
+ * LIST ALL REGISTERED SEO PAGES - All pages including dynamic/custom pages
  */
 exports.getPages = async (req, res) => {
     try {
-        // Find only the known website public pages
-        let pages = await SeoPage.find({ pageKey: { $in: websitePageKeys } }).sort({ createdAt: 1 });
+        // Return ALL pages from database, including dynamic pages created by admin
+        let pages = await SeoPage.find({}).sort({ createdAt: 1 });
         
-        // Check which website pages are missing and seed them
+        // Seed default pages if missing
         const existingKeys = pages.map(p => p.pageKey);
         const missingPages = defaultSeoPages.filter(p => !existingKeys.includes(p.pageKey));
         
         if (missingPages.length > 0) {
             await SeoPage.insertMany(missingPages);
-            pages = await SeoPage.find({ pageKey: { $in: websitePageKeys } }).sort({ createdAt: 1 });
+            pages = await SeoPage.find({}).sort({ createdAt: 1 });
         }
         
         return res.status(200).json({

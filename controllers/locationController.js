@@ -11,7 +11,7 @@ const { uploadImage, deleteImage, getCloudinaryConfig } = require('../utils/clou
  */
 exports.getCities = async (req, res) => {
     try {
-        const dbCities = await City.find({ status: 'Active' }).select('_id name slug state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
+        const dbCities = await City.find({ status: { $in: ['Active', 'active', null, undefined] } }).select('_id name slug state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
         const dbCityNames = dbCities.map(c => c.name);
 
         // Extract cities from all active property & owner models
@@ -34,7 +34,7 @@ exports.getCities = async (req, res) => {
             }
         } catch (e) {}
 
-        const defaultCities = ['Chandigarh', 'Kota', 'Indore', 'Jaipur', 'Delhi', 'Bhopal', 'Nagpur', 'Jodhpur', 'Mumbai', 'Bangalore', 'Chennai', 'Pune', 'Ahmedabad', 'Sikar'];
+        const defaultCities = ['Kota', 'Sikar', 'Indore'];
 
         // Merge all distinct city names
         const allCityNames = [...new Set([
@@ -46,7 +46,10 @@ exports.getCities = async (req, res) => {
             ...defaultCities
         ].filter(Boolean).map(c => String(c).trim()))];
 
-        const cityDataWithCounts = await Promise.all(allCityNames.map(async (cityName) => {
+        // Show all cities - no restriction
+        const filteredCityNames = allCityNames;
+
+        const cityDataWithCounts = await Promise.all(filteredCityNames.map(async (cityName) => {
             const dbMatch = dbCities.find(c => c.name.toLowerCase() === cityName.toLowerCase());
             
             const count = await ApprovedProperty.countDocuments({
@@ -289,7 +292,7 @@ exports.deleteCity = async (req, res) => {
 exports.getAreas = async (req, res) => {
     try {
         const ApprovedProperty = require('../models/ApprovedProperty');
-        const areas = await Area.find({ status: 'Active' })
+        const areas = await Area.find({ status: { $in: ['Active', 'active', null, undefined] } })
             .populate('city')
             .sort({ createdAt: -1 });
 
