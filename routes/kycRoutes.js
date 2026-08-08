@@ -509,7 +509,7 @@ router.post('/submit', formLimiter, captchaProtection({ required: false }), asyn
         // Send email notification to superadmin
         try {
             const mailer = require('../utils/mailer');
-            const superadminEmail = process.env.SUPERADMIN_EMAIL || process.env.MAILJET_FROM_EMAIL || 'roomhy01@gmail.com';
+            const superadminEmail = process.env.SUPERADMIN_EMAIL || 'team@roomhy.com';
             const subject = 'New User Signup - Account Created';
             const html = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">

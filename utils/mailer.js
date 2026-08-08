@@ -9,7 +9,7 @@ function parseBooleanEnv(value, fallback = false) {
 
 function getMailerConfig() {
     return {
-        fromEmail: process.env.FROM_EMAIL || 'no-reply@roomhy.com',
+        fromEmail: process.env.FROM_EMAIL || 'team@roomhy.com',
         fromName: process.env.FROM_NAME || 'RoomHy',
         smtpHost: (process.env.SMTP_HOST || 'smtp.office365.com').trim(),
         smtpPort: Number(process.env.SMTP_PORT || 587),

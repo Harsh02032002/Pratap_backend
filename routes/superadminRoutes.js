@@ -2873,7 +2873,7 @@ router.put('/subscription-settings', protect, authorize('superadmin'), async (re
 // Test Email Route for SMTP Verification
 router.get('/test-email', async (req, res) => {
   try {
-    const to = req.query.to || process.env.SUPERADMIN_EMAIL || 'helloroomhy@gmail.com';
+    const to = req.query.to || process.env.SUPERADMIN_EMAIL || 'team@roomhy.com';
     const { sendMail, getMailerConfig } = require('../utils/mailer');
     const cfg = getMailerConfig();
     const result = await sendMail(

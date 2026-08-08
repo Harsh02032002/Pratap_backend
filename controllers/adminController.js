@@ -319,7 +319,7 @@ exports.createUser = async (req, res) => {
         // Send notification email to superadmin
         try {
             const mailer = require('../utils/mailer');
-            const superadminEmail = 'roomhy01@gmail.com';
+            const superadminEmail = process.env.SUPERADMIN_EMAIL || 'team@roomhy.com';
             const subject = 'New User Created';
             const html = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">

@@ -1385,7 +1385,7 @@ exports.updateChatDecision = async (req, res) => {
             // Send email notification to superadmin about confirmed booking
             try {
                 const mailer = require('../utils/mailer');
-                const superadminEmail = 'roomhy01@gmail.com';
+                const superadminEmail = process.env.SUPERADMIN_EMAIL || 'team@roomhy.com';
                 const subject = 'New Scheduled Booking Confirmed';
                 const html = `
                     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
