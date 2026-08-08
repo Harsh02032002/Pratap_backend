@@ -401,3 +401,9 @@ exports.getWalletSummary = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// Aliases for route handlers
+exports.withdraw = exports.initiateWithdraw;
+exports.initiatePayout = exports.initiateWithdraw;
+exports.getTransferStatus = exports.getPayoutStatus;
+

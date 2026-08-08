@@ -432,9 +432,10 @@ exports.assignTenant = async (req, res) => {
         // Populate for response (include locationCode and owner info)
         await tenant.populate('property', 'title roomType locationCode owner ownerLoginId');
 
-        // Update Room's bed assignment
-        if (roomObj && normalizedBedNo) {
-            const bIndex = Number(normalizedBedNo) - 1;
+        // Update Room's bed assignment & vacancy status
+        if (roomObj) {
+            if (!Array.isArray(roomObj.bedAssignments)) roomObj.bedAssignments = [];
+            const bIndex = Math.max(0, Number(normalizedBedNo || 1) - 1);
             roomObj.bedAssignments[bIndex] = {
                 tenantId: tenant._id,
                 tenantName: tenant.name,
@@ -442,7 +443,60 @@ exports.assignTenant = async (req, res) => {
                 assignedAt: new Date()
             };
             roomObj.markModified('bedAssignments');
+
+            const totalBeds = roomObj.beds || 1;
+            const occupiedCount = roomObj.bedAssignments.filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length;
+            roomObj.isAvailable = occupiedCount < totalBeds;
             await roomObj.save();
+
+            // Recalculate and sync property bed/room counters
+            try {
+                const Room = require('../models/Room');
+                const allPropertyRooms = await Room.find({ property: property._id, isDeleted: false });
+                let totalPropertyBeds = 0;
+                let occupiedPropertyBeds = 0;
+                let occupiedRoomsCount = 0;
+                let totalRoomsCount = allPropertyRooms.length;
+
+                allPropertyRooms.forEach(r => {
+                    const rTotal = r.beds || 1;
+                    const rOcc = (r.bedAssignments || []).filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length;
+                    totalPropertyBeds += rTotal;
+                    occupiedPropertyBeds += rOcc;
+                    if (rOcc > 0) occupiedRoomsCount++;
+                });
+
+                const vacantPropertyBeds = Math.max(0, totalPropertyBeds - occupiedPropertyBeds);
+                const vacantRoomsCount = Math.max(0, totalRoomsCount - occupiedRoomsCount);
+
+                if (property.propertyInfo) {
+                    property.propertyInfo.occupiedBeds = occupiedPropertyBeds;
+                    property.propertyInfo.vacantBeds = vacantPropertyBeds;
+                    property.propertyInfo.occupiedRooms = occupiedRoomsCount;
+                    property.propertyInfo.vacantRooms = vacantRoomsCount;
+                    property.markModified('propertyInfo');
+                    await property.save();
+                }
+
+                const ApprovedProperty = require('../models/ApprovedProperty');
+                await ApprovedProperty.updateOne(
+                    { $or: [{ _id: property._id }, { visitId: property.visitId }] },
+                    {
+                        $set: {
+                            'propertyInfo.occupiedBeds': occupiedPropertyBeds,
+                            'propertyInfo.vacantBeds': vacantPropertyBeds,
+                            'propertyInfo.occupiedRooms': occupiedRoomsCount,
+                            'propertyInfo.vacantRooms': vacantRoomsCount,
+                            occupiedBeds: occupiedPropertyBeds,
+                            vacantBeds: vacantPropertyBeds,
+                            occupiedRooms: occupiedRoomsCount,
+                            vacantRooms: vacantRoomsCount
+                        }
+                    }
+                ).catch(() => {});
+            } catch (syncErr) {
+                console.warn('Property bed counter sync error:', syncErr.message);
+            }
         }
 
         // Create Rent record for this tenant

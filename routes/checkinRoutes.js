@@ -466,9 +466,9 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                 jwtSecret,
                 { expiresIn: '72h' }
             );
-            let appBase = process.env.DIGITAL_CHECKIN_URL || 'http://localhost:5173';
+            let appBase = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || process.env.APP_BASE_URL || 'http://localhost:5173';
             if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
-            const paymentUrl = `/payment/gateway?token=${token}`;
+            const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
             tenant._paymentUrl = paymentUrl;
 
             console.log(`[PAYMENT LINK] Generated payment URL: ${paymentUrl}`);

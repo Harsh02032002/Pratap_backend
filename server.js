@@ -455,6 +455,12 @@ try {
     console.log('  ✓ bannerRoutes');
     app.use('/api/media', require('./routes/mediaRoutes'));
     console.log('  ✓ mediaRoutes');
+
+    // ── Cashfree PG & Payout Gateway Routes ─────────────────────────────────
+    app.use('/api/payments/cashfree', require('./routes/cashfreePaymentRoutes'));
+    console.log('  ✓ cashfreePaymentRoutes');
+    app.use('/api/payouts/cashfree', require('./routes/cashfreePayoutRoutes'));
+    console.log('  ✓ cashfreePayoutRoutes');
     
     console.log('✅ All routes loaded');
 

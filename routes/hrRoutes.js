@@ -117,7 +117,7 @@ router.post(
             tomorrow.setDate(tomorrow.getDate() + 1);
 
             const now = new Date();
-            const checkInTime = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+            const checkInTime = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
 
             let record = await StaffAttendance.findOne({ employeeId: emp._id, date: { $gte: today, $lt: tomorrow } });
             if (record) {
@@ -161,7 +161,7 @@ router.post(
             tomorrow.setDate(tomorrow.getDate() + 1);
 
             const now = new Date();
-            const checkOutTime = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+            const checkOutTime = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
 
             let record = await StaffAttendance.findOne({ employeeId: emp._id, date: { $gte: today, $lt: tomorrow } });
             if (record) {
