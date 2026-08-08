@@ -143,12 +143,11 @@ module.exports = (io) => {
         // Confirm to sender
         socket.emit('message_sent', { success: true, id: msg._id });
 
-        // Run Groq AI moderation asynchronously in the background
-        const isModeratedChat = await isOwnerTenantChat(from_login_id, to_login_id);
-        if (isModeratedChat) {
+        // Run AI & Regex moderation on all non-system 1:1 messages
+        if (from_login_id !== 'system') {
           const { moderateChatMessageAsync } = require('../utils/moderationHelper');
           moderateChatMessageAsync(msg, to_login_id).catch(err => {
-            console.error('Error running async moderation:', err.message);
+            console.error('Error running async moderation (Socket):', err.message);
           });
         }
 

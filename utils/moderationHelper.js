@@ -244,13 +244,21 @@ function detectViolation(text, settings = {}) {
     /\b(no\s+brokerage|save\s+commission|brokerage\s+bach)\b/i,
     /\b(platform|brokerage|commission)\b/i,
     
+    // Payment & Arrival Bypass Patterns (Hinglish/Hindi/English)
+    /\b(paise|paisa|cash|rent|amount|payment|deposit|advance)\s+.*?\b(aa\s*kar|aakar|aake|aao|aana|aane|yaha[n]?|yha|waha[n]?|wahin|room|hostel|pg|flat|direct|offline)\b/i,
+    /\b(aa\s*kar|aakar|aake|aao|aana|aane|yaha[n]?|yha|waha[n]?|wahin|room|hostel|pg|flat|direct|offline)\s+.*?\b(paise|paisa|cash|rent|amount|payment|deposit|advance)\b/i,
+    /\b(aa\s*kar|aakar|aake|aao)\s+.*?\b(de\s*de|de\s*dena|de\s*do|de\s*dio|de\s*diyo|pay\s*kar|de\w*)\b/i,
+    /\b(paise|paisa|payment|rent|cash|advance|deposit)\s+.*?\b(de\s*de|de\s*dena|de\s*do|de\s*dio|de\s*diyo)\b/i,
+    /\b(yaha[n]?|yha|room|hostel|pg|flat)\s+.*?\b(aa\s*kar|aakar|aake|aao|aana)\s+.*?\b(de\w*|kar\w*)\b/i,
+    /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s*cash|direct\s*cash)\b/i,
+
     // Offline Settle / Deal / Payment
-    /\boffline\s+([a-zA-Z]*\s+){0,2}(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*|krte|karte|mil\w*|meet\w*|dekh\w*)\b/i,
-    /\b(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*)\s+([a-zA-Z]*\s+){0,2}offline\b/i,
-    /\bcash\s+([a-zA-Z]*\s+){0,2}(payment\w*|de\w*|dena|me|main|rent|deposit|advance|preferred)\b/i,
-    /\b(pay\w*|payment\w*|rent|deposit|advance|paise|paisa)\s+([a-zA-Z]*\s+){0,2}cash\b/i,
-    /\bdirect\s+([a-zA-Z]*\s+){0,2}(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\b/i,
-    /\b(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\s+([a-zA-Z]*\s+){0,2}direct\b/i,
+    /\boffline\s+([a-zA-Z]*\s+){0,4}(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*|krte|karte|mil\w*|meet\w*|dekh\w*)\b/i,
+    /\b(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*)\s+([a-zA-Z]*\s+){0,4}offline\b/i,
+    /\bcash\s+([a-zA-Z]*\s+){0,4}(payment\w*|de\w*|dena|me|main|rent|deposit|advance|preferred)\b/i,
+    /\b(pay\w*|payment\w*|rent|deposit|advance|paise|paisa)\s+([a-zA-Z]*\s+){0,4}cash\b/i,
+    /\bdirect\s+([a-zA-Z]*\s+){0,4}(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\b/i,
+    /\b(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\s+([a-zA-Z]*\s+){0,4}direct\b/i,
     
     // Hostel / PG / Bahar meeting & arrival verbs
     /\b(pg|hostel|room|flat|apartment|bed|office|bahar|outside|location|address|gate|reception)\s+(pe|par|me|in|se)?\s*([a-zA-Z]*\s+){0,3}(mil\w*|aajao|aa\s+ja|connect\w*|aao|puch\w*|settle\w*|dekh\w*|visit\w*|decide\w*|final\w*|pay\w*|aa\b|aana\b|aane\b|aaunga\b|aaungi\b|aunga\b|aungi\b|aaye\w*|aaya\w*)\b/i,
@@ -575,8 +583,23 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       return `${roleLabel}: "${text}"`;
     }).join('\n');
 
-    // Call AI API for moderation with conversation context
-    const moderation = await aiModerationService.moderateMessage(messageText, senderRole, receiverRole, contextHistory);
+    // 1. Instant local regex detection check
+    const settings = await ChatSettings.findOne({ ownerLoginId: 'SUPER_ADMIN' }).lean();
+    const localCheck = detectViolation(messageText, settings || {});
+    let moderation = { violation: false, type: 'none', confidence: 0, reason: '' };
+
+    if (localCheck.violation) {
+      console.log(`⚡ Instant Local Violation Detected on message ${messageDoc._id}:`, localCheck.violation);
+      moderation = {
+        violation: true,
+        type: localCheck.violation,
+        confidence: 0.98,
+        reason: `Detected ${localCheck.violation} keyword pattern in chat message.`
+      };
+    } else {
+      // 2. Call AI API for moderation with conversation context if local check didn't trigger
+      moderation = await aiModerationService.moderateMessage(messageText, senderRole, receiverRole, contextHistory);
+    }
 
     // Save moderation status on the ChatMessage document to avoid duplicate runs
     await ChatMessage.updateOne(
@@ -632,40 +655,43 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
         throw saveErr;
       }
 
-      // Insert system warning message in the conversation room
-      const warningText = `⚠️ System Warning: Sharing phone numbers, emails, links, or negotiating/paying offline is not allowed. Please keep all chat and payments on Roomhy.`;
+      // Insert system warning message in both conversation rooms if applicable
+      const warningText = `⚠️ Roomhy Security Warning: Asking for offline payments or bypassing platform commission is strictly prohibited. If you continue to negotiate offline or share direct payment/contact details, your account will be BLOCKED immediately and permanently suspended.`;
       
-      const systemMessage = new ChatMessage({
-        room_id: messageDoc.room_id,
-        conversation_id: messageDoc.conversation_id || null,
+      const systemMsgDoc = {
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
         message: warningText,
         message_type: 'system',
-        is_read: false
-      });
-      await systemMessage.save();
+        is_read: false,
+        created_at: new Date()
+      };
 
-      // Broadcast warning message to both participants via socket
-      if (global.io) {
-        const payload = {
-          _id: systemMessage._id,
-          room_id: messageDoc.room_id,
-          conversation_id: systemMessage.conversation_id,
-          sender_login_id: 'system',
-          sender_name: 'Roomhy System',
-          sender_role: 'superadmin',
-          message: systemMessage.message,
-          message_type: 'system',
-          created_at: systemMessage.created_at
-        };
-        // Emit to both receiver and sender rooms so both screens update in real-time
-        global.io.to(messageDoc.room_id).emit('receive_message', { ...payload, room_id: messageDoc.room_id });
-        global.io.to(messageDoc.room_id).emit('new_message', systemMessage);
-        
-        global.io.to(messageDoc.sender_login_id).emit('receive_message', { ...payload, room_id: messageDoc.sender_login_id });
-        global.io.to(messageDoc.sender_login_id).emit('new_message', systemMessage);
+      const roomIdsToWarn = [...new Set([messageDoc.room_id, messageDoc.sender_login_id, receiverLoginId].filter(Boolean))];
+      
+      for (const rId of roomIdsToWarn) {
+        const sysMsg = await ChatMessage.create({
+          ...systemMsgDoc,
+          room_id: rId,
+          conversation_id: messageDoc.conversation_id || null
+        });
+
+        if (global.io) {
+          const payload = {
+            _id: sysMsg._id,
+            room_id: rId,
+            conversation_id: sysMsg.conversation_id,
+            sender_login_id: 'system',
+            sender_name: 'Roomhy System',
+            sender_role: 'superadmin',
+            message: sysMsg.message,
+            message_type: 'system',
+            created_at: sysMsg.created_at
+          };
+          global.io.to(rId).emit('receive_message', payload);
+          global.io.to(rId).emit('new_message', sysMsg);
+        }
       }
 
       // Emit new_violation_alert to Super Admin

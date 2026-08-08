@@ -494,9 +494,8 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
-    // Run Groq AI moderation asynchronously in the background
-    const isModeratedChat = await isOwnerTenantChat(from_login_id, to_login_id);
-    if (isModeratedChat) {
+    // Run AI & Regex moderation on all non-system 1:1 messages
+    if (from_login_id !== 'system') {
       const { moderateChatMessageAsync } = require('../utils/moderationHelper');
       moderateChatMessageAsync(msg, to_login_id).catch(err => {
         console.error('Error running async moderation (REST):', err.message);
