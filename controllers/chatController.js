@@ -392,7 +392,8 @@ exports.deleteMessage = async (req, res) => {
 // Send a message via REST API (useful for automated messages)
 exports.sendMessage = async (req, res) => {
   try {
-    const { to_login_id, from_login_id, message_type, file_url } = req.body;
+    const { to_login_id, from_login_id, message: inputMessage, text, content, message_type, file_url } = req.body;
+    let message = inputMessage || text || content || '';
     let targetRoomId = to_login_id;
     const cleanTo = String(to_login_id || '').toLowerCase().trim();
     if (cleanTo === 'verified owner' || cleanTo === 'own001' || cleanTo === 'null' || cleanTo === 'undefined') {

@@ -377,6 +377,7 @@ exports.assignTenant = async (req, res) => {
                 relationship: additional?.relationship
             },
             remarks: additional?.remarks,
+            advanceChargeAmount: advanceChargeAmount,
             loginId,
             tempPassword, // Store for now; will be displayed once, then forgotten
             user: user._id,
@@ -424,6 +425,7 @@ exports.assignTenant = async (req, res) => {
                     ...(gstCharges != null && { gstCharges }),
                     ...(propertyAddress && { propertyAddress }),
                     ...(permanentAddress && { permanentAddress }),
+                    ...(advanceChargeAmount > 0 && { advanceChargeAmount }),
                     securityDeposit: depositTotal || 0
                 }
             }
@@ -507,6 +509,7 @@ exports.assignTenant = async (req, res) => {
         let rent = await Rent.findOne({ tenantLoginId: loginId, collectionMonth });
 
         if (!rent) {
+            const advChargeNum = Number(advanceChargeAmount || 0);
             rent = await Rent.create({
                 propertyName: rentPropertyName,
                 roomNumber: roomNo,
@@ -516,7 +519,8 @@ exports.assignTenant = async (req, res) => {
                 tenantPhone: phone,
                 tenantLoginId: loginId,
                 rentAmount: rentAmount,
-                totalDue: rentAmount,
+                advanceChargeAmount: advChargeNum,
+                totalDue: rentAmount + advChargeNum,
                 paidAmount: 0,
                 paymentStatus: 'pending',
                 moveInDate: moveInDate ? new Date(moveInDate) : new Date(),
@@ -524,7 +528,7 @@ exports.assignTenant = async (req, res) => {
                 collectionMonth: collectionMonth,
                 createdAt: new Date()
             });
-            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Amount: ₹${rentAmount} (Pending onboarding payment)`);
+            console.log(`[RENT RECORD CREATED] Rent ID: ${rent._id}, Rent: ₹${rentAmount}, Advance Charge: ₹${advChargeNum}, Total Due: ₹${rentAmount + advChargeNum}`);
         } else {
             console.log(`[RENT ALREADY EXISTS] Skipped duplicate rent generation for ${loginId} in ${collectionMonth}`);
         }
