@@ -23,6 +23,26 @@ const APP_URL = process.env.APP_URL || process.env.APP_BASE_URL || process.env.W
 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || ADMIN_URL;
 const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'https://api.roomhy.com';
 
+// Tenant-facing hosts the payment link is allowed to point at. This is checked
+// against the `frontendUrl`/`origin` a client submits so a local dev run emails
+// a localhost link while a deployed run always emails the real tenant domain —
+// admin.roomhy.com is deliberately excluded (that's the staff app, not tenant-facing).
+const TENANT_PAYMENT_HOSTS = new Set(['localhost', '127.0.0.1', 'roomhy.com', 'www.roomhy.com', 'app.roomhy.com', 'www.app.roomhy.com']);
+
+function resolvePaymentAppBase(frontendOrigin) {
+    if (frontendOrigin) {
+        try {
+            const u = new URL(frontendOrigin);
+            if (TENANT_PAYMENT_HOSTS.has(u.hostname.toLowerCase())) {
+                return u.origin;
+            }
+        } catch (_) { /* ignore invalid/untrusted origin, fall back below */ }
+    }
+    let appBase = process.env.FRONTEND_URL || 'https://www.roomhy.com';
+    if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
+    return appBase;
+}
+
 const otpStore = new Map();
 
 function keyFor(role, loginId, aadhaarNumber) {
@@ -115,8 +135,8 @@ function buildOtpEmail({ otp, name, loginId, role = 'Owner', expiryMinutes = 10 
 
 async function generateTenantAgreementPdfBuffer(tenant, record = {}) {
     const agreement = record?.tenantAgreement || {};
-    const profile   = tenant?.digitalCheckin?.profile || {};
-    const details   = tenant?.digitalCheckin?.agreementDetails || {};
+    const profile = tenant?.digitalCheckin?.profile || {};
+    const details = tenant?.digitalCheckin?.agreementDetails || {};
 
     // Resolve owner name from Owner model if not already in details
     let resolvedOwnerName = details.ownerName || tenant.ownerName || '';
@@ -125,7 +145,7 @@ async function generateTenantAgreementPdfBuffer(tenant, record = {}) {
             const ownerDoc = await Owner.findOne({ loginId: String(tenant.ownerLoginId).toUpperCase() })
                 .select('name profile').lean();
             resolvedOwnerName = ownerDoc?.name || ownerDoc?.profile?.name || '';
-        } catch (_) {}
+        } catch (_) { }
     }
 
     // Security deposit: prefer stored value, then sum from tenant model
@@ -140,35 +160,35 @@ async function generateTenantAgreementPdfBuffer(tenant, record = {}) {
             const end = new Date(tenant.moveInDate);
             end.setMonth(end.getMonth() + 11);
             licenseEndDate = end.toISOString().slice(0, 10);
-        } catch (_) {}
+        } catch (_) { }
     }
 
     return generateAgreementPdfBuffer({
-        tenantName:          details.tenantName          || tenant.name                          || profile.name            || 'Tenant',
-        tenantAddress:       details.permanentAddress    || details.tenantAddress                || profile.permanentAddress || tenant.address || '-',
-        tenantEmail:         details.tenantEmail         || tenant.email                         || '-',
-        tenantPhone:         details.tenantPhone         || tenant.phone                         || profile.phone           || '-',
-        backupEmail:         details.backupEmail         || '-',
-        backupPhone:         details.backupPhone         || tenant.guardianNumber                || profile.guardianNumber   || '-',
-        propertyName:        details.propertyName        || tenant.propertyTitle                 || profile.propertyName    || 'RoomHy Property',
-        propertyAddress:     details.propertyAddress     || '-',
-        accommodationType:   details.accommodationType   || profile.accommodationType            || tenant.roomType         || (tenant.roomNo ? `Room ${tenant.roomNo}` : '-'),
-        roomNumber:          details.roomNumber          || tenant.roomNo                        || profile.roomNo          || '-',
-        ownerName:           resolvedOwnerName || '-',
-        rentAmount:          details.rentAmount          || String(tenant.agreedRent || profile.agreedRent || '-'),
-        duration:            details.licenseDuration     || details.duration || '-',
-        licenseStartDate:    details.licenseStartDate    || (tenant.moveInDate ? new Date(tenant.moveInDate).toISOString().slice(0, 10) : '-'),
+        tenantName: details.tenantName || tenant.name || profile.name || 'Tenant',
+        tenantAddress: details.permanentAddress || details.tenantAddress || profile.permanentAddress || tenant.address || '-',
+        tenantEmail: details.tenantEmail || tenant.email || '-',
+        tenantPhone: details.tenantPhone || tenant.phone || profile.phone || '-',
+        backupEmail: details.backupEmail || '-',
+        backupPhone: details.backupPhone || tenant.guardianNumber || profile.guardianNumber || '-',
+        propertyName: details.propertyName || tenant.propertyTitle || profile.propertyName || 'RoomHy Property',
+        propertyAddress: details.propertyAddress || '-',
+        accommodationType: details.accommodationType || profile.accommodationType || tenant.roomType || (tenant.roomNo ? `Room ${tenant.roomNo}` : '-'),
+        roomNumber: details.roomNumber || tenant.roomNo || profile.roomNo || '-',
+        ownerName: resolvedOwnerName || '-',
+        rentAmount: details.rentAmount || String(tenant.agreedRent || profile.agreedRent || '-'),
+        duration: details.licenseDuration || details.duration || '-',
+        licenseStartDate: details.licenseStartDate || (tenant.moveInDate ? new Date(tenant.moveInDate).toISOString().slice(0, 10) : '-'),
         licenseEndDate,
-        licenseFeeDueDate:   details.licenseFeeDueDate   || '5',
-        moveOutCharges:      details.moveOutCharges      || '-',
+        licenseFeeDueDate: details.licenseFeeDueDate || '5',
+        moveOutCharges: details.moveOutCharges || '-',
         noticePeriodCharges: details.noticePeriodCharges || '-',
-        securityDeposit:     secDeposit,
-        inclusions:          details.inclusions          || profile.inclusions                   || '-',
+        securityDeposit: secDeposit,
+        inclusions: details.inclusions || profile.inclusions || '-',
         minimumStayDuration: details.minimumStayDuration || '3 Months',
-        gstCharges:          details.gstCharges          || '0',
-        signatureDataUrl:    agreement.signatureDataUrl  || tenant?.digitalCheckin?.agreement?.signatureDataUrl || '',
-        eSignName:           tenant.agreementESignName   || agreement.eSignName                  || tenant.name || '',
-        signedDate:          agreement.signedAt ? new Date(agreement.signedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)
+        gstCharges: details.gstCharges || '0',
+        signatureDataUrl: agreement.signatureDataUrl || tenant?.digitalCheckin?.agreement?.signatureDataUrl || '',
+        eSignName: tenant.agreementESignName || agreement.eSignName || tenant.name || '',
+        signedDate: agreement.signedAt ? new Date(agreement.signedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)
     });
 }
 
@@ -384,7 +404,7 @@ function buildOwnerTenantSignedEmail(ownerName, tenant) {
 </html>`;
 }
 
-async function completeTenantAgreementAndNotify(loginId, { requestId = '', provider = '', callbackPayload = null } = {}) {
+async function completeTenantAgreementAndNotify(loginId, { requestId = '', provider = '', callbackPayload = null, frontendOrigin = '' } = {}) {
     const normalizedLoginId = String(loginId || '').toUpperCase();
     const record = await CheckinRecord.findOne({ loginId: normalizedLoginId, role: 'tenant' });
     if (!record) throw new Error('Tenant check-in record not found');
@@ -440,6 +460,8 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
             let rent = await Rent.findOne({ tenantLoginId: tenant.loginId, paymentStatus: 'pending' }).sort({ createdAt: -1 });
             if (!rent) {
                 console.log(`[PAYMENT LINK] No pending rent found, creating new rent record`);
+                const rentAmount = tenant.agreedRent || 0;
+                const advanceChargeAmount = Math.max(0, parseInt(tenant.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
                 rent = new Rent({
                     tenantId: tenant._id,
                     tenantLoginId: tenant.loginId,
@@ -449,12 +471,13 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                     ownerLoginId: tenant.ownerLoginId,
                     propertyName: tenant.propertyTitle || 'RoomHy Property',
                     roomNumber: tenant.roomNo || '',
-                    rentAmount: tenant.agreedRent || 0,
-                    totalDue: tenant.agreedRent || 0,
+                    rentAmount,
+                    advanceChargeAmount,
+                    totalDue: rentAmount + advanceChargeAmount,
                     paymentStatus: 'pending'
                 });
                 await rent.save();
-                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}`);
+                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}, advance: ${advanceChargeAmount}`);
             }
             const rentRecordId = rent._id;
             const jwtSecret = process.env.JWT_SECRET;
@@ -466,18 +489,17 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                 jwtSecret,
                 { expiresIn: '72h' }
             );
-            let appBase = process.env.DIGITAL_CHECKIN_URL || 'http://localhost:5173';
-            if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
-            const paymentUrl = `/payment/gateway?token=${token}`;
+            const appBase = resolvePaymentAppBase(frontendOrigin);
+            const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
             tenant._paymentUrl = paymentUrl;
 
             console.log(`[PAYMENT LINK] Generated payment URL: ${paymentUrl}`);
 
             if (tenant.paymentLinkStatus !== 'sent') {
-            console.log(`[PAYMENT LINK] Sending email to: ${tenant.email}`);
+                console.log(`[PAYMENT LINK] Sending email to: ${tenant.email}`);
 
-            const subject = `RoomHy Onboarding — ${tenant.propertyTitle || 'RoomHy Property'}`;
-            const paymentHtml = `<!DOCTYPE html>
+                const subject = `RoomHy Onboarding — ${tenant.propertyTitle || 'RoomHy Property'}`;
+                const paymentHtml = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
@@ -507,11 +529,11 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
   </table>
 </body>
 </html>`;
-            const paymentText = `Dear ${tenant.name || 'Tenant'},\n\nYour KYC and rental agreement for ${tenant.propertyTitle || 'RoomHy Property'} are complete.\n\nPlease proceed with your onboarding payment using the link below:\n${paymentUrl}\n\nThis link is valid for 72 hours.\n\nRoomHy Support Team\nsupport@roomhy.com`;
-            await sendMail(tenant.email, subject, paymentText, paymentHtml);
-            tenant.paymentLinkStatus = 'sent';
-            await tenant.save();
-            console.log(`[PAYMENT LINK] ✓ Successfully sent to ${tenant.email} for ${tenant.loginId}`);
+                const paymentText = `Dear ${tenant.name || 'Tenant'},\n\nYour KYC and rental agreement for ${tenant.propertyTitle || 'RoomHy Property'} are complete.\n\nPlease proceed with your onboarding payment using the link below:\n${paymentUrl}\n\nThis link is valid for 72 hours.\n\nRoomHy Support Team\nsupport@roomhy.com`;
+                await sendMail(tenant.email, subject, paymentText, paymentHtml);
+                tenant.paymentLinkStatus = 'sent';
+                await tenant.save();
+                console.log(`[PAYMENT LINK] ✓ Successfully sent to ${tenant.email} for ${tenant.loginId}`);
             } // end if not already sent
         } else {
             console.log(`[PAYMENT LINK] Skipped - paymentLinkStatus is paid`);
@@ -684,7 +706,7 @@ router.post('/owner/profile', async (req, res) => {
         // Mirror to Owner collection so superadmin owner list can show this data
         const existingOwner = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).lean();
         const existingProfile = existingOwner?.profile || {};
-        
+
         const updatedOwner = await Owner.findOneAndUpdate(
             { loginId: String(loginId).toUpperCase() },
             {
@@ -750,12 +772,12 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
     try {
         const { loginId, aadhaarLinkedPhone, aadhaarNumber, email } = req.body || {};
         console.log('[CHECKIN KYC] Received send-otp request:', { loginId, aadhaarLinkedPhone, aadhaarNumber, email });
-        
+
         if (!loginId || !aadhaarLinkedPhone || !aadhaarNumber) {
             console.log('[CHECKIN KYC] Missing fields - loginId:', !!loginId, 'phone:', !!aadhaarLinkedPhone, 'aadhaar:', !!aadhaarNumber);
             return res.status(400).json({ success: false, message: 'Missing KYC fields' });
         }
-        
+
         // Validate Aadhaar format (12 digits)
         if (!/^\d{12}$/.test(aadhaarNumber)) {
             console.log('[CHECKIN KYC] Invalid aadhaar format:', aadhaarNumber, 'length:', aadhaarNumber.length);
@@ -857,12 +879,12 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
             return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
         }
         otpStore.delete(k);
-        
+
         const record = await upsertRecord(loginId, 'owner', { 'ownerKyc.otpVerified': true });
-        
+
         // Get owner details
         const owner = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).lean();
-        
+
         const updatedOwner = await Owner.findOneAndUpdate(
             { loginId: String(loginId).toUpperCase() },
             {
@@ -881,7 +903,7 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
             const baseUrl = APP_URL;
             const ownerPassword = owner.checkinPassword || owner.credentials?.password || 'default';
             const fullLoginUrl = `${baseUrl}/propertyowner/index`;
-            
+
             const emailHtml = `
                 <!DOCTYPE html>
                 <html>
@@ -1244,7 +1266,7 @@ router.get('/tenant/profile/:loginId', async (req, res) => {
                 const ownerDoc = await Owner.findOne({ loginId: String(tenant.ownerLoginId).toUpperCase() })
                     .select('name profile').lean();
                 ownerName = ownerDoc?.name || ownerDoc?.profile?.name || '';
-            } catch (_) {}
+            } catch (_) { }
         }
 
         // Resolve property security deposit fallback if tenant's deposit is missing/zero or agreementDetails deposit is missing/zero
@@ -1263,7 +1285,7 @@ router.get('/tenant/profile/:loginId', async (req, res) => {
                     ]
                 }).select('securityDeposit pricing').lean();
                 propSecurityDeposit = p?.pricing?.securityDeposit || p?.securityDeposit || '';
-            } catch (_) {}
+            } catch (_) { }
         }
 
         if (propSecurityDeposit) {
@@ -1347,27 +1369,27 @@ router.post('/tenant/profile', async (req, res) => {
         const prev = tenant.digitalCheckin.agreementDetails || {};
         tenant.digitalCheckin.agreementDetails = {
             ...prev,
-            tenantName:          name || tenant.name || '',
-            tenantEmail:         email || tenant.email || '',
-            tenantPhone:         phone || tenant.phone || '',
-            backupPhone:         guardianNumber || prev.backupPhone || '',
-            backupEmail:         backupEmail || prev.backupEmail || '',
-            permanentAddress:    permanentAddress || prev.permanentAddress || '',
-            accommodationType:   accommodationType || prev.accommodationType || '',
-            propertyName:        propertyName || tenant.propertyTitle || '',
-            propertyAddress:     propertyAddress || prev.propertyAddress || '',
-            roomNumber:          roomNo || tenant.roomNo || '',
-            rentAmount:          agreedRent ? String(agreedRent) : (tenant.agreedRent ? String(tenant.agreedRent) : ''),
-            licenseStartDate:    moveInDate || '',
-            licenseDuration:     licenseDuration || prev.licenseDuration || '',
-            licenseEndDate:      licenseEndDate || prev.licenseEndDate || '',
-            licenseFeeDueDate:   licenseFeeDueDate || prev.licenseFeeDueDate || '5',
-            moveOutCharges:      moveOutCharges || prev.moveOutCharges || '0',
+            tenantName: name || tenant.name || '',
+            tenantEmail: email || tenant.email || '',
+            tenantPhone: phone || tenant.phone || '',
+            backupPhone: guardianNumber || prev.backupPhone || '',
+            backupEmail: backupEmail || prev.backupEmail || '',
+            permanentAddress: permanentAddress || prev.permanentAddress || '',
+            accommodationType: accommodationType || prev.accommodationType || '',
+            propertyName: propertyName || tenant.propertyTitle || '',
+            propertyAddress: propertyAddress || prev.propertyAddress || '',
+            roomNumber: roomNo || tenant.roomNo || '',
+            rentAmount: agreedRent ? String(agreedRent) : (tenant.agreedRent ? String(tenant.agreedRent) : ''),
+            licenseStartDate: moveInDate || '',
+            licenseDuration: licenseDuration || prev.licenseDuration || '',
+            licenseEndDate: licenseEndDate || prev.licenseEndDate || '',
+            licenseFeeDueDate: licenseFeeDueDate || prev.licenseFeeDueDate || '5',
+            moveOutCharges: moveOutCharges || prev.moveOutCharges || '0',
             noticePeriodCharges: noticePeriodCharges || prev.noticePeriodCharges || '0',
-            securityDeposit:     securityDeposit || prev.securityDeposit || (tenant.securityDepositTotal ? String(tenant.securityDepositTotal) : ''),
-            inclusions:          inclusions || prev.inclusions || '',
+            securityDeposit: securityDeposit || prev.securityDeposit || (tenant.securityDepositTotal ? String(tenant.securityDepositTotal) : ''),
+            inclusions: inclusions || prev.inclusions || '',
             minimumStayDuration: minimumStayDuration || prev.minimumStayDuration || '3 Months',
-            gstCharges:          gstCharges || prev.gstCharges || '0',
+            gstCharges: gstCharges || prev.gstCharges || '0',
             updatedAt: new Date()
         };
 
@@ -1553,7 +1575,7 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
         tenant.kyc.aadhaarNumber = aadhaarNumber;
         tenant.kyc.aadhar = aadhaarNumber;
         if (aadhaarFront) tenant.kyc.aadhaarFront = aadhaarFront;
-        if (aadhaarBack)  tenant.kyc.aadhaarBack  = aadhaarBack;
+        if (aadhaarBack) tenant.kyc.aadhaarBack = aadhaarBack;
         if (mismatchReasons.length > 0) tenant.kyc.mismatchReasons = mismatchReasons.join('; ');
 
         tenant.kycStatus = targetKycStatus;
@@ -1566,14 +1588,14 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
             otpVerified: true,
             otpVerifiedAt: new Date(),
             ...(aadhaarFront && { aadhaarFront }),
-            ...(aadhaarBack  && { aadhaarBack }),
-            ...(tenantPhoto  && { tenantPhoto }),
+            ...(aadhaarBack && { aadhaarBack }),
+            ...(tenantPhoto && { tenantPhoto }),
             mismatchReasons: mismatchReasons.join('; ')
         };
         tenant.updatedAt = new Date();
         await tenant.save();
 
-        const record = await upsertRecord(normalizedLoginId, 'tenant', { 
+        const record = await upsertRecord(normalizedLoginId, 'tenant', {
             'tenantKyc.otpVerified': true,
             'tenantKyc.kycStatus': targetKycStatus,
             'tenantKyc.mismatchReasons': mismatchReasons.join('; ')
@@ -1782,7 +1804,7 @@ router.post('/tenant/kyc/digilocker/complete', otpIpLimiter, otpLimiter, async (
 
 router.post('/tenant/agreement', async (req, res) => {
     try {
-        const { loginId, eSignName, accepted, signatureDataUrl } = req.body || {};
+        const { loginId, eSignName, accepted, signatureDataUrl, frontendUrl, origin } = req.body || {};
         if (!loginId || !eSignName || accepted !== true || !signatureDataUrl) {
             return res.status(400).json({ success: false, message: 'Agreement acceptance, e-sign, and tenant signature are required' });
         }
@@ -1842,7 +1864,8 @@ router.post('/tenant/agreement', async (req, res) => {
         const completion = await completeTenantAgreementAndNotify(normalizedLoginId, {
             requestId: '',
             provider: 'roomhy-esign',
-            callbackPayload: { source: 'roomhy-custom-esign' }
+            callbackPayload: { source: 'roomhy-custom-esign' },
+            frontendOrigin: frontendUrl || origin || ''
         });
         record = completion.record;
 

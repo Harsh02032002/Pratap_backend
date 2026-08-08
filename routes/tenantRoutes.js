@@ -1003,6 +1003,7 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         if (req.body.noticePeriodCharges !== undefined) agd.noticePeriodCharges = req.body.noticePeriodCharges;
         if (req.body.inclusions !== undefined) agd.inclusions = req.body.inclusions;
         if (req.body.gstCharges !== undefined) agd.gstCharges = req.body.gstCharges;
+        if (req.body.advanceCharge !== undefined) agd.advanceCharge = req.body.advanceCharge;
         if (req.body.propertyAddress !== undefined) agd.propertyAddress = req.body.propertyAddress;
         if (req.body.permanentAddress !== undefined) agd.permanentAddress = req.body.permanentAddress;
         if (tenant.securityDepositTotal !== undefined) agd.securityDeposit = tenant.securityDepositTotal;

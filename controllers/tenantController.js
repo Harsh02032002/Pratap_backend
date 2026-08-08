@@ -154,9 +154,11 @@ exports.assignTenant = async (req, res) => {
             securityDepositTotal, securityDepositPaid, securityDepositBalance,
             electricityCharge, maintenanceCharge,
             minStay, noticePeriod, rentDueDate, accommodationType, lateFee,
-            licenseDuration, moveOutCharges, noticePeriodCharges, inclusions, gstCharges,
+            licenseDuration, moveOutCharges, noticePeriodCharges, inclusions, gstCharges, advanceCharge,
             propertyAddress, permanentAddress
         } = req.body;
+
+        const advanceChargeAmount = Math.max(0, parseInt(advanceCharge, 10) || 0);
 
         let depositTotal = Math.max(0, parseInt(securityDepositTotal, 10) || 0);
         const depositPaid = Math.max(0, parseInt(securityDepositPaid, 10) || 0);
@@ -422,6 +424,7 @@ exports.assignTenant = async (req, res) => {
                     ...(noticePeriodCharges != null && { noticePeriodCharges }),
                     ...(inclusions && { inclusions }),
                     ...(gstCharges != null && { gstCharges }),
+                    ...(advanceCharge != null && { advanceCharge: advanceChargeAmount }),
                     ...(propertyAddress && { propertyAddress }),
                     ...(permanentAddress && { permanentAddress }),
                     securityDeposit: depositTotal || 0

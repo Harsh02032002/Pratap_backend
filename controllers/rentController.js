@@ -2458,6 +2458,8 @@ exports.verifyPaymentPageIdentity = async (req, res) => {
       if (tenant) {
         rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
         if (!rent) {
+          const rentAmount = tenant.agreedRent || 0;
+          const advanceChargeAmount = Math.max(0, parseInt(tenant.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
           rent = new Rent({
             tenantId: tenant._id,
             tenantLoginId: tenant.loginId,
@@ -2467,8 +2469,9 @@ exports.verifyPaymentPageIdentity = async (req, res) => {
             ownerLoginId: tenant.ownerLoginId,
             propertyName: tenant.propertyTitle || 'RoomHy Property',
             roomNumber: tenant.roomNo || '',
-            rentAmount: (tenant.agreedRent || 0),
-            totalDue: (tenant.agreedRent || 0),
+            rentAmount,
+            advanceChargeAmount,
+            totalDue: rentAmount + advanceChargeAmount,
             paymentStatus: 'pending'
           });
           await rent.save();
@@ -2479,6 +2482,19 @@ exports.verifyPaymentPageIdentity = async (req, res) => {
 
     if (!rent) {
       return res.status(404).json({ message: 'Associated payment record not found.' });
+    }
+
+    // Keep a still-pending amount in sync with the tenant's latest advance charge,
+    // e.g. it was added/edited after this rent record was first generated.
+    if (rent.paymentStatus === 'pending') {
+      const tenantForSync = await Tenant.findOne({ loginId: decoded.loginId })
+        .select('digitalCheckin.agreementDetails.advanceCharge').lean();
+      const latestAdvance = Math.max(0, parseInt(tenantForSync?.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
+      if (latestAdvance !== (rent.advanceChargeAmount || 0)) {
+        rent.advanceChargeAmount = latestAdvance;
+        rent.totalDue = (rent.rentAmount || 0) + latestAdvance;
+        await rent.save();
+      }
     }
 
     if (rent.paymentStatus === 'paid') {
@@ -2514,6 +2530,7 @@ exports.verifyPaymentPageIdentity = async (req, res) => {
       ownerName,
       tenantName,
       rentAmount: rent.totalDue || rent.rentAmount,
+      advanceAmount: rent.advanceChargeAmount || 0,
       rentId: rent._id
     });
   } catch (err) {
