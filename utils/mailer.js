@@ -684,11 +684,11 @@ async function sendDirectWhatsAppOtp(toPhone, otp) {
 async function sendWhatsAppTemplate(toPhone, templateName, languageCode, bodyParams, cfg) {
     if (!toPhone || !templateName) return false;
     const endpoint = `https://graph.facebook.com/${cfg.whatsappApiVersion}/${cfg.whatsappPhoneNumberId}/messages`;
-    const parameters = bodyParams.map(p => {
-        if (p && typeof p === 'object' && p.name) {
-            return { type: 'text', parameter_name: p.name, text: String(p.value ?? '') };
+    const parameters = bodyParams.map((p, idx) => {
+        if (p && typeof p === 'object' && (p.name || p.parameter_name)) {
+            return { type: 'text', parameter_name: String(p.name || p.parameter_name), text: String(p.value ?? p.text ?? '') };
         }
-        return { type: 'text', text: String(p ?? '') };
+        return { type: 'text', parameter_name: String(idx + 1), text: String(p ?? '') };
     });
 
     // Try the specified language code first, then fall back through common English codes.

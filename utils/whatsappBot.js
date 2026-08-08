@@ -27,13 +27,27 @@ function normalizeWhatsAppText(value, maxLength = 3900) {
 }
 
 function toTemplateParameters(values = []) {
-    return values
-        .map((value) => (value == null ? '' : String(value).trim()))
-        .filter((value) => value.length > 0)
-        .map((text) => ({
-            type: 'text',
-            text: text.slice(0, 1024)
-        }));
+    return (Array.isArray(values) ? values : [values])
+        .map((val, index) => {
+            if (val == null) return null;
+            if (typeof val === 'object') {
+                const name = val.parameter_name || val.name || String(index + 1);
+                const text = String(val.text ?? val.value ?? '').trim();
+                return {
+                    type: 'text',
+                    parameter_name: String(name),
+                    text: text.slice(0, 1024)
+                };
+            }
+            const text = String(val).trim();
+            if (!text) return null;
+            return {
+                type: 'text',
+                parameter_name: String(index + 1),
+                text: text.slice(0, 1024)
+            };
+        })
+        .filter(Boolean);
 }
 
 // For templates that use named variables like {{tenant_name}} instead of {{1}}

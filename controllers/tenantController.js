@@ -482,31 +482,34 @@ exports.assignTenant = async (req, res) => {
 
         // Send notification to owner about new tenant requiring KYC verification
         try {
+            const ownerLoginId = property?.ownerLoginId || property?.owner_id || (property?.owner && typeof property.owner === 'string' ? property.owner : '');
             const ownerNotification = {
+                toRole: 'owner',
+                toLoginId: String(ownerLoginId || '').toUpperCase(),
+                from: String(tenant.loginId || 'system'),
                 type: 'kyc_verification_required',
                 title: 'New Tenant KYC Verification Required',
                 message: `Tenant ${name} has been assigned to Room ${roomNo} in ${rentPropertyName}. Please review their KYC details and approve/reject.`,
-                recipientId: property.owner._id,
-                recipientType: 'owner',
-                tenantId: tenant._id,
-                tenantName: tenant.name,
-                propertyName: rentPropertyName,
-                roomNo: roomNo,
-                kycData: {
-                    adminEntered: {
-                        name: name,
-                        fatherName: additional?.fatherName || '',
-                        address: additional?.permanentAddress || '',
-                        aadhaar: idProof?.number || '',
-                        phone: phone
-                    },
-                    aadhaarOCR: idProof?.aadhaarData || null
+                meta: {
+                    tenantId: tenant._id,
+                    tenantName: tenant.name,
+                    propertyName: rentPropertyName,
+                    roomNo: roomNo,
+                    kycData: {
+                        adminEntered: {
+                            name: name,
+                            fatherName: additional?.fatherName || '',
+                            address: additional?.permanentAddress || '',
+                            aadhaar: idProof?.number || '',
+                            phone: phone
+                        },
+                        aadhaarOCR: idProof?.aadhaarData || null
+                    }
                 },
                 createdAt: new Date(),
-                isRead: false
+                read: false
             };
             
-            // Save notification to database (assuming Notification model exists)
             const Notification = require('../models/Notification');
             await Notification.create(ownerNotification);
             console.log(`[NOTIFICATION] KYC verification notification sent to owner for tenant ${tenant.loginId}`);

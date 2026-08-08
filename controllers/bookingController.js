@@ -348,40 +348,68 @@ exports.createBookingRequest = async (req, res) => {
         if (isGenericOwnerId(resolvedOwnerId)) {
             try {
                 let prop = null;
-                if (property_id && mongoose.Types.ObjectId.isValid(property_id)) {
-                    prop = await ApprovedProperty.findById(property_id).select('generatedCredentials ownerLoginId owner_id owner');
+                const approvedOr = [];
+                if (property_id) {
+                    approvedOr.push({ visitId: property_id });
+                    approvedOr.push({ propertyId: property_id });
+                    if (mongoose.Types.ObjectId.isValid(property_id)) {
+                        approvedOr.push({ _id: property_id });
+                    }
                 }
-                if (!prop && (property_id || property_name)) {
-                    prop = await ApprovedProperty.findOne({
-                        $or: [
-                            { visitId: property_id },
-                            { propertyName: property_name },
-                            { title: property_name }
-                        ]
-                    }).select('generatedCredentials ownerLoginId owner_id owner');
+                if (property_name) {
+                    approvedOr.push({ propertyName: property_name });
+                    approvedOr.push({ title: property_name });
+                    approvedOr.push({ 'propertyInfo.name': property_name });
                 }
-                if (!prop && (property_id || property_name)) {
+
+                if (approvedOr.length > 0) {
+                    prop = await ApprovedProperty.findOne({ $or: approvedOr }).select('generatedCredentials ownerLoginId owner_id owner contact propertyInfo');
+                }
+
+                if (!prop) {
                     const PropertyModel = require('../models/Property');
-                    if (PropertyModel) {
-                        prop = await PropertyModel.findOne({
-                            $or: [
-                                { _id: (property_id && mongoose.Types.ObjectId.isValid(property_id)) ? property_id : null },
-                                { title: property_name }
-                            ]
-                        }).select('ownerLoginId owner_id owner');
+                    const propOr = [];
+                    if (property_id) {
+                        propOr.push({ visitId: property_id });
+                        propOr.push({ propertyId: property_id });
+                        if (mongoose.Types.ObjectId.isValid(property_id)) {
+                            propOr.push({ _id: property_id });
+                        }
+                    }
+                    if (property_name) {
+                        propOr.push({ title: property_name });
+                    }
+                    if (propOr.length > 0) {
+                        prop = await PropertyModel.findOne({ $or: propOr }).select('ownerLoginId owner_id owner');
                     }
                 }
 
-                const foundOwner = prop?.generatedCredentials?.loginId || prop?.ownerLoginId || prop?.owner_id || prop?.owner;
+                let foundOwner = prop?.generatedCredentials?.loginId || prop?.ownerLoginId || prop?.owner_id;
+                if (!foundOwner && prop?.owner) {
+                    if (typeof prop.owner === 'string') {
+                        foundOwner = prop.owner;
+                    } else if (mongoose.Types.ObjectId.isValid(prop.owner)) {
+                        const ownerUser = await User.findById(prop.owner).select('loginId').lean();
+                        foundOwner = ownerUser?.loginId || String(prop.owner);
+                    }
+                }
+
                 if (foundOwner) resolvedOwnerId = foundOwner;
             } catch (lookupErr) {
                 console.warn('Owner lookup error:', lookupErr.message);
             }
         }
 
-        if (!resolvedOwnerId) {
-            console.warn('❌ owner_id could not be resolved');
-            return res.status(400).json({ success: false, message: 'Property owner ID is required' });
+        if (!resolvedOwnerId || isGenericOwnerId(resolvedOwnerId)) {
+            // Fallback: try finding any active owner user in system or superadmin if owner is truly unknown
+            const firstOwner = await User.findOne({ role: 'owner', isActive: true, isDeleted: false }).select('loginId').lean();
+            if (firstOwner?.loginId) {
+                resolvedOwnerId = firstOwner.loginId;
+                console.log(`⚠️ Fallback assigned owner ID: ${resolvedOwnerId}`);
+            } else {
+                console.warn('❌ owner_id could not be resolved');
+                return res.status(400).json({ success: false, message: 'Property owner ID is required' });
+            }
         }
 
         console.log(`✅ Creating ${request_type} for property: ${property_name}, owner: ${resolvedOwnerId}`);
