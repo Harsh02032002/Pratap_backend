@@ -3,13 +3,11 @@ const mongoose = require('mongoose');
 /**
  * PayoutLog
  * ─────────
- * Immutable audit trail for every Razorpay Payout API attempt.
- * This model is ADDITIVE ONLY — it never modifies PaymentTransaction,
- * Owner, BookingRequest, or any other existing collection.
+ * Immutable audit trail for every Cashfree Payout API attempt.
+ * ADDITIVE ONLY — never modifies PaymentTransaction, Owner, BookingRequest, etc.
  *
- * A failed payout creates a log entry with status='failed' and an
- * error_message. It does NOT roll back any existing transaction,
- * balance, or booking record.
+ * A failed payout creates a log entry with status='failed'.
+ * It does NOT roll back any balance or booking record.
  */
 const payoutLogSchema = new mongoose.Schema({
   // ─── REFERENCE ──────────────────────────────────────────────────────────────
@@ -25,24 +23,24 @@ const payoutLogSchema = new mongoose.Schema({
     default: 'bank'
   },
 
-  // ─── RAZORPAY IDs (filled on success) ───────────────────────────────────────
-  contact_id:      { type: String, default: null },  // Razorpay Contact ID
-  fund_account_id: { type: String, default: null },  // Razorpay Fund Account ID
-  payout_id:       { type: String, default: null },  // Razorpay Payout ID
+  // ─── CASHFREE IDs (filled on success) ───────────────────────────────────────
+  cf_beneficiary_id: { type: String, default: null },  // Cashfree Beneficiary ID
+  cf_transfer_id:    { type: String, default: null },  // Cashfree Transfer ID
+  cf_reference_id:   { type: String, default: null },  // Our internal reference
 
   // ─── STATUS ─────────────────────────────────────────────────────────────────
   status: {
     type: String,
     enum: [
-      'initiated',         // payout flow started
-      'contact_created',   // Razorpay contact created
-      'fund_account_created', // Razorpay fund account created
-      'queued',            // payout request accepted by Razorpay
-      'processing',        // Razorpay is processing
-      'processed',         // payout completed successfully
-      'failed',            // payout failed at any step
-      'sandbox_success',   // sandbox test — simulated success
-      'sandbox_failed'     // sandbox test — simulated failure
+      'initiated',             // payout flow started
+      'beneficiary_added',     // Cashfree beneficiary created/found
+      'queued',                // transfer request accepted by Cashfree
+      'processing',            // Cashfree is processing
+      'processed',             // payout completed successfully
+      'failed',                // payout failed at any step
+      'reversed',              // Cashfree reversed the payout
+      'sandbox_success',       // sandbox test — simulated success
+      'sandbox_failed'         // sandbox test — simulated failure
     ],
     default: 'initiated',
     index: true
@@ -59,28 +57,26 @@ const payoutLogSchema = new mongoose.Schema({
   upi_id:          { type: String, default: null },
 
   // ─── FULL REQUEST / RESPONSE LOGS ───────────────────────────────────────────
-  razorpay_contact_request:      { type: mongoose.Schema.Types.Mixed, default: null },
-  razorpay_contact_response:     { type: mongoose.Schema.Types.Mixed, default: null },
-  razorpay_fund_account_request: { type: mongoose.Schema.Types.Mixed, default: null },
-  razorpay_fund_account_response:{ type: mongoose.Schema.Types.Mixed, default: null },
-  razorpay_payout_request:       { type: mongoose.Schema.Types.Mixed, default: null },
-  razorpay_payout_response:      { type: mongoose.Schema.Types.Mixed, default: null },
+  cf_beneficiary_request:  { type: mongoose.Schema.Types.Mixed, default: null },
+  cf_beneficiary_response: { type: mongoose.Schema.Types.Mixed, default: null },
+  cf_transfer_request:     { type: mongoose.Schema.Types.Mixed, default: null },
+  cf_transfer_response:    { type: mongoose.Schema.Types.Mixed, default: null },
 
   // ─── ERROR DETAIL ────────────────────────────────────────────────────────────
-  error_step:    { type: String, default: null },    // 'contact' | 'fund_account' | 'payout' | 'network'
+  error_step:    { type: String, default: null },
   error_message: { type: String, default: null },
-  error_code:    { type: String, default: null },    // Razorpay error code if available
+  error_code:    { type: String, default: null },
 
   // ─── METADATA ────────────────────────────────────────────────────────────────
   initiated_by: { type: String, default: 'superadmin' },
   created_at:   { type: Date, default: Date.now, index: true }
 }, {
-  collection: 'payout_logs',
-  // No pre-save hooks that affect other collections
+  collection: 'payout_logs'
 });
 
 payoutLogSchema.index({ transaction_id: 1, created_at: -1 });
 payoutLogSchema.index({ owner_id: 1, status: 1 });
-payoutLogSchema.index({ payout_id: 1 }, { sparse: true });
+payoutLogSchema.index({ cf_transfer_id: 1 }, { sparse: true });
+payoutLogSchema.index({ cf_beneficiary_id: 1 }, { sparse: true });
 
 module.exports = mongoose.models.PayoutLog || mongoose.model('PayoutLog', payoutLogSchema);

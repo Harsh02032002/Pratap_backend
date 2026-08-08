@@ -129,6 +129,18 @@ const ownerSchema = new mongoose.Schema({
     checkinAadhaarImage: String,
     checkinAadhaarImageName: String,
     checkinAadhaarImageType: String,
+
+    // ─── Cashfree Bank Details (for payouts) ──────────────────────────────
+    bankDetails: {
+        accountHolderName: { type: String, default: null },
+        accountNumber:     { type: String, default: null },
+        ifsc:              { type: String, default: null },
+        bankName:          { type: String, default: null },
+        upiId:             { type: String, default: null },
+        isVerified:        { type: Boolean, default: false },
+        verifiedAt:        { type: Date, default: null },
+        cf_beneficiary_id: { type: String, default: null }, // Cashfree beneficiary ID after add
+    },
     roomCount: { type: Number, default: 0 },
     bedCount: { type: Number, default: 0 },
     vacantRooms: { type: Number, default: 0 },
@@ -160,9 +172,11 @@ const ownerSchema = new mongoose.Schema({
         curfewTime: { type: String, default: "11:00 PM" },
         electricityUnitRate: { type: Number, default: 12 }
     },
-    walletBalance: { type: Number, default: 0 },
-    pendingBalance: { type: Number, default: 0 },
-    withdrawnBalance: { type: Number, default: 0 },
+    walletBalance:     { type: Number, default: 0 },  // alias of availableBalance
+    heldBalance:       { type: Number, default: 0 },  // awaiting move-in date
+    availableBalance:  { type: Number, default: 0 },  // ready to withdraw
+    pendingBalance:    { type: Number, default: 0 },  // legacy
+    withdrawnBalance:  { type: Number, default: 0 },
     // Owner Panel Free Trial & Subscription tracking
     subscription: {
         trialStartDate: { type: Date }, // set at onboarding (or pulled from createdAt)

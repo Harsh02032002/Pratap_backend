@@ -58,6 +58,12 @@ const rentInvoiceSchema = new Schema({
   penaltyPaidAmount: { type: Number, default: 0 }, // penalty-only tracker
   outstandingAmount: { type: Number, default: 0 },
 
+  // Advance / move-in charge (one-time charge on first invoice)
+  advanceChargeAmount: { type: Number, default: 0 },
+
+  // Payment method recorded when collecting payment
+  paymentMethod: { type: String, enum: ['cash', 'online', 'upi', 'bank_transfer', 'already_paid', 'other'], default: null },
+
   currentPhase: { type: Number, default: 1 },
   daysSinceDue: { type: Number, default: 0 },
 
