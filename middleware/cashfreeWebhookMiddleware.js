@@ -7,30 +7,29 @@ const crypto = require('crypto');
  */
 function verifyCashfreeWebhook(webhookType = 'payment') {
   return (req, res, next) => {
-    const isProd = process.env.NODE_ENV === 'production';
+    const cfEnv = String(process.env.CASHFREE_ENV || process.env.CASHFREE_PAYOUT_ENV || 'TEST').toUpperCase();
+    const isTestMode = cfEnv === 'SANDBOX' || cfEnv === 'TEST';
+
     const secret = webhookType === 'payout'
       ? process.env.CASHFREE_PAYOUT_WEBHOOK_SECRET
       : process.env.CASHFREE_WEBHOOK_SECRET;
 
-    // Skip signature check in test environment if secret is empty
-    if (!secret && !isProd) {
-      console.warn(`[Cashfree Webhook] Skipping signature verification in non-production mode for ${webhookType}.`);
+    // Rule: If CASHFREE_ENV=TEST (or SANDBOX), skip verification even if secret is missing
+    if (isTestMode) {
+      console.log(`[Cashfree Webhook] Cashfree TEST mode: webhook signature verification skipped.`);
       return next();
     }
 
-    if (!secret && isProd) {
-      console.error(`[Cashfree Webhook Error] CASHFREE_${webhookType.toUpperCase()}_WEBHOOK_SECRET is missing in production.`);
-      return res.status(500).json({ success: false, message: 'Server webhook secret misconfiguration.' });
+    // Rule: If CASHFREE_ENV=PROD, require secret & signature verification
+    if (!secret) {
+      console.error(`[Cashfree Webhook Error] CASHFREE_${webhookType.toUpperCase()}_WEBHOOK_SECRET is missing in Cashfree PROD mode.`);
+      return res.status(500).json({ success: false, message: 'Server webhook secret misconfiguration in production mode.' });
     }
 
     const signature = req.headers['x-webhook-signature'] || req.headers['x-cashfree-signature'];
     const timestamp = req.headers['x-webhook-timestamp'] || req.headers['x-cashfree-timestamp'] || '';
 
     if (!signature) {
-      if (!isProd) {
-        console.warn(`[Cashfree Webhook] Header signature missing, proceeding in test mode.`);
-        return next();
-      }
       return res.status(400).json({ success: false, message: 'Missing x-webhook-signature header.' });
     }
 
@@ -51,19 +50,14 @@ function verifyCashfreeWebhook(webhookType = 'payment') {
 
         if (signature !== fallbackSignature) {
           console.error(`[Cashfree Webhook Error] Signature mismatch for ${webhookType}. Header: ${signature}, Expected: ${expectedSignature}`);
-          if (isProd) {
-            return res.status(401).json({ success: false, message: 'Invalid webhook signature.' });
-          }
+          return res.status(401).json({ success: false, message: 'Invalid webhook signature.' });
         }
       }
 
       next();
     } catch (err) {
       console.error('[Cashfree Webhook Exception]', err.message);
-      if (isProd) {
-        return res.status(500).json({ success: false, message: 'Signature verification failed' });
-      }
-      next();
+      return res.status(500).json({ success: false, message: 'Signature verification failed' });
     }
   };
 }
