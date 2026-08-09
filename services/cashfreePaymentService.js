@@ -139,7 +139,7 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
 
   try {
     const expiry = expiryDate || new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // 3 days default
-    const expiryStr = expiry.toISOString().replace('T', ' ').substring(0, 19); // "YYYY-MM-DD HH:MM:SS"
+    const expiryStr = expiry.toISOString(); // Valid ISO8601 string (e.g. 2026-08-13T01:04:40.000Z)
 
     const payload = {
       link_id:          linkId,
