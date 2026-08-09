@@ -185,6 +185,37 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
   }
 }
 
+// ─── GET LINK STATUS ───────────────────────────────────────────────────────────
+
+/**
+ * getLinkStatus(linkId)
+ * Fetches live payment link status from Cashfree.
+ * @returns {{ success, status, link, error }}
+ */
+async function getLinkStatus(linkId) {
+  const config = getConfig();
+
+  if (!config.appId || !config.secretKey) {
+    return { success: false, error: 'Cashfree credentials not configured' };
+  }
+
+  try {
+    const { data } = await axios.get(`${config.baseUrl}/links/${linkId}`, {
+      headers: getHeaders(config),
+      timeout: 10000,
+    });
+
+    return {
+      success: true,
+      link:    data,
+      status:  data.link_status, // 'PAID' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED'
+    };
+  } catch (err) {
+    const errMsg = err.response?.data?.message || err.message;
+    return { success: false, error: errMsg };
+  }
+}
+
 // ─── GET ORDER STATUS ──────────────────────────────────────────────────────────
 
 /**
@@ -323,6 +354,7 @@ function verifyWebhookSignature(rawBody, signature, timestamp) {
 module.exports = {
   createOrder,
   createPaymentLink,
+  getLinkStatus,
   getOrderStatus,
   getPaymentsByOrderId,
   initiateRefund,

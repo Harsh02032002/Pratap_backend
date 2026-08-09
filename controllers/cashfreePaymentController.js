@@ -445,19 +445,36 @@ exports.getPaymentStatus = async (req, res) => {
       ]
     }).lean();
 
-    const cfStatus = await cfPay.getOrderStatus(orderId).catch(() => null);
+    let cfStatus = null;
+    if (orderId && (orderId.startsWith('RMHLINK_') || orderId.includes('LINK'))) {
+      const linkRes = await cfPay.getLinkStatus(orderId).catch(() => null);
+      if (linkRes && linkRes.success) {
+        cfStatus = { status: linkRes.status, link: linkRes.link };
+      }
+    }
+    if (!cfStatus) {
+      cfStatus = await cfPay.getOrderStatus(orderId).catch(() => null);
+    }
 
+    const rawCfStatus = String(cfStatus?.status || cfStatus?.link?.link_status || '').toUpperCase();
     const isPaid = (tx && (tx.status === 'Verified' || tx.status === 'Settled')) ||
-                   (cfStatus && (cfStatus.status === 'PAID' || cfStatus.status === 'SUCCESS'));
+                   rawCfStatus === 'PAID' || rawCfStatus === 'SUCCESS' || rawCfStatus === 'PAID_SUCCESSFULLY';
+
+    if (isPaid && tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
+      await PaymentTransaction.updateOne(
+        { _id: tx._id },
+        { $set: { status: 'Verified', wallet_status: 'held', held_at: new Date() } }
+      ).catch(() => {});
+    }
 
     return res.json({
       success:    true,
-      status:     isPaid ? 'PAID' : (cfStatus?.status || tx?.status || 'PENDING'),
+      status:     isPaid ? 'PAID' : (rawCfStatus || tx?.status || 'PENDING'),
       db_status:  tx?.status,
-      cf_status:  cfStatus?.status,
+      cf_status:  rawCfStatus,
       wallet_status: tx?.wallet_status,
       transaction: tx,
-      cashfree:   cfStatus?.order || null,
+      cashfree:   cfStatus?.order || cfStatus?.link || null,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

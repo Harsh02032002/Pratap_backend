@@ -30,15 +30,33 @@ exports.handlePaymentWebhook = async (req, res) => {
 
     switch (eventType) {
       case 'PAYMENT_SUCCESS':
+      case 'PAYMENT_SUCCESS_WEBHOOK':
+      case 'PAYMENT_LINK_PAID_WEBHOOK':
+      case 'PAYMENT_LINK_EVENT':
       case 'ORDER_PAID': {
-        console.log(`✅ [Cashfree Webhook] Payment Successful! OrderID: ${orderId}, PaymentID: ${cfPaymentId}, Amount: ₹${paymentAmount}`);
+        console.log(`✅ [Cashfree Webhook] Payment Successful! Event: ${eventType}, OrderID: ${orderId}, PaymentID: ${cfPaymentId}, Amount: ₹${paymentAmount}`);
+
+        // Extract raw Mongo ObjectId if present in orderId (e.g. RMHLINK_6a78d05... or ORD_6a78d05...)
+        let extractedId = '';
+        if (orderId) {
+          const parts = String(orderId).split('_');
+          for (const p of parts) {
+            if (p.length === 24 && /^[0-9a-fA-F]{24}$/.test(p)) {
+              extractedId = p;
+              break;
+            }
+          }
+        }
 
         // 1. Check & Update Booking Request
         let booking = null;
         if (orderId) {
-          booking = await BookingRequest.findOne({
-            $or: [{ cashfreeOrderId: orderId }, { _id: orderId.replace(/^ORD_/, '') }]
-          }).catch(() => null);
+          const query = [
+            { cashfreeOrderId: orderId },
+            { booking_id: orderId }
+          ];
+          if (extractedId) query.push({ _id: extractedId });
+          booking = await BookingRequest.findOne({ $or: query }).catch(() => null);
         }
 
         if (booking) {
@@ -48,26 +66,43 @@ exports.handlePaymentWebhook = async (req, res) => {
           booking.cashfreePaymentId = cfPaymentId;
           booking.paymentMethod = paymentMethod;
           booking.paidAt = new Date();
-          await booking.save();
+          await booking.save().catch(() => {});
+        }
+
+        // Also update PaymentTransaction to Verified
+        const txQuery = [
+          { cf_order_id: orderId },
+          { cf_payment_link_id: orderId }
+        ];
+        if (booking?._id) txQuery.push({ booking_id: booking._id });
+        if (extractedId) txQuery.push({ booking_id: extractedId });
+
+        let tx = await PaymentTransaction.findOne({ $or: txQuery }).catch(() => null);
+        if (tx) {
+          tx.status = 'Verified';
+          tx.wallet_status = 'held';
+          tx.held_at = new Date();
+          if (cfPaymentId) tx.cf_payment_id = cfPaymentId;
+          await tx.save().catch(() => {});
         }
 
         // 2. Check & Update Rent / RentInvoice Record
         let rentInvoice = null;
         if (orderId) {
-          rentInvoice = await RentInvoice.findOne({
-            $or: [{ cashfreeOrderId: orderId }, { _id: orderId.replace(/^ORD_/, '') }]
-          }).catch(() => null);
+          const rQuery = [{ cashfreeOrderId: orderId }];
+          if (extractedId) rQuery.push({ _id: extractedId });
+          rentInvoice = await RentInvoice.findOne({ $or: rQuery }).catch(() => null);
         }
 
         let rentRecord = null;
         if (orderId) {
-          rentRecord = await Rent.findOne({
-            $or: [{ cashfreeOrderId: orderId }, { _id: orderId.replace(/^ORD_/, '') }]
-          }).catch(() => null);
+          const rrQuery = [{ cashfreeOrderId: orderId }];
+          if (extractedId) rrQuery.push({ _id: extractedId });
+          rentRecord = await Rent.findOne({ $or: rrQuery }).catch(() => null);
         }
 
-        const ownerLoginId = booking?.ownerLoginId || rentInvoice?.ownerLoginId || rentRecord?.ownerLoginId || '';
-        const tenantLoginId = booking?.tenantLoginId || rentInvoice?.tenantLoginId || rentRecord?.tenantLoginId || '';
+        const ownerLoginId = booking?.ownerLoginId || rentInvoice?.ownerLoginId || rentRecord?.ownerLoginId || tx?.owner_login_id || '';
+        const tenantLoginId = booking?.tenantLoginId || rentInvoice?.tenantLoginId || rentRecord?.tenantLoginId || tx?.tenant_login_id || '';
 
         // Calculate Commission & Owner Share
         const commissionRate = 0.05; // 5% platform commission
@@ -79,27 +114,30 @@ exports.handlePaymentWebhook = async (req, res) => {
           const owner = await Owner.findOne({ loginId: ownerLoginId });
           if (owner) {
             owner.heldBalance = (owner.heldBalance || owner.pendingBalance || 0) + ownerShare;
-            await owner.save();
+            await owner.save().catch(() => {});
 
             console.log(`💰 [Cashfree Webhook] Held balance updated for Owner ${ownerLoginId}: +₹${ownerShare}`);
 
-            // Save Wallet Ledger / PaymentTransaction record
-            await PaymentTransaction.create({
-              booking_id: booking?._id || rentInvoice?._id || rentRecord?._id,
-              owner_id: owner._id,
-              owner_login_id: ownerLoginId,
-              tenant_login_id: tenantLoginId,
-              total_amount: paymentAmount,
-              commission: adminCommission,
-              owner_amount: ownerShare,
-              payment_method: paymentMethod,
-              wallet_status: 'held',
-              held_at: new Date(),
-              cf_order_id: orderId,
-              cf_payment_id: cfPaymentId,
-              transaction_id: cfPaymentId || orderId,
-              notes: `Cashfree PG payment received for order ${orderId}`
-            }).catch(err => console.warn('PaymentTransaction log warning:', err.message));
+            // Save Wallet Ledger / PaymentTransaction record if not already created
+            if (!tx) {
+              await PaymentTransaction.create({
+                booking_id: booking?._id || rentInvoice?._id || rentRecord?._id || extractedId,
+                owner_id: owner._id,
+                owner_login_id: ownerLoginId,
+                tenant_login_id: tenantLoginId,
+                total_amount: paymentAmount,
+                commission: adminCommission,
+                owner_amount: ownerShare,
+                payment_method: paymentMethod,
+                status: 'Verified',
+                wallet_status: 'held',
+                held_at: new Date(),
+                cf_order_id: orderId,
+                cf_payment_id: cfPaymentId,
+                transaction_id: cfPaymentId || orderId,
+                notes: `Cashfree PG payment received for order ${orderId}`
+              }).catch(err => console.warn('PaymentTransaction log warning:', err.message));
+            }
           }
         }
 
@@ -119,7 +157,7 @@ exports.handlePaymentWebhook = async (req, res) => {
             cf_payment_id: cfPaymentId,
             notes: 'Paid via Cashfree PG'
           });
-          await rentInvoice.save();
+          await rentInvoice.save().catch(() => {});
         }
 
         if (rentRecord) {
@@ -137,12 +175,14 @@ exports.handlePaymentWebhook = async (req, res) => {
             cf_payment_id: cfPaymentId,
             notes: 'Paid via Cashfree PG'
           });
-          await rentRecord.save();
+          await rentRecord.save().catch(() => {});
         }
         break;
       }
 
       case 'PAYMENT_FAILED':
+      case 'PAYMENT_FAILED_WEBHOOK':
+      case 'PAYMENT_USER_DROPPED_WEBHOOK':
       case 'USER_DROPPED': {
         console.warn(`⚠️ [Cashfree Webhook] Payment ${eventType} for OrderID: ${orderId}`);
         if (orderId) {
