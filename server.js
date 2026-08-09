@@ -394,6 +394,8 @@ try {
     console.log('  ✓ reviewRoutes');
     app.use('/api/rents', require('./routes/rentRoutes'));
     console.log('  ✓ rentRoutes');
+    app.use('/api/wallet', require('./routes/walletRoutes'));
+    console.log('  ✓ walletRoutes');
     app.use('/api/rent-collection', require('./routes/rentCollectionRoutes'));
     console.log('  ✓ rentCollectionRoutes');
     app.use('/api/electricity', require('./routes/electricityRoutes'));
