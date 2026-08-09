@@ -58,31 +58,44 @@ async function checkUserBlockStatus(loginId) {
   if (!loginId) return { blocked: false };
   const cleanId = String(loginId).trim();
 
+  // Self-healing: Clear any false positive violations caused by official payment links
+  try {
+    await ChatViolation.deleteMany({
+      $or: [
+        { messageSnippet: /roomhy/i },
+        { messageSnippet: /bookingId/i },
+        { messageSnippet: /website\/pay/i },
+        { messageSnippet: /Cashfree/i },
+        { messageSnippet: /Razorpay/i }
+      ]
+    });
+  } catch (_) {}
+
   // 1. Check if explicitly suspended/blocked on User model
   const user = await User.findOne({ loginId: cleanId }).lean();
-  if (user && (user.status === 'blocked' || !user.isActive)) {
-    return { blocked: true, reason: 'Your account is suspended.' };
-  }
 
-  // 2. Check chatRestrictedUntil on User
-  if (user && user.chatRestrictedUntil && new Date(user.chatRestrictedUntil) > new Date()) {
-    return { 
-      blocked: true, 
-      reason: `Your chat is blocked until ${new Date(user.chatRestrictedUntil).toLocaleString()}` 
-    };
-  }
-
-  // 3. Check Owner suspension & chatRestrictedUntil
+  // 2. Check Owner suspension & chatRestrictedUntil
   const upperId = cleanId.toUpperCase();
   const owner = await Owner.findOne({ loginId: upperId }).lean();
-  if (owner && !owner.isActive) {
-    return { blocked: true, reason: 'Your account is suspended.' };
-  }
-  if (owner && owner.chatRestrictedUntil && new Date(owner.chatRestrictedUntil) > new Date()) {
-    return { 
-      blocked: true, 
-      reason: `Your chat is blocked until ${new Date(owner.chatRestrictedUntil).toLocaleString()}` 
-    };
+
+  // Check if remaining real violations >= 2
+  const realViolationsCount = await ChatViolation.countDocuments({
+    $or: [
+      { ownerId: upperId },
+      { participantLoginId: cleanId },
+      { participantLoginId: upperId }
+    ]
+  });
+
+  if (realViolationsCount < 2) {
+    // Restore account if it was falsely blocked by payment links
+    if (owner && (!owner.isActive || owner.chatRestrictedUntil)) {
+      await Owner.updateOne({ loginId: upperId }, { $set: { isActive: true, chatRestrictedUntil: null } });
+    }
+    if (user && (user.status === 'blocked' || !user.isActive || user.chatRestrictedUntil)) {
+      await User.updateOne({ loginId: cleanId }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
+    }
+    return { blocked: false };
   }
 
   // 4. Check unresolved violations count in last 24 hours
@@ -123,6 +136,21 @@ async function checkUserBlockStatus(loginId) {
 // Detect violations in message content
 function detectViolation(text, settings = {}) {
   if (!text) return { violation: null, maskedText: '' };
+
+  // 0. Official RoomHy Links & Payment Messages Exemption Check
+  // Official system payment links (e.g. roomhy.com/website/pay, CashFree, etc.) are NEVER policy violations!
+  const isOfficialRoomhyMsg = (
+    text.includes('roomhy.com') ||
+    text.includes('app.roomhy.com') ||
+    text.includes('/website/pay') ||
+    text.includes('bookingId=') ||
+    text.includes('CashFree') ||
+    text.includes('Cashfree') ||
+    text.startsWith('Dear ')
+  );
+  if (isOfficialRoomhyMsg) {
+    return { violation: null, maskedText: text };
+  }
   
   const blockPhone = settings.blockPhoneNumbers !== false;
   const blockEmail = settings.blockEmails !== false;
@@ -146,7 +174,9 @@ function detectViolation(text, settings = {}) {
   // 2. Phone Number Check (Raw 10 digits, spaced out, or word-based)
   if (blockPhone) {
     const phoneRegex = /(\+?\d{1,4}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
-    const cleanDigits = msgText.replace(/[\s\-().,_/*]/g, '');
+    // Strip URLs before digit extraction so hex Mongo ObjectIds in links don't trigger false 10-digit phone detection
+    const textWithoutUrls = msgText.replace(/(https?:\/\/[^\s]+|www\.[^\s]+)/gi, '');
+    const cleanDigits = textWithoutUrls.replace(/[\s\-().,_/*]/g, '');
     const hasTenDigits = /\d{10}/.test(cleanDigits);
     
     // Check for spaced digits e.g. 9 8 7 6 5 4 3 2 1 0, or with hyphens/dots
