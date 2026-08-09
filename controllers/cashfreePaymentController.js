@@ -130,6 +130,7 @@ exports.createOrder = async (req, res) => {
       },
       meta: {
         note: `Booking #${bookingId}`,
+        return_url: `https://roomhy.com/payment-status?order_id=${orderId}`
       },
     });
 

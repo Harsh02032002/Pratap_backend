@@ -87,7 +87,7 @@ async function createOrder({ orderId, amount, currency = 'INR', customerInfo = {
         customer_phone: customerInfo.phone || '9999999999',
       },
       order_meta: {
-        return_url:  meta.return_url || `${process.env.APP_BASE_URL || 'https://app.roomhy.com'}/payment-status?order_id={order_id}`,
+        return_url:  meta.return_url || `https://roomhy.com/payment-status?order_id={order_id}`,
         notify_url:  meta.notify_url || `${process.env.API_URL || 'https://api.roomhy.com'}/api/payments/cashfree/webhook`,
       },
       order_note: meta.note || 'Roomhy Booking Payment',
