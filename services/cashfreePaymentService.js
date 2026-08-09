@@ -28,8 +28,8 @@ function getConfig() {
   const isSandbox = env !== 'PROD';
   return {
     isSandbox,
-    appId:         process.env.CASHFREE_APP_ID || '',
-    secretKey:     process.env.CASHFREE_SECRET_KEY || '',
+    appId:         process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '',
+    secretKey:     process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '',
     webhookSecret: process.env.CASHFREE_WEBHOOK_SECRET || '',
     apiVersion:    '2025-01-01',
     baseUrl: isSandbox

@@ -56,8 +56,65 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
     }
 
-    const booking = await BookingRequest.findById(bookingId).lean();
-    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+    let booking = null;
+    const isValidObjectId = mongoose.Types.ObjectId.isValid(bookingId);
+    
+    if (isValidObjectId) {
+      booking = await BookingRequest.findById(bookingId).lean();
+    }
+    if (!booking) {
+      booking = await BookingRequest.findOne({ booking_id: bookingId }).lean();
+    }
+    if (!booking && isValidObjectId) {
+      const Rent = require('../models/Rent');
+      const rentDoc = await Rent.findById(bookingId).lean();
+      if (rentDoc) {
+        booking = {
+          _id: rentDoc._id,
+          user_id: rentDoc.tenantLoginId || rentDoc.tenantId || 'tenant_user',
+          name: rentDoc.tenantName || 'Tenant',
+          email: rentDoc.tenantEmail || '',
+          phone: rentDoc.tenantPhone || '',
+          owner_id: rentDoc.ownerLoginId || 'OWNER',
+          owner_name: rentDoc.ownerName || '',
+          property_id: rentDoc.propertyId || '',
+          property_name: rentDoc.propertyName || 'RoomHy Property',
+          check_in_date: rentDoc.createdAt
+        };
+      }
+    }
+    if (!booking && isValidObjectId) {
+      const Tenant = require('../models/Tenant');
+      const tenantDoc = await Tenant.findById(bookingId).lean();
+      if (tenantDoc) {
+        booking = {
+          _id: tenantDoc._id,
+          user_id: tenantDoc.loginId || 'tenant_user',
+          name: tenantDoc.name || 'Tenant',
+          email: tenantDoc.email || '',
+          phone: tenantDoc.phone || '',
+          owner_id: tenantDoc.ownerLoginId || 'OWNER',
+          owner_name: tenantDoc.ownerName || '',
+          property_id: tenantDoc.propertyId || '',
+          property_name: tenantDoc.propertyTitle || 'RoomHy Property',
+          check_in_date: tenantDoc.moveInDate
+        };
+      }
+    }
+    if (!booking) {
+      // Fallback synthetic booking object if ID is not found in database
+      booking = {
+        _id: bookingId,
+        user_id: customerInfo.email || customerInfo.name || 'guest_user',
+        name: customerInfo.name || 'Guest',
+        email: customerInfo.email || '',
+        phone: customerInfo.phone || '',
+        owner_id: 'OWNER',
+        owner_name: 'Owner',
+        property_id: 'PROP',
+        property_name: 'RoomHy Property'
+      };
+    }
 
     const orderId = `RMH_${bookingId}_${Date.now()}`;
 
