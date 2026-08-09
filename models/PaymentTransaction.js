@@ -16,8 +16,8 @@ const mongoose = require('mongoose');
  */
 const paymentTransactionSchema = new mongoose.Schema({
   // ─── CASHFREE PAYMENT GATEWAY ─────────────────────────────────────────────
-  cf_order_id:        { type: String, unique: true, sparse: true, index: true },
-  cf_payment_id:      { type: String, unique: true, sparse: true, index: true, default: null },
+  cf_order_id:        { type: String, index: true },
+  cf_payment_id:      { type: String, index: true },
   cf_payment_link_id: { type: String, default: null },
   cf_payment_link:    { type: String, default: null },   // The actual URL sent to tenant
   cf_order_token:     { type: String, default: null },   // Short-lived token for JS SDK
@@ -102,6 +102,12 @@ paymentTransactionSchema.pre('save', function(next) {
   if (!this.razorpay_payment_id) {
     this.razorpay_payment_id = 'cf_' + (this._id || new mongoose.Types.ObjectId());
   }
+  if (this.cf_payment_id === null) {
+    this.cf_payment_id = undefined;
+  }
+  if (this.cf_order_id === null) {
+    this.cf_order_id = undefined;
+  }
   next();
 });
 
@@ -109,6 +115,8 @@ const PaymentTransaction = mongoose.models.PaymentTransaction ||
   mongoose.model('PaymentTransaction', paymentTransactionSchema);
 
 try {
+  PaymentTransaction.collection.dropIndex('cf_payment_id_1').catch(() => {});
+  PaymentTransaction.collection.dropIndex('cf_order_id_1').catch(() => {});
   PaymentTransaction.collection.dropIndex('razorpay_payment_id_1').catch(() => {});
 } catch (_) {}
 
