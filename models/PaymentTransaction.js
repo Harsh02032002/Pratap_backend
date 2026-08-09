@@ -99,8 +99,17 @@ paymentTransactionSchema.index({ wallet_status: 1, move_in_date: 1 }); // for cr
 
 paymentTransactionSchema.pre('save', function(next) {
   this.updated_at = Date.now();
+  if (!this.razorpay_payment_id) {
+    this.razorpay_payment_id = 'cf_' + (this._id || new mongoose.Types.ObjectId());
+  }
   next();
 });
 
-module.exports = mongoose.models.PaymentTransaction ||
+const PaymentTransaction = mongoose.models.PaymentTransaction ||
   mongoose.model('PaymentTransaction', paymentTransactionSchema);
+
+try {
+  PaymentTransaction.collection.dropIndex('razorpay_payment_id_1').catch(() => {});
+} catch (_) {}
+
+module.exports = PaymentTransaction;

@@ -158,7 +158,7 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
         send_email: true,
       },
       link_meta: {
-        return_url: `${process.env.APP_BASE_URL || 'https://app.roomhy.com'}/payment-status?link_id=${linkId}`,
+        return_url: `${process.env.FRONTEND_URL || 'https://roomhy.com'}/payment-status?link_id=${linkId}`,
         upi_intent: false,
       },
     };
