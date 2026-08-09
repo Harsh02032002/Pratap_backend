@@ -798,7 +798,51 @@ exports.getBookingRequests = async (req, res) => {
  */
 exports.getBookingRequestById = async (req, res) => {
     try {
-        const request = await BookingRequest.findById(req.params.id);
+        const { id } = req.params;
+        const mongoose = require('mongoose');
+        let request = null;
+        const isValidObjectId = mongoose.Types.ObjectId.isValid(id);
+
+        if (isValidObjectId) {
+            request = await BookingRequest.findById(id).lean();
+        }
+        if (!request) {
+            request = await BookingRequest.findOne({ booking_id: id }).lean();
+        }
+        if (!request && isValidObjectId) {
+            const Rent = require('../models/Rent');
+            const rentDoc = await Rent.findById(id).lean();
+            if (rentDoc) {
+                request = {
+                    _id: rentDoc._id,
+                    property_name: rentDoc.propertyName || 'RoomHy Property',
+                    area: rentDoc.area || 'N/A',
+                    total_amount: rentDoc.totalDue || rentDoc.rentAmount || 0,
+                    amount: rentDoc.totalDue || rentDoc.rentAmount || 0,
+                    booking_amount: rentDoc.totalDue || rentDoc.rentAmount || 0,
+                    name: rentDoc.tenantName || 'Tenant',
+                    email: rentDoc.tenantEmail || '',
+                    phone: rentDoc.tenantPhone || ''
+                };
+            }
+        }
+        if (!request && isValidObjectId) {
+            const Tenant = require('../models/Tenant');
+            const tenantDoc = await Tenant.findById(id).lean();
+            if (tenantDoc) {
+                request = {
+                    _id: tenantDoc._id,
+                    property_name: tenantDoc.propertyTitle || 'RoomHy Property',
+                    area: tenantDoc.address || 'N/A',
+                    total_amount: tenantDoc.agreementDetails?.advanceCharge || tenantDoc.rentAmount || 0,
+                    amount: tenantDoc.agreementDetails?.advanceCharge || tenantDoc.rentAmount || 0,
+                    booking_amount: tenantDoc.agreementDetails?.advanceCharge || tenantDoc.rentAmount || 0,
+                    name: tenantDoc.name || 'Tenant',
+                    email: tenantDoc.email || '',
+                    phone: tenantDoc.phone || ''
+                };
+            }
+        }
 
         if (!request) {
             return res.status(404).json({ 

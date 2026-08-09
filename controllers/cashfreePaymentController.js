@@ -437,18 +437,27 @@ exports.getPaymentStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
 
-    const [tx, cfStatus] = await Promise.all([
-      PaymentTransaction.findOne({ cf_order_id: orderId }).lean(),
-      cfPay.getOrderStatus(orderId),
-    ]);
+    const tx = await PaymentTransaction.findOne({
+      $or: [
+        { cf_order_id: orderId },
+        { cf_payment_link_id: orderId },
+        { booking_id: orderId }
+      ]
+    }).lean();
+
+    const cfStatus = await cfPay.getOrderStatus(orderId).catch(() => null);
+
+    const isPaid = (tx && (tx.status === 'Verified' || tx.status === 'Settled')) ||
+                   (cfStatus && (cfStatus.status === 'PAID' || cfStatus.status === 'SUCCESS'));
 
     return res.json({
       success:    true,
+      status:     isPaid ? 'PAID' : (cfStatus?.status || tx?.status || 'PENDING'),
       db_status:  tx?.status,
-      cf_status:  cfStatus.status,
+      cf_status:  cfStatus?.status,
       wallet_status: tx?.wallet_status,
       transaction: tx,
-      cashfree:   cfStatus.order,
+      cashfree:   cfStatus?.order || null,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
