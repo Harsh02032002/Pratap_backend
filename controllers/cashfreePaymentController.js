@@ -14,6 +14,7 @@
  *   GET  /api/payments/cashfree/history
  */
 
+const mongoose           = require('mongoose');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const BookingRequest     = require('../models/BookingRequest');
 const Owner              = require('../models/Owner');
