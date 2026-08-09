@@ -48,6 +48,12 @@ function getHeaders(config) {
   };
 }
 
+function sanitizeCustomerId(rawId) {
+  if (!rawId) return `cust_${Date.now()}`;
+  const sanitized = String(rawId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+  return sanitized || `cust_${Date.now()}`;
+}
+
 // ─── CREATE ORDER ──────────────────────────────────────────────────────────────
 
 /**
@@ -75,7 +81,7 @@ async function createOrder({ orderId, amount, currency = 'INR', customerInfo = {
       order_amount:   parseFloat(amount.toFixed(2)),
       order_currency: currency,
       customer_details: {
-        customer_id:    customerInfo.id || `cust_${Date.now()}`,
+        customer_id:    sanitizeCustomerId(customerInfo.id),
         customer_name:  customerInfo.name || 'Tenant',
         customer_email: customerInfo.email || 'tenant@roomhy.com',
         customer_phone: customerInfo.phone || '9999999999',

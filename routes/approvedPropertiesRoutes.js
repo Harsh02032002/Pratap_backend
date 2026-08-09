@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const ApprovedProperty = require('../models/ApprovedProperty');
+const collegesQueue = require('../services/collegesQueueService');
 
 // Simple in-memory cache for Overpass responses
 const overpassCache = new Map();
@@ -561,6 +562,13 @@ router.get('/public/approved', async (req, res) => {
             longitude: prop.longitude || null
           };
         });
+
+        // Trigger non-blocking slow background fetching for properties missing cached colleges
+        try {
+          collegesQueue.enqueueProperties(properties);
+        } catch (qErr) {
+          console.warn('⚠️ Could not enqueue properties for college fetching:', qErr.message);
+        }
 
         // Return proper response with count, total, and pagination info
         res.status(200).json({

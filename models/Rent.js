@@ -19,6 +19,7 @@ const rentSchema = new mongoose.Schema({
     // Rent Details
     rentAmount: Number,
     deposit: Number,
+    advanceChargeAmount: { type: Number, default: 0 }, // onboarding move-in advance charge, included in totalDue
     totalDue: Number, // rent + any additional charges
     
     // Collection Period

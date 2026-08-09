@@ -655,9 +655,32 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
         throw saveErr;
       }
 
-      // Insert system warning message in both conversation rooms if applicable
-      const warningText = `⚠️ Roomhy Security Warning: Asking for offline payments or bypassing platform commission is strictly prohibited. If you continue to negotiate offline or share direct payment/contact details, your account will be BLOCKED immediately and permanently suspended.`;
-      
+      // Check total violation count for this offender
+      const offenderId = messageDoc.sender_login_id;
+      const totalViolations = await ChatViolation.countDocuments({
+        $or: [
+          { ownerId },
+          { participantLoginId: offenderId },
+          { participantLoginId: ownerId }
+        ]
+      });
+
+      const isRepeatedOrSevere = totalViolations >= 2;
+
+      if (isRepeatedOrSevere) {
+        // Auto-block offender account on 2nd violation
+        console.log(`🚨 Auto-blocking offender ${offenderId} (Total violations: ${totalViolations})`);
+        await Promise.allSettled([
+          Owner.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { isActive: false }),
+          User.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { status: 'blocked', isActive: false })
+        ]);
+      }
+
+      const pairKey = [messageDoc.sender_login_id, receiverLoginId].sort().join(':').toUpperCase();
+      const warningText = isRepeatedOrSevere
+        ? `🚨 ACCOUNT BLOCKED: Account (${sender.name || offenderId}) has been AUTOMATICALLY BLOCKED & SUSPENDED due to repeated commission bypass / security policy violations. Chat is now closed.`
+        : `⚠️ ROOMHY SECURITY WARNING: Asking for offline payments, commission bypass, or sharing direct contact details is strictly prohibited. Continued violations will result in IMMEDIATE ACCOUNT BLOCK & PERMANENT SUSPENSION.`;
+
       const systemMsgDoc = {
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
@@ -674,7 +697,7 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
         const sysMsg = await ChatMessage.create({
           ...systemMsgDoc,
           room_id: rId,
-          conversation_id: messageDoc.conversation_id || null
+          conversation_id: pairKey
         });
 
         if (global.io) {
@@ -692,6 +715,10 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
           global.io.to(rId).emit('receive_message', payload);
           global.io.to(rId).emit('new_message', sysMsg);
         }
+      }
+
+      if (isRepeatedOrSevere && global.io) {
+        global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations });
       }
 
       // Emit new_violation_alert to Super Admin

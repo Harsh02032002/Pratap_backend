@@ -23,6 +23,22 @@ const APP_URL = process.env.APP_URL || process.env.APP_BASE_URL || process.env.W
 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || ADMIN_URL;
 const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'https://api.roomhy.com';
 
+const TENANT_PAYMENT_HOSTS = new Set(['localhost', '127.0.0.1', 'roomhy.com', 'www.roomhy.com', 'app.roomhy.com', 'www.app.roomhy.com']);
+
+function resolvePaymentAppBase(frontendOrigin) {
+    if (frontendOrigin) {
+        try {
+            const u = new URL(frontendOrigin);
+            if (TENANT_PAYMENT_HOSTS.has(u.hostname.toLowerCase())) {
+                return u.origin;
+            }
+        } catch (_) { /* ignore invalid/untrusted origin */ }
+    }
+    let appBase = process.env.FRONTEND_URL || 'https://www.roomhy.com';
+    if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
+    return appBase;
+}
+
 const otpStore = new Map();
 
 function keyFor(role, loginId, aadhaarNumber) {
@@ -384,7 +400,7 @@ function buildOwnerTenantSignedEmail(ownerName, tenant) {
 </html>`;
 }
 
-async function completeTenantAgreementAndNotify(loginId, { requestId = '', provider = '', callbackPayload = null } = {}) {
+async function completeTenantAgreementAndNotify(loginId, { requestId = '', provider = '', callbackPayload = null, frontendOrigin = '' } = {}) {
     const normalizedLoginId = String(loginId || '').toUpperCase();
     const record = await CheckinRecord.findOne({ loginId: normalizedLoginId, role: 'tenant' });
     if (!record) throw new Error('Tenant check-in record not found');
@@ -416,13 +432,11 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
         signatureDataUrl: record.tenantAgreement?.signatureDataUrl || tenant.digitalCheckin.agreement?.signatureDataUrl || ''
     };
     tenant.digitalCheckin.submittedAt = new Date();
-    // After e-sign: set kycStatus to 'pending' so owner must review & approve KYC
-    // Only upgrade to 'verified' when owner explicitly approves via owner panel
-    // Never auto-set to 'verified' - tenant must complete digital KYC and owner must approve
+    // After e-sign: preserve mismatch_review; otherwise mark KYC as verified automatically
     if (tenant.kycStatus === 'mismatch_review') {
-        // preserve mismatch_review flag
-    } else {
-        tenant.kycStatus = 'pending';
+        // preserve mismatch_review flag — superadmin must review manually
+    } else if (tenant.kycStatus !== 'verified') {
+        tenant.kycStatus = 'verified';
     }
 
     // Status remains 'pending' until onboarding payment is completed
@@ -433,13 +447,12 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
     // [PHASE 3 HOOK — Agreement Complete -> Payment Link]
     // After tenant signs the agreement, generate a tokenized payment link and email it.
     try {
-        console.log(`[PAYMENT LINK HOOK] Starting for tenant ${tenant.loginId}, current paymentLinkStatus: ${tenant.paymentLinkStatus}`);
-        if (tenant.paymentLinkStatus !== 'paid') {
-            console.log(`[PAYMENT LINK] Creating payment link for ${tenant.loginId}`);
+        if (tenant.paymentLinkStatus !== 'sent' && tenant.paymentLinkStatus !== 'paid') {
             const Rent = require('../models/Rent');
-            let rent = await Rent.findOne({ tenantLoginId: tenant.loginId, paymentStatus: 'pending' }).sort({ createdAt: -1 });
+            let rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
             if (!rent) {
-                console.log(`[PAYMENT LINK] No pending rent found, creating new rent record`);
+                const rentAmount = tenant.agreedRent || 0;
+                const advanceChargeAmount = Math.max(0, parseInt(tenant.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
                 rent = new Rent({
                     tenantId: tenant._id,
                     tenantLoginId: tenant.loginId,
@@ -449,12 +462,13 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                     ownerLoginId: tenant.ownerLoginId,
                     propertyName: tenant.propertyTitle || 'RoomHy Property',
                     roomNumber: tenant.roomNo || '',
-                    rentAmount: tenant.agreedRent || 0,
-                    totalDue: tenant.agreedRent || 0,
+                    rentAmount,
+                    advanceChargeAmount,
+                    totalDue: rentAmount + advanceChargeAmount,
                     paymentStatus: 'pending'
                 });
                 await rent.save();
-                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}`);
+                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}, advance: ${advanceChargeAmount}`);
             }
             const rentRecordId = rent._id;
             const jwtSecret = process.env.JWT_SECRET;
@@ -466,8 +480,7 @@ async function completeTenantAgreementAndNotify(loginId, { requestId = '', provi
                 jwtSecret,
                 { expiresIn: '72h' }
             );
-            let appBase = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || process.env.APP_BASE_URL || 'http://localhost:5173';
-            if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
+            const appBase = resolvePaymentAppBase(frontendOrigin);
             const paymentUrl = `${appBase}/payment/gateway?token=${token}`;
             tenant._paymentUrl = paymentUrl;
 
@@ -1782,7 +1795,7 @@ router.post('/tenant/kyc/digilocker/complete', otpIpLimiter, otpLimiter, async (
 
 router.post('/tenant/agreement', async (req, res) => {
     try {
-        const { loginId, eSignName, accepted, signatureDataUrl } = req.body || {};
+        const { loginId, eSignName, accepted, signatureDataUrl, frontendUrl, origin } = req.body || {};
         if (!loginId || !eSignName || accepted !== true || !signatureDataUrl) {
             return res.status(400).json({ success: false, message: 'Agreement acceptance, e-sign, and tenant signature are required' });
         }
@@ -1842,7 +1855,8 @@ router.post('/tenant/agreement', async (req, res) => {
         const completion = await completeTenantAgreementAndNotify(normalizedLoginId, {
             requestId: '',
             provider: 'roomhy-esign',
-            callbackPayload: { source: 'roomhy-custom-esign' }
+            callbackPayload: { source: 'roomhy-custom-esign' },
+            frontendOrigin: frontendUrl || origin || ''
         });
         record = completion.record;
 

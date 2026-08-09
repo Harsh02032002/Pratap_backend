@@ -292,7 +292,8 @@ exports.getConversation = async (req, res) => {
         { room_id: { $in: user2Variants }, sender_login_id: { $in: user1Variants } },
         { room_id: 'Verified Owner', sender_login_id: { $in: [...user1Variants, ...user2Variants] } },
         { room_id: { $in: [...user1Variants, ...user2Variants] }, sender_login_id: 'Verified Owner' },
-        { conversation_id: pairKey, sender_login_id: { $in: ['system', 'System'] } }
+        { conversation_id: pairKey, sender_login_id: { $in: ['system', 'System'] } },
+        { room_id: { $in: [...user1Variants, ...user2Variants] }, sender_login_id: { $in: ['system', 'System'] } }
       ]
     };
 

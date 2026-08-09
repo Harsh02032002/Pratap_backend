@@ -804,4 +804,106 @@ router.get('/subscription-status', async (req, res) => {
   }
 });
 
+// POST /api/owners/create-subscription-order — Create Cashfree order for owner subscription
+router.post('/create-subscription-order', async (req, res) => {
+  try {
+    const { loginId } = req.body;
+    const cleanId = String(loginId || req.query.loginId || '').trim();
+    if (!cleanId) return res.status(400).json({ success: false, message: 'loginId required' });
+
+    const SystemSettings = require('../models/SystemSettings');
+    const cfPay = require('../services/cashfreePaymentService');
+
+    const [owner, settings] = await Promise.all([
+      Owner.findOne({ loginId: { $regex: new RegExp(`^${cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }),
+      SystemSettings.findOne().lean()
+    ]);
+
+    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+    const price = Number(settings?.ownerSubscriptionPrice || 999);
+    const orderId = `SUB_OWNER_${owner.loginId}_${Date.now()}`;
+
+    const orderResult = await cfPay.createOrder({
+      orderId,
+      amount: price,
+      currency: 'INR',
+      customerInfo: {
+        id: owner.loginId,
+        name: owner.name || 'Owner',
+        email: owner.email || 'owner@roomhy.com',
+        phone: owner.phone || '9999999999'
+      },
+      meta: {
+        note: `Roomhy Owner Subscription (${owner.loginId})`
+      }
+    });
+
+    if (!orderResult.success) {
+      return res.status(502).json({ success: false, message: orderResult.error || 'Failed to create payment order' });
+    }
+
+    return res.json({
+      success: true,
+      order_id: orderResult.order_id || orderId,
+      cf_order_id: orderResult.cf_order_id,
+      payment_session_id: orderResult.payment_session_id,
+      amount: price,
+      currency: 'INR'
+    });
+  } catch (err) {
+    console.error('❌ create-subscription-order error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /api/owners/verify-subscription-payment — Verify Cashfree payment & extend subscription
+router.post('/verify-subscription-payment', async (req, res) => {
+  try {
+    const { loginId, order_id } = req.body;
+    const cleanId = String(loginId || '').trim();
+    const orderId = String(order_id || '').trim();
+
+    if (!cleanId || !orderId) {
+      return res.status(400).json({ success: false, message: 'loginId and order_id required' });
+    }
+
+    const cfPay = require('../services/cashfreePaymentService');
+    const statusRes = await cfPay.getOrderStatus(orderId);
+
+    const isPaid = statusRes.success && (statusRes.status === 'PAID' || statusRes.order?.order_status === 'PAID');
+    if (!isPaid) {
+      return res.status(400).json({ success: false, message: 'Payment not verified or pending' });
+    }
+
+    const owner = await Owner.findOne({ loginId: { $regex: new RegExp(`^${cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+    if (!owner.subscription) owner.subscription = {};
+    const now = new Date();
+    const currentExpiry = owner.subscription.subscriptionExpiry ? new Date(owner.subscription.subscriptionExpiry) : now;
+    const baseDate = currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    owner.subscription.isSubscribed = true;
+    owner.subscription.subscriptionExpiry = newExpiry;
+    owner.subscription.lastPaidAt = now;
+    owner.subscription.lastOrderId = orderId;
+    owner.subscription.status = 'subscribed';
+
+    await owner.save();
+
+    console.log(`✅ Subscription activated for Owner ${owner.loginId} until ${newExpiry.toISOString()}`);
+
+    return res.json({
+      success: true,
+      message: 'Subscription payment verified and account activated!',
+      subscriptionExpiry: newExpiry
+    });
+  } catch (err) {
+    console.error('❌ verify-subscription-payment error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
