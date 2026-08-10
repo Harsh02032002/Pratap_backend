@@ -743,8 +743,14 @@ exports.login = async (req, res) => {
             user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
             console.log(`[LOGIN DEBUG] Email search result:`, user ? { loginId: user.loginId, role: user.role, email: user.email } : 'No user found');
         } else if (isPhone) {
-            // If identifier is phone, only search by phone
-            user = await User.findOne({ phone: normalizedIdentifier });
+            // If identifier is phone, only search by phone. Guard against legacy
+            // duplicate phone numbers (pre-unique-index data) resolving to the
+            // wrong account — refuse rather than pick one arbitrarily.
+            const phoneMatches = await User.find({ phone: normalizedIdentifier }).limit(2);
+            if (phoneMatches.length > 1) {
+                return res.status(409).json({ message: 'Multiple accounts share this phone number. Please login using your Login ID.' });
+            }
+            user = phoneMatches[0] || null;
             console.log(`[LOGIN DEBUG] Phone search result:`, user ? { loginId: user.loginId, role: user.role, phone: user.phone } : 'No user found');
         } else if (isLoginId) {
             // If identifier looks like loginId, only search by loginId

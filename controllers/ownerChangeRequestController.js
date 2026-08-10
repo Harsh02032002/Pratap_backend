@@ -1,5 +1,6 @@
 const OwnerChangeRequest = require('../models/OwnerChangeRequest');
 const Owner = require('../models/Owner');
+const User = require('../models/user');
 
 exports.submitRequest = async (req, res) => {
     try {
@@ -9,10 +10,21 @@ exports.submitRequest = async (req, res) => {
             return res.status(400).json({ success: false, message: "Missing required fields" });
         }
 
+        // Snapshot the current values for only the fields being changed, so
+        // the reviewer can see a "previous vs requested" diff later.
+        const owner = await Owner.findOne({ loginId: ownerLoginId });
+        const previousValues = {};
+        if (owner) {
+            Object.keys(requestedChanges).forEach((key) => {
+                previousValues[key] = owner[key] !== undefined ? owner[key] : (owner.profile ? owner.profile[key] : undefined);
+            });
+        }
+
         const request = new OwnerChangeRequest({
             ownerLoginId,
             requestType,
-            requestedChanges
+            requestedChanges,
+            previousValues
         });
 
         await request.save();
@@ -27,10 +39,13 @@ exports.submitRequest = async (req, res) => {
 
 exports.getRequests = async (req, res) => {
     try {
-        const { status } = req.query;
+        const { status, ownerLoginId } = req.query;
         let query = {};
-        if (status) {
+        if (status && status !== 'All') {
             query.status = status;
+        }
+        if (ownerLoginId) {
+            query.ownerLoginId = ownerLoginId;
         }
 
         const requests = await OwnerChangeRequest.find(query).sort({ createdAt: -1 });
@@ -61,14 +76,34 @@ exports.approveRequest = async (req, res) => {
             return res.status(404).json({ success: false, message: "Owner not found" });
         }
 
+        // Login authenticates against the User collection, not Owner — an
+        // approved contact-detail change must land here too or the owner's
+        // new phone/email simply won't work for sign-in.
+        const authUser = await User.findOne({ loginId: request.ownerLoginId, role: 'owner' });
+
         if (request.requestType === 'profile') {
+            const newPhone = request.requestedChanges.phone;
+            if (newPhone) {
+                const phoneConflict = await User.findOne({ phone: newPhone });
+                if (phoneConflict && String(phoneConflict._id) !== String(authUser?._id)) {
+                    return res.status(409).json({ success: false, message: "This phone number is already in use by another account." });
+                }
+            }
+
             // Update profile
             owner.profile = { ...owner.profile, ...request.requestedChanges, updatedAt: new Date() };
             owner.name = request.requestedChanges.name || owner.name;
             owner.email = request.requestedChanges.email || owner.email;
-            owner.phone = request.requestedChanges.phone || owner.phone;
+            owner.phone = newPhone || owner.phone;
             owner.address = request.requestedChanges.address || owner.address;
             owner.city = request.requestedChanges.city || owner.city;
+
+            if (authUser) {
+                if (request.requestedChanges.name) authUser.name = request.requestedChanges.name;
+                if (request.requestedChanges.email) authUser.email = request.requestedChanges.email;
+                if (newPhone) authUser.phone = newPhone;
+                await authUser.save();
+            }
         } else if (request.requestType === 'bank_details') {
             // Update checkin bank details (which owner uses for their payouts)
             owner.checkinAccountHolderName = request.requestedChanges.checkinAccountHolderName || owner.checkinAccountHolderName;
