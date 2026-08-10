@@ -598,6 +598,14 @@ exports.getAllOwners = async (req, res) => {
         const enrichedOwners = owners.map(o => {
             const checkin = checkinMap[o.loginId];
             const isPendingApproval = Boolean(o.isEmployeeSubmitted && o.status === 'pending_approval');
+            const kycComplete = Boolean(
+                ['verified', 'submitted', 'completed'].includes(o.kycStatus) ||
+                ['verified', 'submitted', 'completed'].includes(o.kyc?.status) ||
+                checkin?.ownerKyc?.otpVerified ||
+                checkin?.ownerKyc?.digilockerVerified ||
+                checkin?.ownerFinalVerified ||
+                o.checkinAadhaarNumber
+            );
             const shouldBeActive = isPendingApproval ? false : (o.isActive === true);
 
             return {
