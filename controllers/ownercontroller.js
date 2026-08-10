@@ -597,19 +597,8 @@ exports.getAllOwners = async (req, res) => {
 
         const enrichedOwners = owners.map(o => {
             const checkin = checkinMap[o.loginId];
-            const kycComplete = ['verified', 'submitted'].includes(o.kyc?.status) ||
-                checkin?.ownerKyc?.otpVerified ||
-                checkin?.ownerKyc?.digilockerVerified ||
-                checkin?.ownerFinalVerified;
-            const shouldBeActive = o.isActive === true || kycComplete;
-
-            // Self-heal owners stuck inactive after completing digital check-in
-            if (shouldBeActive && o.isActive !== true) {
-                Owner.updateOne(
-                    { loginId: o.loginId },
-                    { $set: { isActive: true, 'kyc.status': 'verified', 'kyc.verifiedAt': o.kyc?.verifiedAt || new Date() } }
-                ).catch(() => { });
-            }
+            const isPendingApproval = Boolean(o.isEmployeeSubmitted && o.status === 'pending_approval');
+            const shouldBeActive = isPendingApproval ? false : (o.isActive === true);
 
             return {
                 ...o,
