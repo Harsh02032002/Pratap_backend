@@ -92,7 +92,7 @@ router.post('/signup', async (req, res) => {
 
                         <a href="${WEBSITE_URL}/website/signup" class="button">Go to Roomhy</a>
 
-                        <p style="margin-top: 30px;">If you have any questions, feel free to contact our support team at <strong>hello@roomhy.com</strong></p>
+                        <p style="margin-top: 30px;">If you have any questions, feel free to contact our support team at <strong>team@roomhy.com</strong></p>
                     </div>
                     <div class="footer">
                         <p>&copy; 2025 Roomhy. All rights reserved. | Made with ❤️ for students</p>
@@ -116,7 +116,7 @@ Keep your credentials safe and do not share them with anyone.
 
 You can now log in to your account and start exploring properties.
 
-Questions? Contact us at hello@roomhy.com
+Questions? Contact us at team@roomhy.com
 
 © 2025 Roomhy. All rights reserved.
         `;

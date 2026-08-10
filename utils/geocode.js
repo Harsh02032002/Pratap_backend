@@ -17,7 +17,7 @@ async function geocodeAddress(address) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: {
-        'User-Agent': 'Roohmy-Backend/1.0 (hello@roomhy.com)',
+        'User-Agent': 'Roohmy-Backend/1.0 (team@roomhy.com)',
         'Accept': 'application/json'
       }
     }, (res) => {

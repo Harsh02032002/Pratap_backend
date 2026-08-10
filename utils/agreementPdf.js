@@ -176,7 +176,7 @@ async function generateAndSendAgreementEmail({ tenant, loginId, eSignName, signa
 
     const tenantName = (tenant?.name || eSignName || 'Tenant').trim();
     const subject = 'RoomHy Rental Agreement — Your Signed Copy';
-    const text = `Dear ${tenantName},\n\nThank you for completing your RoomHy digital check-in. Please find your signed rental agreement attached.\n\nLogin ID: ${loginId}\n\nFor any queries, contact support@roomhy.com.\n\nRegards,\nRoomHy Team`;
+    const text = `Dear ${tenantName},\n\nThank you for completing your RoomHy digital check-in. Please find your signed rental agreement attached.\n\nLogin ID: ${loginId}\n\nFor any queries, contact team@roomhy.com.\n\nRegards,\nRoomHy Team`;
     const html = `
 <div style="font-family:sans-serif;max-width:540px;margin:0 auto;padding:24px;background:#f8fafc;border-radius:12px;">
   <div style="background:#1d4ed8;padding:20px 24px;border-radius:8px 8px 0 0;text-align:center;">
@@ -186,7 +186,7 @@ async function generateAndSendAgreementEmail({ tenant, loginId, eSignName, signa
     <p style="margin:0 0 12px;">Dear <strong>${tenantName}</strong>,</p>
     <p style="margin:0 0 12px;">Thank you for completing your RoomHy digital check-in. Your signed rental agreement is attached to this email as a PDF.</p>
     <p style="margin:0 0 4px;color:#475569;font-size:13px;">Login ID: <strong>${loginId}</strong></p>
-    <p style="margin:16px 0 0;color:#6b7280;font-size:12px;">For any queries, contact <a href="mailto:support@roomhy.com">support@roomhy.com</a>.</p>
+    <p style="margin:16px 0 0;color:#6b7280;font-size:12px;">For any queries, contact <a href="mailto:team@roomhy.com">team@roomhy.com</a>.</p>
     <p style="margin:4px 0 0;color:#6b7280;font-size:12px;">— RoomHy Team</p>
   </div>
 </div>`;

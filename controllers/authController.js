@@ -728,7 +728,9 @@ exports.login = async (req, res) => {
         
         // Determine identifier type
         const isEmail = normalizedIdentifier.includes('@');
-        const isPhone = /^\d{10}$/.test(normalizedIdentifier); // 10 digit phone
+        const cleanDigits = normalizedIdentifier.replace(/\D/g, '');
+        const phone10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
+        const isPhone = phone10.length === 10;
         const isLoginId = /^roomhy/i.test(normalizedIdentifier);
         
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
@@ -736,39 +738,89 @@ exports.login = async (req, res) => {
         // Build comprehensive query based on identifier - use precise matching to avoid wrong user login
         let user = null;
         
-        console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone}, isLoginId: ${isLoginId}`);
+        console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone} (${phone10}), isLoginId: ${isLoginId}`);
         
         if (isEmail) {
-            // If identifier is email, only search by email
+            // If identifier is email, search by email
             user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
-            console.log(`[LOGIN DEBUG] Email search result:`, user ? { loginId: user.loginId, role: user.role, email: user.email } : 'No user found');
         } else if (isPhone) {
-            // If identifier is phone, only search by phone
-            user = await User.findOne({ phone: normalizedIdentifier });
-            console.log(`[LOGIN DEBUG] Phone search result:`, user ? { loginId: user.loginId, role: user.role, phone: user.phone } : 'No user found');
+            // If identifier is phone, search by all common phone variations
+            user = await User.findOne({
+                $or: [
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `91${phone10}` },
+                    { phone: `0${phone10}` }
+                ]
+            });
         } else if (isLoginId) {
-            // If identifier looks like loginId, only search by loginId
+            // If identifier looks like loginId, search by loginId
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
-            if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
-            }
-            if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier });
-            }
-            console.log(`[LOGIN DEBUG] LoginId search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier });
         } else {
-            // Fallback: try all fields but prioritize exact matches
+            // Fallback: try all fields
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            if (!user) user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
             if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+                user = await User.findOne({
+                    $or: [
+                        { phone: normalizedIdentifier },
+                        { phone: phone10 },
+                        { phone: `+91${phone10}` },
+                        { phone: `0${phone10}` }
+                    ]
+                });
             }
-            if (!user) {
-                user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+        }
+
+        // Fallback for Owners: Search Owner collection directly by loginId, email, or phone
+        if (!user) {
+            const ownerOr = [
+                { loginId: normalizedIdentifier.toUpperCase() },
+                { loginId: normalizedIdentifier.toLowerCase() },
+                { email: normalizedIdentifier.toLowerCase() }
+            ];
+            if (isPhone && phone10) {
+                ownerOr.push(
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `0${phone10}` },
+                    { 'profile.phone': phone10 },
+                    { 'profile.phone': `+91${phone10}` },
+                    { checkinPhone: phone10 },
+                    { checkinPhone: `+91${phone10}` }
+                );
             }
-            if (!user) {
-                user = await User.findOne({ phone: normalizedIdentifier });
+            const ownerDoc = await Owner.findOne({ $or: ownerOr }).lean();
+            if (ownerDoc) {
+                user = await User.findOne({
+                    $or: [
+                        { loginId: ownerDoc.loginId },
+                        { email: ownerDoc.email },
+                        { phone: ownerDoc.phone }
+                    ]
+                });
+                if (!user && ownerDoc.isActive !== false) {
+                    try {
+                        user = await User.create({
+                            name: ownerDoc.name || ownerDoc.profile?.name || 'Property Owner',
+                            email: ownerDoc.email || ownerDoc.profile?.email || `${ownerDoc.loginId.toLowerCase()}@roomhy.com`,
+                            phone: ownerDoc.phone || ownerDoc.profile?.phone || phone10,
+                            password: ownerDoc.credentials?.password || ownerDoc.checkinPassword || password,
+                            role: 'owner',
+                            loginId: ownerDoc.loginId,
+                            isActive: ownerDoc.isActive !== false,
+                            status: ownerDoc.status || 'approved'
+                        });
+                    } catch (createErr) {
+                        user = await User.findOne({ loginId: ownerDoc.loginId });
+                    }
+                }
             }
-            console.log(`[LOGIN DEBUG] Fallback search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
         }
 
         // Fallback: If not in User collection, check KYCVerification (website signups)
@@ -877,11 +929,23 @@ exports.login = async (req, res) => {
             // Owners can login using email, loginId, or phone
             isMatch = await user.matchPassword(password);
             
-            // Plain-text password fallback for legacy records
+            // Plain-text password fallback for legacy records or Owner credentials
             if (!isMatch && user.password && String(user.password) === String(password)) {
                 isMatch = true;
                 user.password = password; // Will be re-hashed by pre-save hook
                 await user.save().catch(() => {});
+            }
+
+            if (!isMatch && user.role === 'owner') {
+                const ownerDoc = await Owner.findOne({ loginId: user.loginId }).lean();
+                if (ownerDoc) {
+                    const ownerPass = ownerDoc.credentials?.password || ownerDoc.checkinPassword;
+                    if (ownerPass && String(ownerPass).trim() === String(password).trim()) {
+                        isMatch = true;
+                        user.password = password;
+                        await user.save().catch(() => {});
+                    }
+                }
             }
             
             if (isMatch) {

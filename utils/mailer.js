@@ -531,7 +531,7 @@ function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {
             </div>
             <div class="footer">
                 <p>© 2025 RoomHy. All rights reserved.</p>
-                <p>Need help? Contact us at support@roomhy.com</p>
+                <p>Need help? Contact us at team@roomhy.com</p>
             </div>
         </div>
     </div>
@@ -608,7 +608,7 @@ async function sendKycLinkEmail(toEmail, name, portalName, kycLink) {
       </div>
       <div class="footer">
         <p>© 2025 RoomHy. All rights reserved.</p>
-        <p>Need help? Contact us at support@roomhy.com</p>
+        <p>Need help? Contact us at team@roomhy.com</p>
       </div>
     </div>
   </div>
