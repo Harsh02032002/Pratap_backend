@@ -178,29 +178,31 @@ router.patch('/:id/kyc', protect, authorize('superadmin', 'areamanager'), auditT
 router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 router.put('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
-// 5. Update owner by loginId (Preserved - Used for Password Updates)
-router.patch('/:loginId', protect, authorize('superadmin', 'owner'), auditTrail('owners'), async (req, res) => {
+// 5. Update owner by loginId
+router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 'staff', 'manager', 'areamanager', 'owner'), auditTrail('owners'), async (req, res) => {
     try {
         console.log('✏️ Owner PATCH request for:', req.params.loginId);
+        const param = String(req.params.loginId || '').trim();
 
         // Owners can only modify their own record
-        if (req.user.role === 'owner' && String(req.user.loginId || '').toUpperCase() !== String(req.params.loginId || '').toUpperCase()) {
+        if (req.user.role === 'owner' && String(req.user.loginId || '').toUpperCase() !== param.toUpperCase()) {
             return res.status(403).json({ error: 'Forbidden: You can only update your own record' });
         }
 
-        // Prepare update payload
         let updatePayload = { ...req.body };
-        updatePayload.loginId = req.params.loginId;
 
-        // If password is being updated, ensure flags are set correctly
         if (updatePayload.credentials && updatePayload.credentials.password) {
             updatePayload.credentials.firstTime = false;
             updatePayload.passwordSet = true;
         }
 
-        // Use findOneAndUpdate with upsert so missing owners (from legacy local storage) are created
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
+
         const owner = await Owner.findOneAndUpdate(
-            { loginId: req.params.loginId },
+            query,
             { $set: updatePayload, $setOnInsert: { createdAt: new Date() } },
             { new: true, upsert: true, setDefaultsOnInsert: true }
         );

@@ -697,7 +697,14 @@ exports.updateOwnerKyc = async (req, res) => {
             return res.status(400).json({ message: 'Invalid status' });
         }
 
-        const owner = await Owner.findOne({ $or: [{ _id: id }, { loginId: id }] });
+        const mongoose = require('mongoose');
+        const param = String(id || '').trim();
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
+
+        const owner = await Owner.findOne(query);
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
 
         owner.kyc = owner.kyc || {};
@@ -711,16 +718,6 @@ exports.updateOwnerKyc = async (req, res) => {
         }
 
         await owner.save();
-
-        // Send Notification to Owner (assuming Notification model exists)
-        // Note: recipient needs to be the User _id associated if decoupled, 
-        // but often Owner model implies a User. Adjust recipient as needed.
-        // For now, we assume a notification system integration:
-        // await Notification.create({
-        //    recipient: owner.userId, // field linking to User model
-        //    type: 'kyc_update',
-        //    message: `Your KYC has been ${status}.`
-        // });
 
         res.json({ success: true, message: `Owner KYC ${status}`, owner });
     } catch (err) {
@@ -769,7 +766,14 @@ exports.approveOwner = async (req, res) => {
         const { loginId } = req.params;
         const password = req.body.password || 'Roomhy@123';
 
-        const owner = await Owner.findOne({ $or: [{ loginId }, { _id: loginId }] });
+        const mongoose = require('mongoose');
+        const param = String(loginId || '').trim();
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
+
+        const owner = await Owner.findOne(query);
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
 
         // Verify KYC submission before approval
