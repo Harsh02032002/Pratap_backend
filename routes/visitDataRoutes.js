@@ -216,14 +216,15 @@ router.post('/', protect, authorize('superadmin', 'employee', 'manager', 'areama
 // Used by Area Manager / Employee dashboard
 // Supports optional ?staffId / ?staffName parameters to filter by staff
 // ============================================================
-router.get('/', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
+router.get('/', protect, authorize('superadmin', 'admin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const requester = await resolveRequestUser(req);
         const requestedStaffId = String(req.query.staffId || '').trim();
         const requestedStaffName = (req.query.staffName || '').toString().trim();
 
-        // Employees should only see their own visit reports.
-        const isEmployee = requester?.role === 'employee' || requester?.role === 'staff' || requester?.role === 'areamanager';
+        // Superadmin & Admin can see all visits. Employees should only see their own visit reports.
+        const isSuperadmin = requester?.role === 'superadmin' || requester?.role === 'admin';
+        const isEmployee = !isSuperadmin && (requester?.role === 'employee' || requester?.role === 'staff' || requester?.role === 'areamanager');
         const enforcedStaffId = isEmployee
             ? String(requester?.loginId || requestedStaffId || '').trim()
             : requestedStaffId;
