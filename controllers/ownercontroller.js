@@ -795,8 +795,18 @@ exports.approveOwner = async (req, res) => {
         owner.kycStatus = 'verified';
         owner.isActive = true;
         owner.status = 'approved';
-        owner.isEmployeeSubmitted = false;
         await owner.save();
+
+        // Sync User model if exists
+        try {
+            const User = require('../models/user');
+            await User.updateOne(
+                { $or: [{ loginId: owner.loginId }, { email: owner.email }] },
+                { $set: { isActive: true, status: 'active', requirePasswordReset: false } }
+            );
+        } catch (uErr) {
+            console.warn('Sync User on owner approve warning:', uErr.message);
+        }
 
         // Send credentials email
         if (owner.email) {
