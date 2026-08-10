@@ -452,23 +452,28 @@ async function sendMail(to, subject, text, html, options = {}) {
 }
 
 function getLoginUrlForRole(role, originUrl = '') {
-    let frontendUrl = (process.env.FRONTEND_URL || process.env.WEB_APP_URL || 'https://admin.roomhy.com').replace(/\/$/, '');
-    
-    if (originUrl) {
-        frontendUrl = originUrl.replace(/\/$/, '');
-    }
-
     const r = String(role || '').toLowerCase();
+    
+    // Client Apps (Tenants & Owners) MUST ALWAYS use app.roomhy.com (never admin.roomhy.com)
+    const clientAppUrl = (process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com').replace(/\/$/, '');
+
     if (r.includes('owner')) {
-        return `${frontendUrl}/propertyowner/ownerlogin`;
+        return `${clientAppUrl}/propertyowner/ownerlogin`;
     }
     if (r.includes('tenant')) {
-        return `${frontendUrl}/tenant/tenantlogin`;
+        return `${clientAppUrl}/tenant/tenantlogin`;
     }
+
+    // Staff & Superadmin use admin.roomhy.com
+    let adminAppUrl = (process.env.ADMIN_URL || 'https://admin.roomhy.com').replace(/\/$/, '');
+    if (originUrl && (originUrl.includes('admin') || originUrl.includes('localhost'))) {
+        adminAppUrl = originUrl.replace(/\/$/, '');
+    }
+
     if (r.includes('manager') || r.includes('employee') || r.includes('staff') || r.includes('warden') || r.includes('reception') || r.includes('accountant') || r.includes('electrician') || r.includes('plumber') || r.includes('security') || r.includes('housekeeping') || r.includes('maintenance') || r.includes('custom')) {
-        return `${frontendUrl}/staff`;
+        return `${adminAppUrl}/staff`;
     }
-    return `${frontendUrl}/superadmin/index`;
+    return `${adminAppUrl}/superadmin/index`;
 }
 
 function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {

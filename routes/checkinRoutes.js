@@ -19,7 +19,7 @@ const {
 
 const WEBSITE_URL = process.env.WEBSITE_URL || 'https://roomhy.com';
 const ADMIN_URL = process.env.ADMIN_URL || 'https://admin.roomhy.com';
-const APP_URL = process.env.APP_URL || process.env.APP_BASE_URL || process.env.WEB_APP_URL || 'https://app.roomhy.com';
+const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://roomhy.com';
 const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'https://api.roomhy.com';
 

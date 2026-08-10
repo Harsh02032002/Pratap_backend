@@ -812,7 +812,7 @@ exports.approveOwner = async (req, res) => {
         if (owner.email) {
             try {
                 const mailer = require('../utils/mailer');
-                const APP_URL = process.env.APP_BASE_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
+                const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
                 const loginLink = `${APP_URL}/propertyowner/ownerlogin`;
 
                 const subject = "Welcome to Roomhy — Your Property Owner Login Credentials";
