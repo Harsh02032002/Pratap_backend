@@ -30,12 +30,16 @@ router.post('/', auditTrail('owners'), async (req, res) => {
         console.log('📝 Owner POST request:', req.body);
         const staffLoginId = req.user?.loginId || req.body.staffId || '';
         const staffName = req.user?.name || req.body.staffName || '';
+        const isEmpSub = Boolean(req.body.isEmployeeSubmitted || req.user?.role === 'employee' || req.user?.role === 'staff' || req.user?.role === 'areamanager');
         const ownerData = {
             ...req.body,
             createdByStaffId: staffLoginId,
             createdByStaffName: staffName,
             addedByStaffId: staffLoginId,
-            addedByStaffName: staffName
+            addedByStaffName: staffName,
+            isActive: isEmpSub ? false : (req.body.isActive !== undefined ? req.body.isActive : true),
+            status: isEmpSub ? 'pending_approval' : (req.body.status || 'active'),
+            isEmployeeSubmitted: isEmpSub
         };
         const owner = new Owner(ownerData);
         await owner.save();
