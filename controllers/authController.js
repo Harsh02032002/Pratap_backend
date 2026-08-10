@@ -864,23 +864,13 @@ exports.login = async (req, res) => {
                 });
                 const isDemo = user.loginId === 'ROOMHY0000';
                 if (!owner) {
-                    owner = await Owner.create({
-                        loginId: user.loginId,
-                        name: user.name || 'Owner',
-                        email: user.email || '',
-                        phone: user.phone || '',
-                        status: 'active',
-                        isActive: true,
-                        isDeleted: false
-                    });
+                    // Do not auto-create owner unless created via superadmin or approved flow
+                    return res.status(403).json({ message: 'Owner record not found or pending approval.' });
                 } else if (isDemo && (owner.isActive === false || owner.isDeleted)) {
                     // Auto-heal demo owner record
                     await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, isDeleted: false, status: 'active' } });
-                } else if (owner.status !== 'active' || owner.isActive === false || owner.isDeleted) {
-                    owner.status = 'active';
-                    owner.isActive = true;
-                    owner.isDeleted = false;
-                    await owner.save();
+                } else if (!isDemo && (owner.isActive === false || owner.status === 'pending_approval' || (owner.isEmployeeSubmitted && owner.status !== 'approved' && owner.status !== 'active'))) {
+                    return res.status(403).json({ message: 'Your owner account is pending Superadmin approval. Credentials will be sent after approval.' });
                 }
             }
 

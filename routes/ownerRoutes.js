@@ -45,24 +45,32 @@ router.post('/', auditTrail('owners'), async (req, res) => {
         await owner.save();
         console.log('✅ Owner created:', owner.loginId);
 
-        // Send KYC link to owner's email automatically
+        // Send Email based on role:
+        // Employee flow -> Send KYC Link ONLY (No password in URL, No credentials email)
+        // Superadmin flow -> Send Login Credentials email directly (Direct onboarding)
         if (owner.email) {
             try {
                 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
                 const password = owner.credentials?.password || owner.checkinPassword || (req.body.credentials && req.body.credentials.password) || '';
                 const area = owner.locationCode || owner.area || '';
 
-                const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(password)}`;
-
-                await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
-
-                // Update KYC status to 'sent'
-                owner.kyc = owner.kyc || {};
-                owner.kyc.status = 'sent';
-                await owner.save();
-                console.log(`✉️ Direct KYC link sent to ${owner.email} for newly created Owner ${owner.loginId}`);
+                if (isEmpSub) {
+                    // Employee Flow: Send KYC Link only without password
+                    const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}`;
+                    await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
+                    owner.kyc = owner.kyc || {};
+                    owner.kyc.status = 'sent';
+                    await owner.save();
+                    console.log(`✉️ [Employee Flow] KYC link sent to ${owner.email} for pending owner ${owner.loginId}`);
+                } else {
+                    // Superadmin Flow: Send login credentials directly
+                    if (mailer.sendCredentials) {
+                        await mailer.sendCredentials(owner.email, owner.loginId, password, 'Owner');
+                    }
+                    console.log(`✉️ [Superadmin Flow] Credentials email sent directly to ${owner.email} for active owner ${owner.loginId}`);
+                }
             } catch (mailErr) {
-                console.warn('❌ Failed to send direct KYC email for new Owner:', mailErr.message);
+                console.warn('❌ Failed to send email for new Owner:', mailErr.message);
             }
         }
 

@@ -294,11 +294,39 @@ async function syncCompletedDigitalCheckinTenants() {
     }
 }
 
+async function fixFalselyApprovedOwners() {
+    try {
+        const Owner = require('./models/Owner');
+        const res = await Owner.updateMany(
+            {
+                isDeleted: { $ne: true },
+                status: { $ne: 'approved' },
+                $or: [
+                    { isEmployeeSubmitted: true },
+                    { createdByStaffId: { $exists: true, $ne: '' } },
+                    { addedByStaffId: { $exists: true, $ne: '' } }
+                ],
+                'kyc.verifiedAt': { $exists: false },
+                checkinAadhaarNumber: { $exists: false }
+            },
+            {
+                $set: { isActive: false, status: 'pending_approval', isEmployeeSubmitted: true }
+            }
+        );
+        if (res.modifiedCount > 0) {
+            console.log(`🔧 Corrected ${res.modifiedCount} falsely approved employee-submitted owner records back to pending_approval.`);
+        }
+    } catch (err) {
+        console.warn('⚠️ Fix falsely approved owners warning:', err.message);
+    }
+}
+
 mongoose.connection.on('connected', () => {
     console.log('✅ Mongoose connected');
     seedSuperAdminIfMissing();
     fixFalselyVerifiedTenants();
     syncCompletedDigitalCheckinTenants();
+    fixFalselyApprovedOwners();
     if (!escalationJobStarted) {
         escalationJobStarted = true;
         startEscalationJob();

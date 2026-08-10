@@ -746,6 +746,8 @@ exports.requestOwner = async (req, res) => {
             phone,
             locationCode,
             isActive: false,
+            status: 'pending_approval',
+            isEmployeeSubmitted: true,
             kyc: {
                 status: 'requested'
             }

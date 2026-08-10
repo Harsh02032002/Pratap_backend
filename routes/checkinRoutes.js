@@ -1199,14 +1199,17 @@ router.post('/owner/final-submit', async (req, res) => {
             }
         );
 
-        // Send owner dashboard link email after final submit
+        // Send owner dashboard link email ONLY if owner account is active & approved by Superadmin.
+        // For employee-submitted pending owners, login link will ONLY be sent when Superadmin approves the account!
         const owner = ownerDoc || await Owner.findOne({ loginId: normalizedLoginId }).lean();
         const targetEmail = (owner && owner.email) || (record.ownerProfile && record.ownerProfile.email) || '';
         const baseUrl = APP_URL;
         const dashboardUrl = `${baseUrl}/propertyowner/index`;
         let loginEmailSent = false;
 
-        if (targetEmail) {
+        const isFullyApprovedOwner = owner && owner.isActive === true && !owner.isEmployeeSubmitted && owner.status !== 'pending_approval';
+
+        if (targetEmail && isFullyApprovedOwner) {
             const emailHtml = `
                 <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
                     <div style="background: #1d4ed8; color: white; padding: 18px 20px;">
@@ -1227,6 +1230,8 @@ router.post('/owner/final-submit', async (req, res) => {
             } catch (emailErr) {
                 console.error('[CHECKIN FINAL SUBMIT] Email send error:', emailErr.message);
             }
+        } else {
+            console.log(`ℹ️ [CHECKIN FINAL SUBMIT] Skipped dashboard link email for owner ${normalizedLoginId} (Awaiting Superadmin Approval).`);
         }
 
         return res.json({ success: true, message: 'Owner digital check-in submitted', record, dashboardUrl, loginEmailSent });
