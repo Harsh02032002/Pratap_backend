@@ -872,25 +872,29 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
         otpStore.delete(k);
         
         const record = await upsertRecord(loginId, 'owner', { 'ownerKyc.otpVerified': true });
-        
+
         // Get owner details
-        const owner = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).lean();
+        const owner = await Owner.findOne({ loginId: String(loginId).toUpperCase() });
+        const isPendingOwner = Boolean(!owner || owner.isEmployeeSubmitted || owner.status === 'pending_approval' || owner.isActive === false);
         
         const updatedOwner = await Owner.findOneAndUpdate(
             { loginId: String(loginId).toUpperCase() },
             {
                 $set: {
                     'kyc.status': 'verified',
+                    kycStatus: 'verified',
                     'kyc.submittedAt': new Date(),
                     'kyc.verifiedAt': new Date(),
-                    isActive: true,
+                    isActive: isPendingOwner ? false : true,
+                    status: isPendingOwner ? 'pending_approval' : (owner?.status || 'active'),
+                    isEmployeeSubmitted: isPendingOwner
                 },
             },
             { new: true }
         );
 
-        // Send login credentials email
-        if (owner && owner.email) {
+        // Send login credentials email ONLY if owner was created by Superadmin & already active
+        if (owner && owner.email && !isPendingOwner && owner.isActive === true) {
             const baseUrl = APP_URL;
             const ownerPassword = owner.checkinPassword || owner.credentials?.password || 'default';
             const fullLoginUrl = `${baseUrl}/propertyowner/index`;
@@ -934,35 +938,9 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
                                 <p><span class="label">Area:</span> <span class="value">${owner.checkinArea || '-'}</span></p>
                             </div>
 
-                            <p style="color: #d32f2f; font-weight: bold;">⚠️ Important:</p>
-                            <ul>
-                                <li>Keep your login credentials secure</li>
-                                <li>You can change your password after first login</li>
-                                <li>For security, sign out from shared devices</li>
-                            </ul>
-
                             <p style="margin-top: 20px;">
                                 <a href="${fullLoginUrl}" class="button">🔓 Go to Owner Dashboard</a>
                             </p>
-
-                            <p style="margin-top: 20px; font-size: 12px;">
-                                Or copy and paste this link in your browser:<br>
-                                <span class="value">${fullLoginUrl}</span>
-                            </p>
-
-                            <p>What's next?</p>
-                            <ol>
-                                <li>Log in to your owner dashboard</li>
-                                <li>Add your property details</li>
-                                <li>Complete bank account verification</li>
-                                <li>Start receiving tenant inquiries!</li>
-                            </ol>
-
-                            <p>If you have any questions or need support, contact us at <strong>support@roomhy.com</strong></p>
-                        </div>
-                        <div class="footer">
-                            <p>&copy; 2025 RoomHy Owner Platform. All rights reserved.</p>
-                            <p>Made with ❤️ for property owners in India</p>
                         </div>
                     </div>
                 </body>
@@ -973,11 +951,13 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
                 await sendMail(owner.email, '✓ Welcome to RoomHy Owner Platform - Your login details', '', emailHtml);
                 console.log('[CHECKIN KYC] Sent login email to:', owner.email);
             } catch (emailErr) {
-                console.error('[CHECKIN KYC] Email send error:', emailErr.message);
+                console.error('[CHECKIN KYC] Email error:', emailErr.message);
             }
+        } else {
+            console.log(`ℹ️ [CHECKIN KYC VERIFY OTP] Skipped credentials email for owner ${loginId} (Awaiting Superadmin Approval).`);
         }
 
-        return res.json({ success: true, record, owner: updatedOwner, message: 'OTP verified. Check your email for login details.' });
+        return res.json({ success: true, record, owner: updatedOwner, message: 'OTP verified successfully' });
     } catch (err) {
         console.error('owner/kyc/verify-otp error:', err);
         return res.status(500).json({ success: false, message: err.message });

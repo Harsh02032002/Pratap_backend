@@ -797,7 +797,8 @@ exports.approveOwner = async (req, res) => {
         owner.kyc.status = 'verified';
         owner.kycStatus = 'verified';
         owner.isActive = true;
-        owner.status = 'active';
+        owner.status = 'approved';
+        owner.isEmployeeSubmitted = false;
         await owner.save();
 
         // Send credentials email
