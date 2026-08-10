@@ -110,13 +110,15 @@ exports.approveRequest = async (req, res) => {
             owner.checkinBankAccountNumber = request.requestedChanges.checkinBankAccountNumber || owner.checkinBankAccountNumber;
             owner.checkinIfscCode = request.requestedChanges.checkinIfscCode || owner.checkinIfscCode;
             owner.checkinBankName = request.requestedChanges.checkinBankName || owner.checkinBankName;
+            owner.checkinBranchName = request.requestedChanges.checkinBranchName || owner.checkinBranchName;
             owner.checkinUpiId = request.requestedChanges.checkinUpiId || owner.checkinUpiId;
-            
+
             // Also update profile nested object
             if(!owner.profile) owner.profile = {};
             owner.profile.bankName = request.requestedChanges.checkinBankName || owner.profile.bankName;
             owner.profile.accountNumber = request.requestedChanges.checkinBankAccountNumber || owner.profile.accountNumber;
             owner.profile.ifscCode = request.requestedChanges.checkinIfscCode || owner.profile.ifscCode;
+            owner.profile.branchName = request.requestedChanges.checkinBranchName || owner.profile.branchName;
         }
 
         await owner.save();
@@ -125,6 +127,27 @@ exports.approveRequest = async (req, res) => {
         request.reviewedBy = superadminLoginId || 'System Admin';
         request.reviewedAt = new Date();
         await request.save();
+
+        // Any other still-Pending request from this owner of the same type is
+        // now stale — the record it would have edited just changed underneath
+        // it. Auto-reject them instead of leaving duplicate/outdated requests
+        // sitting in the queue for a superadmin to notice by hand.
+        await OwnerChangeRequest.updateMany(
+            {
+                _id: { $ne: request._id },
+                ownerLoginId: request.ownerLoginId,
+                requestType: request.requestType,
+                status: 'Pending'
+            },
+            {
+                $set: {
+                    status: 'Rejected',
+                    rejectionReason: 'Duplicate request — already fulfilled by another approved update.',
+                    reviewedBy: superadminLoginId || 'System Admin',
+                    reviewedAt: new Date()
+                }
+            }
+        );
 
         res.status(200).json({ success: true, message: "Request approved and changes applied", data: request });
     } catch (error) {
