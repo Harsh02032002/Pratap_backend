@@ -19,7 +19,7 @@ const PaymentTransaction  = require('../models/PaymentTransaction');
 const RentPayment         = require('../models/RentPayment');
 const VisitData           = require('../models/VisitData');
 
-const ownerController = require('../controllers/ownercontroller');
+const ownerController = require('../controllers/ownerController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');

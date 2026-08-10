@@ -11,6 +11,25 @@ exports.createEnquiry = async (req, res) => {
     }
     const enquiry = await Enquiry.create(payload);
 
+    const User = require('../models/user');
+    const locationStr = payload.location || payload.city || payload.area || '';
+    if (locationStr) {
+      const areaEmp = await User.findOne({
+        role: { $in: ['employee', 'areamanager'] },
+        $or: [
+          { city: new RegExp(locationStr, 'i') },
+          { assignedArea: new RegExp(locationStr, 'i') },
+          { locationCode: new RegExp(locationStr, 'i') }
+        ]
+      }).lean();
+      if (areaEmp) {
+        enquiry.assignedStaff = areaEmp.name || areaEmp.loginId;
+        enquiry.assignedStaffId = areaEmp.loginId;
+        await enquiry.save();
+        console.log(`📍 Auto-assigned enquiry ${enquiry._id} to Area Employee: ${areaEmp.name} (${areaEmp.loginId})`);
+      }
+    }
+
     try {
       await notifySuperadmin({
         type: 'new_enquiry',

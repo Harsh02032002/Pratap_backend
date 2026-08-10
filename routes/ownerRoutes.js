@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const enquiryController = require('../controllers/enquiryController');
-const { sseStream } = require('../controllers/ownercontroller');
+const { sseStream } = require('../controllers/ownerController');
 const Owner = require('../models/Owner');
 const Message = require('../models/Message');
 const Property = require('../models/Property');
@@ -11,7 +11,7 @@ const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
-const ownerController = require('../controllers/ownercontroller');
+const ownerController = require('../controllers/ownerController');
 
 const mailer = require('../utils/mailer');
 
@@ -162,8 +162,9 @@ router.delete('/:loginId', protect, authorize('superadmin'), auditTrail('owners'
 });
 
 // 4. Update Owner KYC Status (NEW - Super Admin Only)
-// Relaxed auth for development/testing
 router.patch('/:id/kyc', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.updateOwnerKyc);
+router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
+router.put('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
 // 5. Update owner by loginId (Preserved - Used for Password Updates)
 router.patch('/:loginId', protect, authorize('superadmin', 'owner'), auditTrail('owners'), async (req, res) => {

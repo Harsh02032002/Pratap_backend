@@ -765,44 +765,66 @@ exports.requestOwner = async (req, res) => {
 exports.approveOwner = async (req, res) => {
     try {
         const { loginId } = req.params;
-        const { password } = req.body;
+        const password = req.body.password || 'Roomhy@123';
 
-        if (!password) {
-            return res.status(400).json({ message: 'Password is required for approval' });
-        }
-
-        const owner = await Owner.findOne({ loginId });
+        const owner = await Owner.findOne({ $or: [{ loginId }, { _id: loginId }] });
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
 
-        if (owner.kyc?.status !== 'requested') {
-            return res.status(400).json({ message: 'Owner is not in requested status' });
+        // Verify KYC submission before approval
+        const hasKyc = Boolean(
+            owner.kycStatus === 'verified' ||
+            (owner.kyc?.status && owner.kyc.status !== 'pending' && owner.kyc.status !== 'requested') ||
+            owner.checkinSubmittedAt ||
+            owner.checkinAadhaarNumber ||
+            owner.kyc?.aadhaarNumber ||
+            owner.checkinOwnerPhoto
+        );
+
+        if (!hasKyc && req.body.overrideKyc !== true) {
+            return res.status(400).json({ success: false, message: 'KYC submission is required before approving this owner account.' });
         }
 
-        // Set credentials
+        // Set credentials and activate owner
         owner.credentials = { password, firstTime: true };
         owner.checkinPassword = password;
         owner.kyc = owner.kyc || {};
-        owner.kyc.status = 'sent'; // Indicate link sent
+        owner.kyc.status = 'verified';
+        owner.kycStatus = 'verified';
         owner.isActive = true;
+        owner.status = 'active';
         await owner.save();
 
-        // Send email
+        // Send credentials email
         if (owner.email) {
             try {
                 const mailer = require('../utils/mailer');
-                const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
-                const area = owner.locationCode || owner.area || '';
+                const APP_URL = process.env.APP_BASE_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
+                const loginLink = `${APP_URL}/propertyowner/ownerlogin`;
 
-                const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(password)}`;
+                const subject = "Welcome to Roomhy — Your Property Owner Login Credentials";
+                const html = `
+                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 12px; padding: 24px; background: #ffffff;">
+                    <h2 style="color: #0f172a; margin-top: 0;">Congratulations! Your Roomhy Owner Account is Approved</h2>
+                    <p style="color: #475569; font-size: 14px;">Dear ${owner.name || 'Property Owner'},</p>
+                    <p style="color: #475569; font-size: 14px;">Your Property Owner account on Roomhy has been approved by Superadmin. You can now log in to manage your properties, rooms, and view tenant rent collections.</p>
+                    <div style="background: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #cbd5e1; margin: 20px 0;">
+                      <p style="margin: 4px 0; font-size: 14px;"><strong>Login ID:</strong> <code style="color: #2563eb; font-weight: bold;">${owner.loginId}</code></p>
+                      <p style="margin: 4px 0; font-size: 14px;"><strong>Password:</strong> <code style="color: #2563eb; font-weight: bold;">${password}</code></p>
+                    </div>
+                    <div style="text-align: center; margin-top: 24px;">
+                      <a href="${loginLink}" style="display: inline-block; background: #0f172a; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 14px;">Log In to Owner Portal</a>
+                    </div>
+                  </div>
+                `;
 
-                await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
-                console.log(`✉️ Direct KYC link sent to ${owner.email} for newly approved Owner ${owner.loginId}`);
+                await mailer.sendMail(owner.email, subject, '', html);
+                console.log(`✉️ Credentials email sent to ${owner.email} for approved Owner ${owner.loginId}`);
             } catch (mailErr) {
-                console.warn('❌ Failed to send direct KYC email for approved Owner:', mailErr.message);
+                console.warn('❌ Failed to send credentials email for approved Owner:', mailErr.message);
             }
         }
 
-        res.json({ success: true, message: 'Owner request approved and link sent.', owner });
+        res.json({ success: true, message: 'Owner request approved and credentials sent to email.', owner });
     } catch (err) {
         console.error('❌ Approve Owner error:', err.message);
         res.status(500).json({ error: err.message });
