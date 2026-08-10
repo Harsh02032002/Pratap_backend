@@ -205,7 +205,7 @@ exports.getRoomsByProperty = async (req, res) => {
         // We skip syncing occupancy during paginated fetches to improve speed
         if (!limit) {
             try {
-                const ownerController = require('./ownerController');
+                const ownerController = require('./ownercontroller');
                 await ownerController.syncPropertyOccupancyData(propertyId);
             } catch (syncErr) {
                 console.error(`❌ Error syncing occupancy during getRoomsByProperty for property ${propertyId}:`, syncErr.message);
@@ -378,7 +378,7 @@ exports.getRoomsByOwner = async (req, res) => {
         const limit = parseInt(req.query.limit) || 0;
 
         // Dynamically import ownerController to prevent circular dependency issues
-        const ownerController = require('./ownerController');
+        const ownerController = require('./ownercontroller');
         await ownerController.healOwnerProperties(normalizedOwnerId);
 
         const properties = await Property.find({ ownerLoginId: normalizedOwnerId, isDeleted: { $ne: true } }).lean();

@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const enquiryController = require('../controllers/enquiryController');
-const { sseStream } = require('../controllers/ownerController');
+const { sseStream } = require('../controllers/ownercontroller');
 const Owner = require('../models/Owner');
 const Message = require('../models/Message');
 const Property = require('../models/Property');
@@ -11,7 +11,7 @@ const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
-const ownerController = require('../controllers/ownerController');
+const ownerController = require('../controllers/ownercontroller');
 
 const mailer = require('../utils/mailer');
 
