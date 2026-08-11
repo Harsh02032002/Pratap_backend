@@ -304,17 +304,23 @@ router.post(
             if (!tenant.email) {
                 return res.status(400).json({ success: false, message: 'Tenant email address is missing' });
             }
+            // Alternate-ID-proof tenants never go through Aadhaar-OTP — sending
+            // this email would tell them to do something they structurally
+            // can't. They're reviewed via the "Request KYC Approve" queue instead.
+            if (tenant.kyc?.noAadhaar) {
+                return res.status(400).json({ success: false, message: 'This tenant has no Aadhaar and is pending review under Request KYC Approve, not the Aadhaar-OTP link.' });
+            }
 
             const mailer = require('../utils/mailer');
             const origin = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:5173';
             const kycLink = `${origin.replace(/\/$/, '')}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
-            
+
             const sent = await mailer.sendKycLinkEmail(tenant.email, tenant.name, tenant.propertyName || 'RoomHy Tenant Portal', kycLink);
-            
-            res.json({ 
-                success: true, 
+
+            res.json({
+                success: true,
                 message: sent ? `KYC link successfully emailed to ${tenant.email}` : `Failed to send email to ${tenant.email}`,
-                kycLink 
+                kycLink
             });
         } catch (err) {
             res.status(500).json({ success: false, message: err.message });
@@ -340,11 +346,17 @@ router.post(
             if (!tenant.email) {
                 return res.status(400).json({ success: false, message: 'Tenant email address is missing' });
             }
+            // Alternate-ID-proof tenants never go through Aadhaar-OTP — sending
+            // this email would tell them to do something they structurally
+            // can't. They're reviewed via the "Request KYC Approve" queue instead.
+            if (tenant.kyc?.noAadhaar) {
+                return res.status(400).json({ success: false, message: 'This tenant has no Aadhaar and is pending review under Request KYC Approve, not the Aadhaar-OTP link.' });
+            }
 
             const mailer = require('../utils/mailer');
             const origin = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:5173';
             const kycLink = `${origin.replace(/\/$/, '')}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
-            
+
             const sent = await mailer.sendKycLinkEmail(tenant.email, tenant.name, tenant.propertyName || 'RoomHy Tenant Portal', kycLink);
             
             res.json({ 

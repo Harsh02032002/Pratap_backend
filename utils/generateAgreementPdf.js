@@ -397,10 +397,18 @@ function generateAgreementPdfBuffer({
                     }
                 } catch (_) {}
             }
+            // No drawn signature image (e.g. alternate-ID-proof approvals, where
+            // the tenant never visits the e-sign portal) — fall back to their
+            // typed name rendered onto the signature line itself, not just as
+            // a caption underneath a blank line.
+            if (!sigDrawn && eSignName) {
+                doc.font('Helvetica-Oblique').fontSize(18).fillColor('#1e293b')
+                   .text(eSignName, M, sigY + 30, { width: halfPW - 20 });
+            }
             // Signature underline
             doc.moveTo(M, sigY + 72).lineTo(M + halfPW - 20, sigY + 72)
                .lineWidth(0.5).strokeColor('#000000').stroke();
-            if (eSignName && sigDrawn) {
+            if (eSignName) {
                 doc.font('Helvetica').fontSize(8).fillColor('#64748b')
                    .text(`Signed by ${eSignName} on ${today}`, M, sigY + 76, { width: halfPW - 20 });
             }

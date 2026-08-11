@@ -155,8 +155,21 @@ exports.assignTenant = async (req, res) => {
             electricityCharge, maintenanceCharge,
             minStay, noticePeriod, rentDueDate, accommodationType, lateFee,
             licenseDuration, moveOutCharges, noticePeriodCharges, inclusions, gstCharges, advanceCharge,
-            propertyAddress, permanentAddress
+            propertyAddress, permanentAddress,
+            noAadhaar, alternateProofType, alternateProofFile
         } = req.body;
+
+        // Alternate ID proof path: the tenant never gets the Aadhaar-OTP link,
+        // so a superadmin-reviewable proof document must be present — silently
+        // falling back to the OTP email would strand exactly the tenants this
+        // path exists for.
+        const useAlternateProof = Boolean(noAadhaar);
+        if (useAlternateProof && !(alternateProofType && alternateProofFile)) {
+            return res.status(400).json({
+                success: false,
+                message: 'An alternate ID proof type and document are required when the tenant has no Aadhaar.'
+            });
+        }
 
         const advanceChargeAmount = Math.max(0, parseInt(advanceCharge, 10) || 0);
 
@@ -397,7 +410,10 @@ exports.assignTenant = async (req, res) => {
                 // Store Aadhaar OCR data for verification
                 aadhaarData: idProof?.aadhaarData || null,
                 fatherName: additional?.fatherName || '',
-                permanentAddress: additional?.permanentAddress || ''
+                permanentAddress: additional?.permanentAddress || '',
+                noAadhaar: useAlternateProof,
+                alternateProofType: useAlternateProof ? alternateProofType : '',
+                alternateProofFile: useAlternateProof ? alternateProofFile : ''
             },
             kycStatus: 'pending', // Always pending upon creation until tenant completes digital check-in
             kycVerificationData: {
@@ -432,6 +448,21 @@ exports.assignTenant = async (req, res) => {
                 }
             }
         });
+
+        // Queue the alternate ID proof for superadmin review — approval is what
+        // releases the agreement + payment link for this tenant.
+        let alternateProofRequest = null;
+        if (useAlternateProof) {
+            const TenantKycRequest = require('../models/TenantKycRequest');
+            alternateProofRequest = await TenantKycRequest.create({
+                tenantId: tenant._id,
+                ownerLoginId: tenant.ownerLoginId || String(ownerLoginId || property.ownerLoginId || '').toUpperCase(),
+                tenantName: name,
+                proofType: alternateProofType,
+                proofFileUrl: alternateProofFile
+            });
+            console.log(`[TENANT KYC REQUEST] Alternate proof request ${alternateProofRequest._id} created for ${tenant.loginId}`);
+        }
 
         // Populate for response (include locationCode and owner info)
         await tenant.populate('property', 'title roomType locationCode owner ownerLoginId');
@@ -580,8 +611,12 @@ exports.assignTenant = async (req, res) => {
         // Send email to tenant with loginId and digital check-in link (NO PASSWORD - will be sent after payment)
         const baseWebUrl = process.env.DIGITAL_CHECKIN_URL || process.env.APP_BASE_URL || process.env.APP_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
         const tenantCheckinLink = `${baseWebUrl}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
+        // Alternate-proof tenants can never clear the Aadhaar OTP step, so the
+        // check-in invite is suppressed — superadmin approval of their proof
+        // sends them the agreement and payment link instead.
+        const sendCheckinInvite = !useAlternateProof;
         try {
-            if (tenant.email) {
+            if (sendCheckinInvite && tenant.email) {
                 console.log(`[MAIL] Attempting to send KYC link to ${tenant.email}`);
                 const subject = 'Your RoomHy Tenant ID - Complete Digital KYC';
                 const html = `
@@ -695,7 +730,9 @@ exports.assignTenant = async (req, res) => {
 
             // Send WhatsApp to tenant's phone (the number owner entered during room allotment)
             console.log('[TENANT ALLOTMENT] tenant.phone=', tenant.phone, 'tenantCheckinLink=', tenantCheckinLink);
-            if (tenant.phone) {
+            if (!sendCheckinInvite) {
+                console.log(`[TENANT ALLOTMENT] Alternate ID proof path — check-in invite suppressed for ${tenant.loginId}`);
+            } else if (tenant.phone) {
                 sendTemplateToResolvedUser({
                     phone: tenant.phone,
                     templateName: 'roomhy_kyc_pending',
@@ -741,7 +778,9 @@ exports.assignTenant = async (req, res) => {
                 securityDepositBalance: tenant.securityDepositBalance,
                 depositAmount: tenant.securityDepositTotal
             },
-            tenantCheckinLink
+            tenantCheckinLink,
+            kycMode: useAlternateProof ? 'alternate_proof' : 'aadhaar_otp',
+            alternateProofRequestId: alternateProofRequest ? alternateProofRequest._id : null
         });
 
     } catch (error) {

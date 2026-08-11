@@ -332,6 +332,8 @@ try {
     console.log('  ✓ dashboardRoutes');
     app.use('/api/owner-change-requests', require('./routes/ownerChangeRequestRoutes'));
     console.log('  ✓ ownerChangeRequestRoutes');
+    app.use('/api/tenant-kyc-requests', require('./routes/tenantKycRequestRoutes'));
+    console.log('  ✓ tenantKycRequestRoutes');
     app.use('/api/employees', require('./routes/employeeRoutes'));
     console.log('  ✓ employeeRoutes');
     app.use('/api/complaints', require('./routes/complaintRoutes'));

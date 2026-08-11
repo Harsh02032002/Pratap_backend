@@ -67,6 +67,13 @@ const TenantSchema = new mongoose.Schema({
         otpVerifiedAt: { type: Date },
         idProof: { type: String },
         idProofFile: { type: String },
+        // Alternate ID proof path: tenant has no Aadhaar (or no Aadhaar-linked
+        // mobile), so the owner uploads another document for superadmin review
+        // instead of the tenant self-verifying by OTP.
+        noAadhaar: { type: Boolean, default: false },
+        alternateProofType: { type: String },
+        alternateProofFile: { type: String },
+        alternateProofApproved: { type: Boolean, default: false },
         addressProof: { type: String },
         addressProofFile: { type: String },
         uploadedAt: { type: Date },
