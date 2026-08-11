@@ -132,7 +132,17 @@ const defaultLayouts = {
         order: 0,
         content: {
           title: 'About Us',
-          subtitle: 'At Roomhy, we believe finding the right place to stay should be simple and stress-free.'
+          subtitle: 'Our Story & Mission'
+        }
+      },
+      {
+        id: 'about-story',
+        name: 'About Story & Purpose',
+        type: 'about-story',
+        visible: true,
+        order: 1,
+        content: {
+          intro: 'At Roomhy, we believe finding the right place to stay should be simple and stress-free.'
         }
       },
       {
