@@ -150,7 +150,7 @@ const defaultLayouts = {
         name: 'Our Vision',
         type: 'vision',
         visible: true,
-        order: 1,
+        order: 2,
         content: {
           title: 'Our Vision',
           list: [
@@ -165,7 +165,7 @@ const defaultLayouts = {
         name: 'Our Mission',
         type: 'mission',
         visible: true,
-        order: 2,
+        order: 3,
         content: {
           title: 'Our Mission',
           list: [
@@ -180,7 +180,7 @@ const defaultLayouts = {
         name: 'Our Values',
         type: 'values',
         visible: true,
-        order: 3,
+        order: 4,
         content: {
           title: 'Our Values',
           list: [
@@ -196,7 +196,7 @@ const defaultLayouts = {
         name: 'Operational Stats',
         type: 'stats',
         visible: true,
-        order: 4,
+        order: 5,
         content: {
           cities: '5+',
           residences: '75+',
@@ -209,7 +209,7 @@ const defaultLayouts = {
         name: 'Leadership Team',
         type: 'team',
         visible: true,
-        order: 5,
+        order: 6,
         content: {
           title: 'Our Leadership',
           subtitle: 'The Minds Behind Roomhy',
@@ -622,8 +622,12 @@ exports.getPageLayout = async (req, res) => {
           dbSections.push(defSec);
           modified = true;
         } else {
-          // Merge content keys
           const dbSec = dbSections[dbSecIdx];
+          if (dbSec.order !== defSec.order) {
+            dbSec.order = defSec.order;
+            modified = true;
+          }
+          // Merge content keys
           const mergedContent = { ...defSec.content, ...dbSec.content };
           if (JSON.stringify(mergedContent) !== JSON.stringify(dbSec.content)) {
             dbSec.content = mergedContent;
