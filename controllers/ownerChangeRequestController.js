@@ -13,6 +13,18 @@ exports.submitRequest = async (req, res) => {
         // Snapshot the current values for only the fields being changed, so
         // the reviewer can see a "previous vs requested" diff later.
         const owner = await Owner.findOne({ loginId: ownerLoginId });
+
+        // A changed account number without proof is exactly how a payout gets
+        // silently redirected — enforce this server-side too, not just in the
+        // form, since this endpoint could be hit directly.
+        if (requestType === 'bank_details' && owner) {
+            const accountNumberChanged = requestedChanges.checkinBankAccountNumber
+                && requestedChanges.checkinBankAccountNumber !== owner.checkinBankAccountNumber;
+            if (accountNumberChanged && !requestedChanges.checkinBankProof) {
+                return res.status(400).json({ success: false, message: "A passbook or cancelled cheque photo is required when changing the account number." });
+            }
+        }
+
         const previousValues = {};
         if (owner) {
             Object.keys(requestedChanges).forEach((key) => {
@@ -112,6 +124,11 @@ exports.approveRequest = async (req, res) => {
             owner.checkinBankName = request.requestedChanges.checkinBankName || owner.checkinBankName;
             owner.checkinBranchName = request.requestedChanges.checkinBranchName || owner.checkinBranchName;
             owner.checkinUpiId = request.requestedChanges.checkinUpiId || owner.checkinUpiId;
+            // Proof document uploaded alongside an account-number change —
+            // persisted on the same field the digital check-in flow already
+            // reads/writes, so it shows up anywhere bank proof is displayed.
+            owner.checkinBankProof = request.requestedChanges.checkinBankProof || owner.checkinBankProof;
+            owner.checkinBankProofName = request.requestedChanges.checkinBankProofName || owner.checkinBankProofName;
 
             // Also update profile nested object
             if(!owner.profile) owner.profile = {};
