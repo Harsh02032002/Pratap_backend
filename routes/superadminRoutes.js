@@ -75,7 +75,7 @@ router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee',
       Rent.countDocuments(bookingFilter)
     ]);
 
-    const rents = await Rent.find(bookingFilter);
+    const rents = await Rent.find(bookingFilter).limit(300).lean();
     let totalBookingAmount = 0;
     let platformCommission = 0;
     let serviceFee = 0;
@@ -160,7 +160,7 @@ router.get('/home/overview', protect, authorize('superadmin', 'areamanager', 'em
     const [propertiesCount, tenantsCount, rents] = await Promise.all([
       Property.countDocuments(propFilter),
       Tenant.countDocuments(tenantFilter),
-      Rent.find(rentFindFilter).lean()
+      Rent.find(rentFindFilter).limit(300).lean()
     ]);
 
     // Only count pending rents for active (non-deleted) tenants in scope
@@ -448,12 +448,12 @@ router.get('/accounting/overview', protect, authorize('superadmin'), async (req,
     const Tenant = require('../models/Tenant');
     const Owner = require('../models/Owner');
 
-    // 1. Fetch raw data in parallel
+    // 1. Fetch recent raw data in parallel (capped at 200 for fast page loads)
     const [rawTxs, rawRents, rawInvoices, rawRentPayments] = await Promise.all([
-      PaymentTransaction.find({ status: { $ne: 'Failed' } }).sort({ payment_date: -1 }).lean(),
-      Rent.find({}).lean(),
-      RentInvoice.find({}).lean(),
-      RentPayment.find({}).lean()
+      PaymentTransaction.find({ status: { $ne: 'Failed' } }).sort({ payment_date: -1 }).limit(200).lean(),
+      Rent.find({}).sort({ createdAt: -1 }).limit(200).lean(),
+      RentInvoice.find({}).sort({ createdAt: -1 }).limit(200).lean(),
+      RentPayment.find({}).sort({ createdAt: -1 }).limit(200).lean()
     ]);
 
     // 2. Unify all paid transactions (Collections & Payouts)
@@ -708,8 +708,8 @@ router.get('/bookings/overview', protect, authorize('superadmin', 'areamanager',
       BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: todayStart }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
       BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: weekAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
       BookingRequest.countDocuments({ ...bookingFilter, created_at: { $gte: monthAgo }, status: { $in: ['confirmed', 'Confirmed', 'paid', 'Paid'] } }),
-      Enquiry.find(leadFilter).sort({ ts: -1 }).lean(),
-      BookingRequest.find(bookingFilter).sort({ created_at: -1 }).lean()
+      Enquiry.find(leadFilter).sort({ ts: -1 }).limit(200).lean(),
+      BookingRequest.find(bookingFilter).sort({ created_at: -1 }).limit(200).lean()
     ]);
 
     const totalLeads = enquiries.length + bookingsList.length;

@@ -49,18 +49,26 @@ exports.getCities = async (req, res) => {
         // Show all cities - no restriction
         const filteredCityNames = allCityNames;
 
-        const cityDataWithCounts = await Promise.all(filteredCityNames.map(async (cityName) => {
+        // Fast 1-pass aggregation for all city property counts (prevents N parallel regex queries)
+        const countAgg = await ApprovedProperty.aggregate([
+            {
+                $group: {
+                    _id: { $toLower: { $ifNull: ["$city", "$propertyInfo.city"] } },
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+        const cityCountMap = {};
+        countAgg.forEach(item => {
+            if (item._id) cityCountMap[String(item._id).trim()] = item.count;
+        });
+
+        const cityDataWithCounts = filteredCityNames.map((cityName) => {
             const dbMatch = dbCities.find(c => c.name.toLowerCase() === cityName.toLowerCase());
-            
-            const count = await ApprovedProperty.countDocuments({
-                $or: [
-                    { city: new RegExp(`^${cityName}$`, 'i') },
-                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
-                ]
-            });
+            const count = cityCountMap[cityName.toLowerCase().trim()] || 0;
 
             if (dbMatch) {
-                const obj = dbMatch.toObject();
+                const obj = dbMatch.toObject ? dbMatch.toObject() : { ...dbMatch };
                 obj.propertyCount = count;
                 return obj;
             } else {
@@ -70,7 +78,7 @@ exports.getCities = async (req, res) => {
                     propertyCount: count
                 };
             }
-        }));
+        });
 
         res.status(200).json({
             success: true,
@@ -297,26 +305,27 @@ exports.getAreas = async (req, res) => {
             .sort({ createdAt: -1 });
 
         // Calculate dynamic count for each area
-        const areasWithCounts = await Promise.all(areas.map(async (areaDoc) => {
+        // Fast 1-pass aggregation for all area property counts
+        const areaAgg = await ApprovedProperty.aggregate([
+            {
+                $group: {
+                    _id: { $toLower: { $ifNull: ["$area", "$propertyInfo.area"] } },
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+        const areaCountMap = {};
+        areaAgg.forEach(item => {
+            if (item._id) areaCountMap[String(item._id).trim()] = item.count;
+        });
+
+        const areasWithCounts = areas.map((areaDoc) => {
             const areaName = areaDoc.name;
-            const cityName = areaDoc.cityName || areaDoc.city?.name;
-            
-            const count = await ApprovedProperty.countDocuments({
-                status: { $in: ['approved', 'live'] },
-                $or: [
-                    { area: new RegExp(`^${areaName}$`, 'i') },
-                    { 'propertyInfo.area': new RegExp(`^${areaName}$`, 'i') }
-                ],
-                $or: [
-                    { city: new RegExp(`^${cityName}$`, 'i') },
-                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
-                ]
-            });
-            
-            const areaObj = areaDoc.toObject();
+            const count = areaCountMap[areaName.toLowerCase().trim()] || 0;
+            const areaObj = areaDoc.toObject ? areaDoc.toObject() : { ...areaDoc };
             areaObj.propertyCount = count;
             return areaObj;
-        }));
+        });
 
         res.status(200).json({
             success: true,
@@ -355,26 +364,27 @@ exports.getAreasByCity = async (req, res) => {
             status: 'Active'
         }).sort({ createdAt: -1 });
 
-        const areasWithCounts = await Promise.all(areas.map(async (areaDoc) => {
+        // Fast 1-pass aggregation for areas in city
+        const areaAggByCity = await ApprovedProperty.aggregate([
+            {
+                $group: {
+                    _id: { $toLower: { $ifNull: ["$area", "$propertyInfo.area"] } },
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+        const areaCityCountMap = {};
+        areaAggByCity.forEach(item => {
+            if (item._id) areaCityCountMap[String(item._id).trim()] = item.count;
+        });
+
+        const areasWithCounts = areas.map((areaDoc) => {
             const areaName = areaDoc.name;
-            const cityName = areaDoc.cityName || city;
-            
-            const count = await ApprovedProperty.countDocuments({
-                status: { $in: ['approved', 'live'] },
-                $or: [
-                    { area: new RegExp(`^${areaName}$`, 'i') },
-                    { 'propertyInfo.area': new RegExp(`^${areaName}$`, 'i') }
-                ],
-                $or: [
-                    { city: new RegExp(`^${cityName}$`, 'i') },
-                    { 'propertyInfo.city': new RegExp(`^${cityName}$`, 'i') }
-                ]
-            });
-            
-            const areaObj = areaDoc.toObject();
+            const count = areaCityCountMap[areaName.toLowerCase().trim()] || 0;
+            const areaObj = areaDoc.toObject ? areaDoc.toObject() : { ...areaDoc };
             areaObj.propertyCount = count;
             return areaObj;
-        }));
+        });
 
         console.log('Areas found:', areasWithCounts.length, areasWithCounts.map(a => a.name));
 

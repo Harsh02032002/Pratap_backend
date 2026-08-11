@@ -168,7 +168,7 @@ const websitePageKeys = ['home', 'about', 'contact', 'list-property', 'faq', 'pr
 exports.getPages = async (req, res) => {
     try {
         // Return ALL pages from database, including dynamic pages created by admin
-        let pages = await SeoPage.find({}).sort({ createdAt: 1 });
+        let pages = await SeoPage.find({}).sort({ createdAt: 1 }).lean();
         
         // Seed default pages if missing
         const existingKeys = pages.map(p => p.pageKey);
