@@ -341,7 +341,7 @@ async function listInvoices(req, res) {
   try {
     const ownerId = req.user._id;
     await autoHealMoveInInvoices(ownerId, req.user).catch(() => {});
-    const { status, phase, billingMonth, page = 1, limit = 20 } = req.query;
+    const { status, phase, billingMonth, propertyId, page = 1, limit = 20 } = req.query;
 
     const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;
     const ownerIds = [req.user._id];
@@ -354,6 +354,9 @@ async function listInvoices(req, res) {
     }
     if (phase) filter.currentPhase = parseInt(phase, 10);
     if (billingMonth) filter.billingMonth = billingMonth;
+    // Scope to the active property when given — an owner with multiple properties must
+    // only see dues/invoices for the property currently selected, not all of them merged.
+    if (propertyId && propertyId !== 'all') filter.propertyId = propertyId;
 
     const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
     const parsedLimit = parseInt(limit, 10);
@@ -538,7 +541,13 @@ async function listPaymentsHandler(req, res) {
   try {
     const ownerId = req.user._id;
     const limit = Math.min(parseInt(req.query.limit) || 200, 500);
-    const payments = await RentPayment.find({ ownerId })
+    // Scope to the active property when given — an owner with multiple properties must
+    // only see the receipts for tenants of the property currently selected, not every
+    // property they own merged together.
+    const propertyId = req.query.propertyId && req.query.propertyId !== 'all' ? req.query.propertyId : null;
+    const paymentQuery = { ownerId };
+    if (propertyId) paymentQuery.propertyId = propertyId;
+    const payments = await RentPayment.find(paymentQuery)
       .sort({ paymentDate: -1 })
       .limit(limit)
       .populate('tenantId', 'name roomNo phone email propertyId')
@@ -579,6 +588,7 @@ async function listPaymentsHandler(req, res) {
     let txs = [];
     if (ownerLoginId) {
       txs = await PaymentTransaction.find({ owner_id: ownerLoginId.toUpperCase() }).lean();
+      if (propertyId) txs = txs.filter(t => String(t.property_id || '') === String(propertyId));
     }
 
     const bookingIds = txs.map(t => t.booking_id).filter(Boolean);
