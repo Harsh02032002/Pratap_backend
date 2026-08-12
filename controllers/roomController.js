@@ -463,8 +463,22 @@ exports.updateRoom = async (req, res) => {
             return res.status(404).json({ success: false, message: "Room not found" });
         }
 
-        // Check if media/photos are being updated - requires admin approval
-        const hasMediaUpdate = updateData.media && Array.isArray(updateData.media) && updateData.media.length > 0;
+        // Check if media/photos are actually being changed - requires admin approval.
+        // The edit form always echoes the room's existing photos back in the payload even
+        // when the owner only changed an unrelated field (e.g. bed count), so this must
+        // compare against the room's current media rather than just checking "is present" —
+        // otherwise every edit to a room that already has photos gets silently diverted into
+        // the pending-approval queue instead of applying immediately.
+        const incomingMediaUrls = (Array.isArray(updateData.media) ? updateData.media : [])
+            .map(m => (m && typeof m === 'object' ? m.url : m))
+            .filter(Boolean)
+            .sort();
+        const currentMediaUrls = (Array.isArray(room.media) ? room.media : [])
+            .map(m => (m && typeof m === 'object' ? m.url : m))
+            .filter(Boolean)
+            .sort();
+        const hasMediaUpdate = incomingMediaUrls.length > 0 &&
+            JSON.stringify(incomingMediaUrls) !== JSON.stringify(currentMediaUrls);
         
         if (hasMediaUpdate) {
             // Save changes to pendingChanges for admin approval instead of applying live
