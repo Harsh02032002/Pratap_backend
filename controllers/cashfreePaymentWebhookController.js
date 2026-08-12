@@ -3,6 +3,8 @@ const BookingRequest = require('../models/BookingRequest');
 const RentInvoice = require('../models/RentInvoice');
 const Rent = require('../models/Rent');
 const PaymentTransaction = require('../models/PaymentTransaction');
+const RentPayment = require('../models/RentPayment');
+const User = require('../models/user');
 
 /**
  * Cashfree PG Payment Webhook Controller
@@ -158,6 +160,38 @@ exports.handlePaymentWebhook = async (req, res) => {
             notes: 'Paid via Cashfree PG'
           });
           await rentInvoice.save().catch(() => {});
+
+          // Create RentPayment record so this payment shows up in the owner's Issued Receipts list.
+          // NOTE: RentPayment.ownerId must be the owner's User-account _id (models/user.js) —
+          // the Issued Receipts query filters by req.user._id, which resolves from User, not
+          // from whatever ownerId convention rentInvoice.ownerId happens to use.
+          const ownerUserAccount = ownerLoginId
+            ? await User.findOne({ loginId: String(ownerLoginId).toUpperCase() }).select('_id').lean().catch(() => null)
+            : null;
+          if (ownerUserAccount?._id && rentInvoice.tenantId && rentInvoice.propertyId) {
+            const cfTxnId = cfPaymentId || orderId;
+            const existingReceipt = cfTxnId
+              ? await RentPayment.findOne({ transactionId: cfTxnId }).catch(() => null)
+              : null;
+            if (!existingReceipt) {
+              await RentPayment.create({
+                invoiceId: rentInvoice._id,
+                tenantId: rentInvoice.tenantId,
+                propertyId: rentInvoice.propertyId,
+                ownerId: ownerUserAccount._id,
+                amount: paymentAmount,
+                paymentMethod: 'online',
+                transactionId: cfTxnId || String(Date.now()),
+                isPartial: false,
+                remainingAfter: 0,
+                rentPaidAmount: paymentAmount,
+                penaltyPaidAmount: 0,
+                paymentDate: new Date(),
+                recordedBy: tenantLoginId || 'system',
+                notes: 'Paid via Cashfree PG',
+              }).catch(err => console.warn('[Cashfree Webhook] RentPayment (receipt) creation failed:', err.message));
+            }
+          }
         }
 
         if (rentRecord) {

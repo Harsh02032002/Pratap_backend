@@ -542,7 +542,7 @@ async function listPaymentsHandler(req, res) {
       .sort({ paymentDate: -1 })
       .limit(limit)
       .populate('tenantId', 'name roomNo phone email propertyId')
-      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount electricityBill totalPenalty totalDue status paidAmount')
+      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
     const shaped = payments.map(p => ({
@@ -563,6 +563,7 @@ async function listPaymentsHandler(req, res) {
       billingMonth: p.invoiceId?.billingMonth || '',
       invoiceNumber: p.invoiceId?.invoiceNumber || '',
       rentAmount: p.invoiceId?.rentAmount || p.amount,
+      advanceChargeAmount: p.invoiceId?.advanceChargeAmount || 0,
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
