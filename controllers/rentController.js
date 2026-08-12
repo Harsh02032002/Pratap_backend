@@ -405,6 +405,12 @@ exports.recordPaymentByTenant = async (req, res) => {
         `✅ [recordPaymentByTenant] Created new rent record: ${rent._id}`,
       );
 
+      // A RentInvoice for this billing month may already exist (created by the owner's
+      // invoice-based Rent Collection system) even though no matching legacy Rent record
+      // existed yet — without this, that invoice is left PENDING and no receipt appears
+      // in Issued Receipts, even though this payment just succeeded.
+      await syncRentInvoiceAndReceipt(rent, tenantProfile, paidAmount, tenantId);
+
       // Send confirmation
       await sendPaymentConfirmationEmail(rent);
 
@@ -450,132 +456,7 @@ exports.recordPaymentByTenant = async (req, res) => {
     });
 
     // ── Sync/create RentInvoice so owner panel shows correct PAID status ────────
-    try {
-      const billingMonth = rent.collectionMonth || new Date().toISOString().slice(0, 7);
-      const invoiceQuery = { billingMonth };
-      if (tenantProfile?._id) invoiceQuery.tenantId = tenantProfile._id;
-
-      let matchedInvoice = await RentInvoice.findOne(invoiceQuery);
-
-      if (!matchedInvoice && tenantProfile?._id) {
-        // ── AUTO-CREATE invoice so owner panel never shows "no-invoice" ──
-        console.log(`🧾 [recordPaymentByTenant] No invoice found — auto-creating PAID invoice for ${billingMonth}`);
-        const ownerDoc = tenantProfile?.ownerLoginId
-          ? await Owner.findOne({ loginId: tenantProfile.ownerLoginId }).lean()
-          : null;
-        const ownerUserId = ownerDoc?._id || null;
-        const rentAmt = Number(tenantProfile?.agreedRent || paidAmount);
-        const invoiceNumber = `INV-${billingMonth}-${String(tenantProfile._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-        const config = ownerUserId
-          ? await getEffectiveConfig(ownerUserId, tenantProfile?.property, null)
-          : null;
-        const [yr, mo] = billingMonth.split('-');
-        const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, (config?.rentDueDay || 1));
-
-        matchedInvoice = await RentInvoice.create({
-          invoiceNumber,
-          ownerId: ownerUserId,
-          propertyId: tenantProfile?.property || null,
-          tenantId: tenantProfile._id,
-          tenantName: tenantProfile?.name || '',
-          tenantEmail: tenantProfile?.email || '',
-          tenantPhone: tenantProfile?.phone || '',
-          billingMonth,
-          rentAmount: rentAmt,
-          dueDate,
-          totalDue: rentAmt,
-          outstandingAmount: 0,
-          paidAmount: Number(paidAmount),
-          rentPaidAmount: Number(paidAmount),
-          status: 'PAID',
-          paymentDate: new Date(),
-          penaltyConfigSnapshot: config || {},
-        });
-        console.log(`✅ [recordPaymentByTenant] Auto-created PAID invoice: ${matchedInvoice._id}`);
-
-        // Create RentPayment record for receipts.
-        // NOTE: RentPayment.ownerId must be the owner's User-account _id (models/user.js),
-        // not ownerUserId (which is actually the Owner-profile _id, models/Owner.js) — the
-        // Issued Receipts query filters by req.user._id, which resolves from User.
-        // Also: RentPayment.paymentMethod enum doesn't include 'razorpay', so it must be
-        // mapped to 'online' or the create() throws and this receipt is silently dropped.
-        {
-          const User = require('../models/user');
-          const ownerUserAccount = tenantProfile?.ownerLoginId
-            ? await User.findOne({ loginId: String(tenantProfile.ownerLoginId).toUpperCase() }).select('_id').lean()
-            : null;
-          if (ownerUserAccount?._id) {
-            await RentPayment.create({
-              invoiceId: matchedInvoice._id,
-              tenantId: tenantProfile._id,
-              propertyId: tenantProfile?.property || null,
-              ownerId: ownerUserAccount._id,
-              amount: Number(paidAmount),
-              paymentMethod: rent.paymentMethod === 'razorpay' ? 'online' : (rent.paymentMethod || 'online'),
-              transactionId: rent.razorpayPaymentId || String(Date.now()),
-              isPartial: false,
-              remainingAfter: 0,
-              rentPaidAmount: Number(paidAmount),
-              penaltyPaidAmount: 0,
-              paymentDate: new Date(),
-              recordedBy: tenantId,
-              notes: 'Auto-recorded from tenant Razorpay payment',
-            });
-          }
-        }
-      } else if (matchedInvoice) {
-        // ── UPDATE existing invoice ──
-        const newPaidAmount = (matchedInvoice.paidAmount || 0) + Number(paidAmount);
-        const newOutstanding = Math.max(0, (matchedInvoice.totalDue || 0) - newPaidAmount);
-        const isFullyPaid = newOutstanding <= 0;
-        await RentInvoice.findByIdAndUpdate(matchedInvoice._id, {
-          $set: {
-            paidAmount: newPaidAmount,
-            rentPaidAmount: Math.min(newPaidAmount, matchedInvoice.rentAmount || 0),
-            outstandingAmount: newOutstanding,
-            status: isFullyPaid ? 'PAID' : newPaidAmount > 0 ? 'PARTIAL' : 'PENDING',
-            lastEvaluatedAt: new Date(),
-          },
-        });
-
-        // Create RentPayment record for receipts (skip if createRentPaymentHistory
-        // above already recorded this exact transaction, to avoid a duplicate receipt).
-        // NOTE: RentPayment.ownerId must be the owner's User-account _id (models/user.js),
-        // not matchedInvoice.ownerId which is the Owner-profile _id (models/Owner.js) —
-        // the Issued Receipts query filters by req.user._id, which resolves from User.
-        {
-          const User = require("../models/user");
-          const ownerUserAccount = tenantProfile?.ownerLoginId
-            ? await User.findOne({ loginId: String(tenantProfile.ownerLoginId).toUpperCase() }).select("_id").lean()
-            : null;
-          const razorpayTxnId = rent.razorpayPaymentId || rent.razorpayOrderId || String(Date.now());
-          const existingPayment = await RentPayment.findOne({ transactionId: razorpayTxnId });
-          if (!existingPayment && ownerUserAccount?._id) {
-            await RentPayment.create({
-              invoiceId: matchedInvoice._id,
-              tenantId: tenantProfile?._id || matchedInvoice.tenantId,
-              propertyId: tenantProfile?.property || matchedInvoice.propertyId || null,
-              ownerId: ownerUserAccount._id,
-              amount: Number(paidAmount),
-              paymentMethod: rent.paymentMethod === 'razorpay' ? 'online' : (rent.paymentMethod || 'online'),
-              transactionId: razorpayTxnId,
-              isPartial: !isFullyPaid,
-              remainingAfter: newOutstanding,
-              rentPaidAmount: Number(paidAmount),
-              penaltyPaidAmount: 0,
-              paymentDate: new Date(),
-              recordedBy: tenantId,
-              notes: 'Auto-recorded from tenant Razorpay payment (existing invoice)',
-            });
-          }
-        }
-      }
-    } catch (invoiceSyncErr) {
-      console.warn(
-        'recordPaymentByTenant: invoice sync failed:',
-        invoiceSyncErr.message,
-      );
-    }
+    await syncRentInvoiceAndReceipt(rent, tenantProfile, paidAmount, tenantId);
 
     // ── Auto-create PaymentTransaction for admin commission split ──────────
     // This makes the Financial Ledger show commission earned from monthly rent payments.
@@ -903,27 +784,33 @@ async function createRentPaymentHistory({
   let invoiceDoc = invoice;
   if (!invoiceDoc) {
     try {
-      const query = { billingMonth: rent.collectionMonth };
-      const tenantCandidates = [];
-
-      if (rent.tenantId) {
-        tenantCandidates.push({ tenantId: rent.tenantId });
-      }
+      // tenantId is the unambiguous identifier — many test/onboarding tenants share the
+      // same email, so tenantEmail must only be tried as a last resort, never OR'd together
+      // with tenantId (an $or lets an email collision match a completely different tenant's
+      // invoice even when the correct tenantId match also exists in the collection).
+      const tenantIdCandidates = [];
+      if (rent.tenantId) tenantIdCandidates.push(rent.tenantId);
       if (rent.tenantLoginId) {
         const tenantDoc = await Tenant.findOne({
           loginId: String(rent.tenantLoginId).trim().toUpperCase(),
         })
           .select("_id")
           .lean();
-        if (tenantDoc?._id) tenantCandidates.push({ tenantId: tenantDoc._id });
-      }
-      if (rent.tenantEmail) {
-        tenantCandidates.push({ tenantEmail: rent.tenantEmail });
+        if (tenantDoc?._id) tenantIdCandidates.push(tenantDoc._id);
       }
 
-      if (tenantCandidates.length) {
-        query.$or = tenantCandidates;
-        invoiceDoc = await RentInvoice.findOne(query).lean();
+      if (tenantIdCandidates.length) {
+        invoiceDoc = await RentInvoice.findOne({
+          billingMonth: rent.collectionMonth,
+          tenantId: { $in: tenantIdCandidates },
+        }).lean();
+      }
+
+      if (!invoiceDoc && rent.tenantEmail) {
+        invoiceDoc = await RentInvoice.findOne({
+          billingMonth: rent.collectionMonth,
+          tenantEmail: rent.tenantEmail,
+        }).lean();
       }
 
       if (!invoiceDoc) {
@@ -951,7 +838,18 @@ async function createRentPaymentHistory({
     return null;
   }
 
-  const ownerId = invoiceDoc.ownerId || (rent.ownerId ? rent.ownerId : null);
+  // RentPayment.ownerId must be the owner's User-account _id (models/user.js), not
+  // invoiceDoc.ownerId/rent.ownerId which are the Owner-profile _id (models/Owner.js) —
+  // the Issued Receipts query filters by req.user._id, which resolves from User.
+  let ownerId = null;
+  const ownerLoginIdForPayment = String(rent.ownerLoginId || "").toUpperCase();
+  if (ownerLoginIdForPayment) {
+    const User = require("../models/user");
+    const ownerUserAccount = await User.findOne({ loginId: ownerLoginIdForPayment })
+      .select("_id")
+      .lean();
+    ownerId = ownerUserAccount?._id || null;
+  }
   const tenantId = rent.tenantId || invoiceDoc.tenantId;
   const propertyId = rent.propertyId || invoiceDoc.propertyId;
 
@@ -1016,6 +914,137 @@ async function createRentPaymentHistory({
   } catch (err) {
     console.error("createRentPaymentHistory failed:", err.message, err.stack);
     return null;
+  }
+}
+
+// Sync/create the RentInvoice for a tenant-initiated (Razorpay) rent payment so the owner's
+// Rent Collection panel shows the correct PAID status, and create the matching RentPayment
+// receipt. Shared by both branches of recordPaymentByTenant — the "found an existing pending
+// Rent record" path and the "no pending Rent record, create one" path — since a tenant can pay
+// through the dashboard even when the owner's invoice-based Rent Collection system already has
+// a RentInvoice for that month but no matching legacy Rent record exists yet.
+async function syncRentInvoiceAndReceipt(rent, tenantProfile, paidAmount, tenantId) {
+  try {
+    const billingMonth = rent.collectionMonth || new Date().toISOString().slice(0, 7);
+    const invoiceQuery = { billingMonth };
+    if (tenantProfile?._id) invoiceQuery.tenantId = tenantProfile._id;
+
+    let matchedInvoice = await RentInvoice.findOne(invoiceQuery);
+
+    if (!matchedInvoice && tenantProfile?._id) {
+      // ── AUTO-CREATE invoice so owner panel never shows "no-invoice" ──
+      console.log(`🧾 [recordPaymentByTenant] No invoice found — auto-creating PAID invoice for ${billingMonth}`);
+      const ownerDoc = tenantProfile?.ownerLoginId
+        ? await Owner.findOne({ loginId: tenantProfile.ownerLoginId }).lean()
+        : null;
+      const ownerUserId = ownerDoc?._id || null;
+      const rentAmt = Number(tenantProfile?.agreedRent || paidAmount);
+      const invoiceNumber = `INV-${billingMonth}-${String(tenantProfile._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+      const config = ownerUserId
+        ? await getEffectiveConfig(ownerUserId, tenantProfile?.property, null)
+        : null;
+      const [yr, mo] = billingMonth.split('-');
+      const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, (config?.rentDueDay || 1));
+
+      matchedInvoice = await RentInvoice.create({
+        invoiceNumber,
+        ownerId: ownerUserId,
+        propertyId: tenantProfile?.property || null,
+        tenantId: tenantProfile._id,
+        tenantName: tenantProfile?.name || '',
+        tenantEmail: tenantProfile?.email || '',
+        tenantPhone: tenantProfile?.phone || '',
+        billingMonth,
+        rentAmount: rentAmt,
+        dueDate,
+        totalDue: rentAmt,
+        outstandingAmount: 0,
+        paidAmount: Number(paidAmount),
+        rentPaidAmount: Number(paidAmount),
+        status: 'PAID',
+        paymentDate: new Date(),
+        penaltyConfigSnapshot: config || {},
+      });
+      console.log(`✅ [recordPaymentByTenant] Auto-created PAID invoice: ${matchedInvoice._id}`);
+
+      // Create RentPayment record for receipts.
+      // NOTE: RentPayment.ownerId must be the owner's User-account _id (models/user.js),
+      // not ownerUserId (which is actually the Owner-profile _id, models/Owner.js) — the
+      // Issued Receipts query filters by req.user._id, which resolves from User.
+      // Also: RentPayment.paymentMethod enum doesn't include 'razorpay', so it must be
+      // mapped to 'online' or the create() throws and this receipt is silently dropped.
+      const User = require('../models/user');
+      const ownerUserAccount = tenantProfile?.ownerLoginId
+        ? await User.findOne({ loginId: String(tenantProfile.ownerLoginId).toUpperCase() }).select('_id').lean()
+        : null;
+      if (ownerUserAccount?._id) {
+        await RentPayment.create({
+          invoiceId: matchedInvoice._id,
+          tenantId: tenantProfile._id,
+          propertyId: tenantProfile?.property || null,
+          ownerId: ownerUserAccount._id,
+          amount: Number(paidAmount),
+          paymentMethod: rent.paymentMethod === 'razorpay' ? 'online' : (rent.paymentMethod || 'online'),
+          transactionId: rent.razorpayPaymentId || String(Date.now()),
+          isPartial: false,
+          remainingAfter: 0,
+          rentPaidAmount: Number(paidAmount),
+          penaltyPaidAmount: 0,
+          paymentDate: new Date(),
+          recordedBy: tenantId,
+          notes: 'Auto-recorded from tenant Razorpay payment',
+        });
+      }
+    } else if (matchedInvoice) {
+      // ── UPDATE existing invoice ──
+      const newPaidAmount = (matchedInvoice.paidAmount || 0) + Number(paidAmount);
+      const newOutstanding = Math.max(0, (matchedInvoice.totalDue || 0) - newPaidAmount);
+      const isFullyPaid = newOutstanding <= 0;
+      await RentInvoice.findByIdAndUpdate(matchedInvoice._id, {
+        $set: {
+          paidAmount: newPaidAmount,
+          rentPaidAmount: Math.min(newPaidAmount, matchedInvoice.rentAmount || 0),
+          outstandingAmount: newOutstanding,
+          status: isFullyPaid ? 'PAID' : newPaidAmount > 0 ? 'PARTIAL' : 'PENDING',
+          lastEvaluatedAt: new Date(),
+        },
+      });
+
+      // Create RentPayment record for receipts (skip if createRentPaymentHistory
+      // above already recorded this exact transaction, to avoid a duplicate receipt).
+      // NOTE: RentPayment.ownerId must be the owner's User-account _id (models/user.js),
+      // not matchedInvoice.ownerId which is the Owner-profile _id (models/Owner.js) —
+      // the Issued Receipts query filters by req.user._id, which resolves from User.
+      const User = require("../models/user");
+      const ownerUserAccount = tenantProfile?.ownerLoginId
+        ? await User.findOne({ loginId: String(tenantProfile.ownerLoginId).toUpperCase() }).select("_id").lean()
+        : null;
+      const razorpayTxnId = rent.razorpayPaymentId || rent.razorpayOrderId || String(Date.now());
+      const existingPayment = await RentPayment.findOne({ transactionId: razorpayTxnId });
+      if (!existingPayment && ownerUserAccount?._id) {
+        await RentPayment.create({
+          invoiceId: matchedInvoice._id,
+          tenantId: tenantProfile?._id || matchedInvoice.tenantId,
+          propertyId: tenantProfile?.property || matchedInvoice.propertyId || null,
+          ownerId: ownerUserAccount._id,
+          amount: Number(paidAmount),
+          paymentMethod: rent.paymentMethod === 'razorpay' ? 'online' : (rent.paymentMethod || 'online'),
+          transactionId: razorpayTxnId,
+          isPartial: !isFullyPaid,
+          remainingAfter: newOutstanding,
+          rentPaidAmount: Number(paidAmount),
+          penaltyPaidAmount: 0,
+          paymentDate: new Date(),
+          recordedBy: tenantId,
+          notes: 'Auto-recorded from tenant Razorpay payment (existing invoice)',
+        });
+      }
+    }
+  } catch (invoiceSyncErr) {
+    console.warn(
+      'recordPaymentByTenant: invoice sync failed:',
+      invoiceSyncErr.message,
+    );
   }
 }
 

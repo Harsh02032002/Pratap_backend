@@ -547,6 +547,7 @@ async function listPaymentsHandler(req, res) {
 
     const shaped = payments.map(p => ({
       _id: p._id,
+      tenantId: p.tenantId?._id || null,
       transactionId: p.transactionId || p._id.toString().slice(-8).toUpperCase(),
       tenantName: p.tenantId?.name || '—',
       roomNo: p.tenantId?.roomNo || '—',
