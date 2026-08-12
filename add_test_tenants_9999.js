@@ -299,7 +299,7 @@ async function main() {
                     loginId: ownerLoginId
                 },
                 isLiveOnWebsite: true,
-                status: 'live',
+                status: 'approved',
                 updatedAt: new Date()
             };
 

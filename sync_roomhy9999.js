@@ -54,7 +54,7 @@ const syncToApprovedProperty = async (property) => {
                 loginId: property.ownerLoginId || ''
             },
             isLiveOnWebsite: true,
-            status: 'live',
+            status: 'approved',
             updatedAt: new Date()
         };
 
