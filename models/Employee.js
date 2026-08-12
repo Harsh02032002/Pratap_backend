@@ -61,6 +61,26 @@ const employeeSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+
+    // ─── Staff Documents ─────────────────────────────────────────────────────
+    documents: [{
+        type: {
+            type: String,  // e.g. 'Aadhaar Card', 'PAN Card', 'Police Clearance', 'Appointment Letter'
+            required: true
+        },
+        number: String,           // Doc number (masked)
+        fileUrl: String,          // Cloudinary / base64 URL
+        fileName: String,
+        status: {
+            type: String,
+            enum: ['Pending', 'Verified', 'Rejected'],
+            default: 'Pending'
+        },
+        uploadedAt: { type: Date, default: Date.now },
+        verifiedAt: Date,
+        rejectionReason: String
+    }],
+
     createdAt: {
         type: Date,
         default: Date.now
