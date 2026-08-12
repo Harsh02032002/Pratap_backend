@@ -152,6 +152,17 @@ function detectViolation(text, settings = {}) {
   if (isOfficialRoomhyMsg) {
     return { violation: null, maskedText: text };
   }
+
+  // Exemption for short conversational chatter (< 4 words) without explicit phone/email/links/digits
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/);
+  const isShortChatter = words.length <= 4;
+  const shortExemptPattern = /^\s*"?\s*(de|naa|na|paise|paisa|yahan|yaan|ha|haa|haan|thik|theek|bhej|bhejo|dena|karo|kro|hi|hello|ok|okay|aata|aaya|bhai|sir|mam|rent|room|ac|non ac|single|double|sharing|mil|baat|kaise|ho|acha|achha|batao|chahiye|mileyga|milraha|kab|kitna)\s*"?\s*$/i;
+
+  const hasDigitsOrUrl = /\d{5,}|http|www|\.com|@/.test(trimmed);
+  if (isShortChatter && !hasDigitsOrUrl && shortExemptPattern.test(trimmed)) {
+    return { violation: null, maskedText: text };
+  }
   
   const blockPhone = settings.blockPhoneNumbers !== false;
   const blockEmail = settings.blockEmails !== false;
@@ -273,8 +284,7 @@ function detectViolation(text, settings = {}) {
     /\bcancel\s+(kardo|krdo|kar\s+do|kr\s+do|karke|krke|karna|krna|karwa|krwa)\b/i,
     /\bplatform\s*(ki|ko|se|par|fees|charge|commission|brokerage)?\s*(zaroorat|beech|mat|bachao|save|bypass|hata)\b/i,
     /\b(commission|comm|brokerage|fees|charge|charges)\s*([a-zA-Z]*\s+){0,2}(save|bach|bacha|bachao|bachayein|saving|cut|discount|kyu|kyun|bahao|nahi|na|mat|deni)\b/i,
-    /\b(no\s+brokerage|save\s+commission|brokerage\s+bach)\b/i,
-    /\b(platform|brokerage|commission)\b/i,
+    /\b(no\s+brokerage|save\s+commission|brokerage\s+bach|bypass\s+commission|without\s+commission)\b/i,
     
     // Payment & Arrival Bypass Patterns (Specific offline deal instructions only)
     /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s*cash|direct\s*cash)\b/i,
@@ -298,7 +308,7 @@ function detectViolation(text, settings = {}) {
     // Coded Settlement / Bypassing terms
     /\b(dalal|middleman|beech\s+wala|teesra\s+beech)\s+(hata|mat|na)\b/i,
     /\bseedha\s+(hisaab|hisab|len\s*den|deal\w*|payment|pay\w*|malik|kirayedar|owner|tenant|baat\w*|nahi)\b/i,
-    /\b(apas|aapas)\s+mein\b/i,
+    /\b(apas|aapas)\s+mein\s+(deal|payment|cash|settle|hisaab)\b/i,
     /\bscene\s+set\b/i,
     /\bopen\s+me(in)?\s+nahi\b/i,
     /\b(pg|hostel)\s+(pe|par|me|in)\s+mil\w*\b/i,
@@ -306,7 +316,7 @@ function detectViolation(text, settings = {}) {
     
     // Smart / Hidden Intent
     /\b(samajh\s+jao|samajh\s+gaya|samajh\s+gaye|samajh\s+rhe|samajh\s+rahe|samajhdar|ishara)\b/i,
-    /\b(website|link)\b/i,
+    /\b(outside\s+website|external\s+link|other\s+website)\b/i,
     /\b(koi\s+aur\s+tareeka|skip\s+formalities|formalities\s+skip|bina\s+app)\b/i,
     
     // Specific custom sentences from user sets
@@ -630,127 +640,6 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       }
       const cleanRole = String(msg.sender_role || '').toLowerCase().trim();
       const roleLabel = (cleanRole === 'property_owner' || cleanRole === 'owner') ? 'Owner' : 'Tenant';
-      return `${roleLabel}: "${text}"`;
-    }).join('\n');
-
-    // 1. Instant local regex detection check (on single message AND combined recent sender messages)
-    const settings = await ChatSettings.findOne({ ownerLoginId: 'SUPER_ADMIN' }).lean();
-    let localCheck = detectViolation(messageText, settings || {});
-
-    if (!localCheck.violation) {
-      // Check aggregated text of recent messages from this sender to detect multi-line split evasion
-      const senderRecentTexts = recentMessages
-        .filter(m => String(m.sender_login_id).toLowerCase().trim() === String(messageDoc.sender_login_id).toLowerCase().trim())
-        .map(m => {
-          let t = m.message || '';
-          if (m.original_message_encrypted) {
-            try { t = ChatMessage.decryptText(m.original_message_encrypted); } catch (_) {}
-          }
-          return t;
-        });
-      senderRecentTexts.push(messageText);
-      const combinedText = senderRecentTexts.join(' ');
-
-      const combinedCheck = detectViolation(combinedText, settings || {});
-      if (combinedCheck.violation) {
-        localCheck = combinedCheck;
-        console.log(`⚡ Multi-message Split Evasion Violation Detected on message ${messageDoc._id}:`, combinedCheck.violation);
-      }
-    }
-
-    let moderation = { violation: false, type: 'none', confidence: 0, reason: '' };
-
-    if (localCheck.violation) {
-      console.log(`⚡ Instant Local Violation Detected on message ${messageDoc._id}:`, localCheck.violation);
-      moderation = {
-        violation: true,
-        type: localCheck.violation,
-        confidence: 0.98,
-        reason: `Detected ${localCheck.violation} keyword pattern in chat message.`
-      };
-    } else {
-      // 2. Call AI API for moderation with conversation context if local check didn't trigger
-      moderation = await aiModerationService.moderateMessage(messageText, senderRole, receiverRole, contextHistory);
-    }
-
-    // Save moderation status on the ChatMessage document to avoid duplicate runs
-    await ChatMessage.updateOne(
-      { _id: messageDoc._id },
-      { 
-        $set: { 
-          aiModeratedAt: new Date(), 
-          aiModerationResult: moderation 
-        } 
-      }
-    );
-
-    if (moderation.violation) {
-      console.log(`⚠️ AI Moderation Violation Detected on message ${messageDoc._id}:`, moderation);
-
-      // Create ChatViolation record
-      const sender = await getParticipantRoleAndName(messageDoc.sender_login_id);
-      const receiver = await getParticipantRoleAndName(receiverLoginId);
-
-      const isSenderOwner = sender.role === 'property_owner';
-      const ownerId = isSenderOwner ? messageDoc.sender_login_id : receiverLoginId;
-      const ownerName = isSenderOwner ? sender.name : receiver.name;
-      const tenantId = isSenderOwner ? receiverLoginId : messageDoc.sender_login_id;
-      const tenantName = isSenderOwner ? receiver.name : sender.name;
-
-      const ChatViolation = mongoose.model('ChatViolation');
-      const violation = new ChatViolation({
-        participantLoginId: messageDoc.sender_login_id,
-        participantName: sender.name,
-        ownerId,
-        ownerName,
-        tenantId,
-        tenantName,
-        conversationId: messageDoc.room_id, // room_id of chat message
-        violationType: moderation.type || 'commission_bypass',
-        messageSnippet: messageText.slice(0, 500),
-        messageId: messageDoc._id,
-        aiConfidence: moderation.confidence,
-        aiReason: moderation.reason,
-        aiDecision: moderation,
-        moderatedAt: new Date(),
-        status: 'New'
-      });
-
-      try {
-        await violation.save();
-      } catch (saveErr) {
-        // Handle duplicate key error gracefully (duplicate messageId)
-        if (saveErr.code === 11000) {
-          console.log(`[moderateChatMessageAsync] Duplicate violation for message ${messageDoc._id} ignored.`);
-          return;
-        }
-        throw saveErr;
-      }
-
-      // Check total violation count for this offender
-      const offenderId = messageDoc.sender_login_id;
-      const totalViolations = await ChatViolation.countDocuments({
-        $or: [
-          { ownerId },
-          { participantLoginId: offenderId },
-          { participantLoginId: ownerId }
-        ]
-      });
-
-      const isRepeatedOrSevere = totalViolations >= 2;
-
-      if (isRepeatedOrSevere) {
-        // Auto-block offender account on 2nd violation
-        console.log(`🚨 Auto-blocking offender ${offenderId} (Total violations: ${totalViolations})`);
-        await Promise.allSettled([
-          Owner.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { isActive: false }),
-          User.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { status: 'blocked', isActive: false })
-        ]);
-      }
-
-      const pairKey = [messageDoc.sender_login_id, receiverLoginId].sort().join(':').toUpperCase();
-      const warningText = isRepeatedOrSevere
-        ? `🚨 ACCOUNT BLOCKED: Account (${sender.name || offenderId}) has been AUTOMATICALLY BLOCKED & SUSPENDED due to repeated commission bypass / security policy violations. Chat is now closed.`
         : `⚠️ ROOMHY SECURITY WARNING: Asking for offline payments, commission bypass, or sharing direct contact details is strictly prohibited. Continued violations will result in IMMEDIATE ACCOUNT BLOCK & PERMANENT SUSPENSION.`;
 
       const systemMsgDoc = {
