@@ -631,16 +631,28 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       moderation = await aiModerationService.moderateMessage(messageText, senderRole, receiverRole, contextHistory);
     }
 
+    // Normalise confidence to 0-1. The local regex path reports 0.98 while the
+    // AI provider returns a 0-100 percentage, so any threshold comparing the
+    // two was meaningless.
+    if (Number(moderation.confidence) > 1) {
+      moderation.confidence = Number(moderation.confidence) / 100;
+    }
+
     // Save moderation status on the ChatMessage document to avoid duplicate runs
-    await ChatMessage.updateOne(
-      { _id: messageDoc._id },
-      { 
-        $set: { 
-          aiModeratedAt: new Date(), 
-          aiModerationResult: moderation 
-        } 
-      }
-    );
+    const moderationUpdate = {
+      aiModeratedAt: new Date(),
+      aiModerationResult: moderation
+    };
+
+    // Stamp violation_type on the message itself. The pre-save hook already
+    // does this for masked contact details, but violations found here (notably
+    // commission_bypass) never reached the message — so the chat UI, which
+    // renders its warning badge from msg.violation_type, showed nothing.
+    if (moderation.violation && moderation.type && moderation.type !== 'none') {
+      moderationUpdate.violation_type = moderation.type;
+    }
+
+    await ChatMessage.updateOne({ _id: messageDoc._id }, { $set: moderationUpdate });
 
     if (moderation.violation) {
       console.log(`⚠️ AI Moderation Violation Detected on message ${messageDoc._id}:`, moderation);

@@ -84,6 +84,13 @@ const io = new Server(server, {
         methods: ["GET", "POST"]
     }
 });
+// Expose the Socket.IO server to non-socket code paths. chatController and
+// chatManagementController broadcast through `global.io` when a message is sent
+// over REST (the owner panel and the accept-bid flow both send that way).
+// Without this assignment those guards were always false, so REST-sent messages
+// were saved but never pushed — the recipient had to refresh to see them.
+global.io = io;
+
 initChatSocket(io);
 
 // 3. Security & Optimization Middlewares

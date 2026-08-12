@@ -118,30 +118,50 @@ Message: "${sanitizedText}"
 Sender Role: ${sender}
 Receiver Role: ${receiver}`;
 
+    // Moderation runs in the background, so a slightly longer budget costs
+    // nothing and a timeout here means the message goes UNMODERATED (see the
+    // fail-open catch below). 5s was tight enough to trip regularly.
+    const timeoutMs = Number(process.env.AI_MODERATION_TIMEOUT_MS || 12000);
+    const maxAttempts = 2;
+
+    let response;
+
     try {
         console.log(`🤖 Invoking AI Moderation via provider: ${provider} (Model: ${model}, URL: ${completionsUrl})`);
         console.log(`--- PROMPT --- \n${userMessageContent}\n--------------`);
-        const response = await axios.post(
-            completionsUrl,
-            {
-                model: model,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userMessageContent }
-                ],
-                response_format: {
-                    type: 'json_object'
-                },
-                temperature: 0.1
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 5000 // 5 seconds timeout to prevent blocking background operations
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            try {
+                response = await axios.post(
+                    completionsUrl,
+                    {
+                        model: model,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userMessageContent }
+                        ],
+                        response_format: {
+                            type: 'json_object'
+                        },
+                        temperature: 0.1
+                    },
+                    {
+                        headers: {
+                            'Authorization': `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: timeoutMs
+                    }
+                );
+                break;
+            } catch (attemptErr) {
+                // Retry once on timeout / transport failure, but not on a 4xx —
+                // a bad key or model will fail identically the second time.
+                const status = attemptErr.response?.status;
+                if (attempt === maxAttempts || (status && status < 500)) throw attemptErr;
+                console.warn(`⚠️ AI moderation attempt ${attempt} failed (${attemptErr.message}); retrying...`);
             }
-        );
+        }
 
         const choice = response.data?.choices?.[0]?.message?.content;
         console.log(`--- RESPONSE --- \n${choice}\n----------------`);
@@ -157,9 +177,11 @@ Receiver Role: ${receiver}`;
             reason: moderationResult.reason || ''
         };
     } catch (err) {
-        console.error(`❌ AI Chat Moderation API error (${provider}):`, err.message);
-        // Fail-safe: Allow the message to proceed in case of API failure to avoid user disruption
-        return { violation: false, type: 'none', confidence: 0, reason: `API call failed: ${err.message}` };
+        console.error(`❌ AI Chat Moderation API error (${provider}) after ${maxAttempts} attempt(s):`, err.message);
+        // Fail-safe: Allow the message to proceed in case of API failure to avoid
+        // user disruption. `failed` records that this message was NOT actually
+        // screened, so an unscreened message is distinguishable from a clean one.
+        return { violation: false, type: 'none', confidence: 0, failed: true, reason: `API call failed: ${err.message}` };
     }
 }
 
