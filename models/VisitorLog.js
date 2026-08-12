@@ -10,6 +10,10 @@ const visitorLogSchema = new mongoose.Schema(
         hostRoom: { type: String, required: true },
         // Snapshot of property + owner at creation, shown on the scanned pass.
         propertyName: { type: String },
+        // Real property reference for server-side isolation (property switcher).
+        // Older rows predating this field fall back to a propertyName match —
+        // see getOwnerVisitors — rather than appearing under every property.
+        propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' },
         ownerName: { type: String },
         purpose: { type: String, default: 'Social' },
         status: {

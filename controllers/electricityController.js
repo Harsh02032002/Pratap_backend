@@ -122,10 +122,13 @@ exports.getMeterHistory = async (req, res) => {
 exports.getOwnerReadings = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
+        const { propertyId } = req.query;
         const Property = require('../models/Property');
         const Room = require('../models/Room');
 
-        const properties = await Property.find({ ownerLoginId: ownerLoginId.toUpperCase() });
+        const propertyFilter = { ownerLoginId: ownerLoginId.toUpperCase() };
+        if (propertyId) propertyFilter._id = propertyId;
+        const properties = await Property.find(propertyFilter);
         const propertyIds = properties.map(p => p._id);
 
         const rooms = await Room.find({ property: { $in: propertyIds } }).populate('property', 'title');

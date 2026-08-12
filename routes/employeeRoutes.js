@@ -15,7 +15,15 @@ router.post('/login', async (req, res) => {
         const { loginId, password } = req.body;
         if (!loginId || !password) return res.status(400).json({ success: false, error: 'loginId and password required' });
 
-        const emp = await Employee.findOne({ loginId, isDeleted: { $ne: true } });
+        const trimmedId = String(loginId).trim();
+        // Staff IDs are issued uppercase; match case-insensitively so a staff
+        // member typing their ID in a different case isn't locked out.
+        let emp = await Employee.findOne({ loginId: trimmedId.toUpperCase(), isDeleted: { $ne: true } })
+            .populate('assignedProperties', 'title name city');
+        if (!emp) {
+            emp = await Employee.findOne({ loginId: trimmedId, isDeleted: { $ne: true } })
+                .populate('assignedProperties', 'title name city');
+        }
         if (!emp) return res.status(401).json({ success: false, error: 'Invalid Staff ID or Password' });
         if (!emp.isActive) return res.status(403).json({ success: false, error: 'Your account is inactive. Contact your manager.' });
 
@@ -51,7 +59,8 @@ router.post('/login', async (req, res) => {
                 areaCode: emp.areaCode || '',
                 cityId: emp.cityId || null,
                 areaId: emp.areaId || null,
-                assignedPropertyName: emp.assignedPropertyName || '',
+                // assignedProperties is populated above, so [0] is a Property doc, not just an id.
+                assignedPropertyName: emp.assignedProperties?.[0]?.title || emp.assignedProperties?.[0]?.name || '',
                 photoDataUrl: emp.photoDataUrl || '',
                 requirePasswordReset,
             }
@@ -160,7 +169,9 @@ router.get('/', protect, authorize('superadmin', 'areamanager', 'owner', 'manage
         }
 
         // 1. Fetch active documents in Employee collection
-        const empDocs = await Employee.find(empFilter).select('-password').sort({ createdAt: -1 }).lean();
+        const empDocs = await Employee.find(empFilter).select('-password')
+            .populate('assignedProperties', 'title name city')
+            .sort({ createdAt: -1 }).lean();
 
         // 2. Fetch active documents in User collection with staff/employee roles
         const User = require('../models/user');
@@ -574,7 +585,10 @@ router.patch('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner
             'employeeType', 'assignedProperties', 'assignedOwners',
             'restrictedModules', 'cityId', 'areaId',
         ];
-        const OWNER_FIELDS = ['role', 'permissions'];
+        // Owners must be able to (re)assign which of their own properties a
+        // staff member is scoped to — this is what the property switcher and
+        // the owner-data endpoints use to restrict a staff member's access.
+        const OWNER_FIELDS = ['role', 'permissions', 'assignedProperties'];
 
         let allowedFields;
         if (req.user.role === 'superadmin') {

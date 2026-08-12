@@ -3,6 +3,7 @@ const VisitorLog = require('../models/VisitorLog');
 const Tenant = require('../models/Tenant');
 const Employee = require('../models/Employee');
 const Owner = require('../models/Owner');
+const Property = require('../models/Property');
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
@@ -64,7 +65,7 @@ exports.createVisitor = async (req, res) => {
 
         // Load tenant from DB — populate hostName/hostRoom safely
         const tenant = await Tenant.findOne({ loginId: callerLoginId })
-            .select('_id name roomNo ownerLoginId loginId propertyTitle')
+            .select('_id name roomNo ownerLoginId loginId propertyTitle property')
             .lean();
         if (!tenant) {
             return res.status(404).json({ success: false, message: 'Tenant not found.' });
@@ -91,6 +92,7 @@ exports.createVisitor = async (req, res) => {
             hostName: tenant.name,
             hostRoom: tenant.roomNo || '-',
             propertyName,
+            propertyId: tenant.property || null,
             ownerName,
             purpose,
             status: 'Pending',
@@ -149,13 +151,25 @@ exports.getTenantVisitorHistory = async (req, res) => {
 exports.getOwnerVisitors = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
-        const { status } = req.query;
+        const { status, propertyId } = req.query;
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
         const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
         const skip = (page - 1) * limit;
 
         const query = { ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') } };
         if (status) query.status = status;
+
+        if (propertyId) {
+            // Rows created before the propertyId field existed have no reliable
+            // ID to match — fall back to a propertyName match for those legacy
+            // rows only, rather than excluding them or leaking them everywhere.
+            const propertyDoc = await Property.findById(propertyId).select('title').lean().catch(() => null);
+            const orClauses = [{ propertyId }];
+            if (propertyDoc?.title) {
+                orClauses.push({ propertyId: { $exists: false }, propertyName: propertyDoc.title });
+            }
+            query.$or = orClauses;
+        }
 
         const [visitors, count] = await Promise.all([
             VisitorLog.find(query).sort({ entryTime: -1 }).skip(skip).limit(limit).lean(),

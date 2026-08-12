@@ -900,6 +900,7 @@ exports.getTenantsByOwner = async (req, res) => {
     try {
         const { ownerId } = req.params;
         const normalizedId = String(ownerId).toUpperCase();
+        const { propertyId } = req.query;
 
         // Resolve legacy property IDs (older records link via Property, not ownerLoginId)
         let propQuery = {};
@@ -908,17 +909,19 @@ exports.getTenantsByOwner = async (req, res) => {
         } else {
             propQuery.ownerLoginId = normalizedId;
         }
+        if (propertyId) propQuery._id = propertyId;
         const properties = await Property.find(propQuery).lean();
         const propertyIds = properties.map(p => p._id);
 
         // Single query covering both direct (ownerLoginId) and legacy (property-linked)
         // tenants via $or, instead of two separate Tenant.find()+populate() round trips.
+        // When scoped to one property, tenants with no property link at all are
+        // deliberately excluded rather than shown under every property.
         const allTenants = await Tenant.find({
             isDeleted: { $ne: true },
-            $or: [
-                { ownerLoginId: normalizedId },
-                ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : [])
-            ]
+            ...(propertyId
+                ? { property: { $in: propertyIds } }
+                : { $or: [{ ownerLoginId: normalizedId }, ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : [])] })
         })
             .select(ALWAYS_EXCLUDED_PROJECTION)
             .populate('property', 'title roomType locationCode owner ownerLoginId')

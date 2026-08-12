@@ -15,6 +15,28 @@ const ownerController = require('../controllers/ownercontroller');
 
 const mailer = require('../utils/mailer');
 
+// These :loginId-scoped routes are called unauthenticated by design (the panel
+// resolves the owner from the URL, not a session), so we can't gate them behind
+// `protect`. But a staff member proxying as their owner sends their own employee
+// Bearer token — if present, decode it and, when the employee has assigned
+// properties, return only those property ids. No token / non-staff token / no
+// assignment → unrestricted (existing owner-facing behavior, unchanged).
+async function getStaffPropertyScope(req) {
+    try {
+        const authHeader = req.headers.authorization || '';
+        if (!authHeader.startsWith('Bearer ')) return null;
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
+        const Employee = require('../models/Employee');
+        const emp = await Employee.findById(decoded.id).select('assignedProperties isDeleted');
+        if (!emp || emp.isDeleted) return null;
+        if (!Array.isArray(emp.assignedProperties) || emp.assignedProperties.length === 0) return null;
+        return emp.assignedProperties.map(id => String(id));
+    } catch (_) {
+        return null; // not a staff token (e.g. owner/website token) — no scoping
+    }
+}
+
 // --- SSE Endpoint ---
 router.get('/:loginId/stream', sseStream);
 
@@ -205,7 +227,10 @@ router.get('/:loginId/rooms', async (req, res) => {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
         // Find properties owned by this owner
-        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
+        const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
+        const staffScope = await getStaffPropertyScope(req);
+        if (staffScope) propertyFilter._id = { $in: staffScope };
+        const properties = await Property.find(propertyFilter).select('_id title');
 
         // Sync property occupancy (fire-and-forget to avoid blocking API response)
         for (const prop of properties) {
@@ -253,7 +278,10 @@ router.get('/:loginId/properties', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
-        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } });
+        const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
+        const staffScope = await getStaffPropertyScope(req);
+        if (staffScope) propertyFilter._id = { $in: staffScope };
+        const properties = await Property.find(propertyFilter);
 
         const syncedProperties = [];
         for (const prop of properties) {
@@ -629,15 +657,21 @@ router.get('/:loginId/tenants', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         await ownerController.healOwnerProperties(loginId);
-        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id');
+        const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
+        const staffScope = await getStaffPropertyScope(req);
+        if (staffScope) propertyFilter._id = { $in: staffScope };
+        const properties = await Property.find(propertyFilter).select('_id');
         const propertyIds = properties.map((p) => p._id);
         const Tenant = require('../models/Tenant');
 
+        // A staff member scoped to specific properties must not see tenants
+        // matched only via the owner-wide `ownerLoginId` fallback.
+        const tenantMatch = staffScope
+            ? { property: { $in: propertyIds } }
+            : { $or: [{ property: { $in: propertyIds } }, { ownerLoginId: loginId }] };
+
         const tenants = await Tenant.find({
-            $or: [
-                { property: { $in: propertyIds } },
-                { ownerLoginId: loginId }
-            ],
+            ...tenantMatch,
             isDeleted: { $ne: true }
         }).lean();
 

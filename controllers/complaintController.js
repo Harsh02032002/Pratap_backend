@@ -43,6 +43,7 @@ exports.getOwnerComplaints = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
         const normalizedId = String(ownerLoginId || '').trim().toUpperCase();
+        const { propertyId } = req.query;
 
         // Ensure we have an authenticated caller before enforcing owner rules.
         // If auth middleware failed to set req.user, deny access explicitly.
@@ -60,20 +61,28 @@ exports.getOwnerComplaints = async (req, res) => {
         }
 
         // Primary: complaints tagged with this owner's loginId (index scan, not collection scan)
-        const byOwner = await Complaint.find({ ownerLoginId: normalizedId }).sort({ createdAt: -1 });
+        const ownerQuery = { ownerLoginId: normalizedId };
+        if (propertyId) ownerQuery.propertyId = String(propertyId);
+        const byOwner = await Complaint.find(ownerQuery).sort({ createdAt: -1 });
 
         // Fallback: complaints from this owner's tenants that lack ownerLoginId
         // (handles older complaints where ownerLoginId wasn't stored)
         const Tenant = require('../models/Tenant');
-        const ownerTenants = await Tenant.find({ ownerLoginId: normalizedId }, '_id');
+        const tenantFilter = { ownerLoginId: normalizedId };
+        if (propertyId) tenantFilter.property = propertyId;
+        const ownerTenants = await Tenant.find(tenantFilter, '_id');
         const tenantIds = ownerTenants.map(t => String(t._id));
 
         let complaints = byOwner;
         if (tenantIds.length > 0) {
-            const byTenant = await Complaint.find({
+            const byTenantQuery = {
                 tenantId: { $in: tenantIds },
                 $or: [{ ownerLoginId: { $exists: false } }, { ownerLoginId: '' }, { ownerLoginId: null }]
-            }).sort({ createdAt: -1 });
+            };
+            // These rows have no ownerLoginId to begin with, so their propertyId
+            // is equally unreliable — scope this fallback branch by which tenants
+            // belong to the target property (tenantFilter above) instead.
+            const byTenant = await Complaint.find(byTenantQuery).sort({ createdAt: -1 });
 
             if (byTenant.length > 0) {
                 const seen = new Set(byOwner.map(c => String(c._id)));

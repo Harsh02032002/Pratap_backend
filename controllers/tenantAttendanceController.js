@@ -9,10 +9,19 @@ exports.getOwnerTenantAttendance = async (req, res) => {
         // Set by scopeOwnerLoginId middleware — never trust a client-supplied
         // ownerLoginId directly, and never allow an unscoped (all-owners) query.
         const ownerLoginId = req.effectiveOwnerLoginId;
-        const { date, month, year, tenantId } = req.query;
+        const { date, month, year, tenantId, propertyId } = req.query;
 
         let query = { ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') } };
-        if (tenantId) {
+        if (propertyId) {
+            // TenantAttendance has no property field of its own — scope via the
+            // tenant roster for the target property instead of fetching every
+            // tenant's attendance for the owner and relying on the caller to filter.
+            const propertyTenants = await Tenant.find({ ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }, property: propertyId }, '_id').lean();
+            const propertyTenantIds = propertyTenants.map(t => String(t._id));
+            query.tenantId = tenantId
+                ? { $in: propertyTenantIds.includes(String(tenantId)) ? [tenantId] : [] }
+                : { $in: propertyTenantIds };
+        } else if (tenantId) {
             query.tenantId = tenantId;
         }
         if (date) {

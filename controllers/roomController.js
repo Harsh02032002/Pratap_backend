@@ -376,13 +376,16 @@ exports.getRoomsByOwner = async (req, res) => {
         const { ownerLoginId } = req.params;
         const normalizedOwnerId = String(ownerLoginId || '').trim().toUpperCase();
         const limit = parseInt(req.query.limit) || 0;
+        const { propertyId } = req.query;
 
         // Dynamically import ownerController to prevent circular dependency issues
         const ownerController = require('./ownercontroller');
         await ownerController.healOwnerProperties(normalizedOwnerId);
 
-        const properties = await Property.find({ ownerLoginId: normalizedOwnerId, isDeleted: { $ne: true } }).lean();
-        
+        const propertyFilter = { ownerLoginId: normalizedOwnerId, isDeleted: { $ne: true } };
+        if (propertyId) propertyFilter._id = propertyId;
+        const properties = await Property.find(propertyFilter).lean();
+
         const propertyIds = properties.map(p => p._id);
         
         let rooms = [];

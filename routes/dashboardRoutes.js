@@ -25,6 +25,26 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');
 const { MODULE_KEYS } = require('../utils/permissionKeys');
 
+// GET /:ownerId below is the Owner Dashboard's data source and is Owner/Admin-only
+// by requirement — staff have their own separate /employee endpoint above with
+// area-scoped stats and no revenue. This route is called unauthenticated by design
+// (resolves the owner from the URL), so we can't just gate it behind `protect`;
+// instead decode the Bearer token if present and reject outright when it belongs
+// to an Employee (any staff role), regardless of that staff member's permissions.
+async function isStaffRequest(req) {
+    try {
+        const authHeader = req.headers.authorization || '';
+        if (!authHeader.startsWith('Bearer ')) return false;
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
+        const Employee = require('../models/Employee');
+        const emp = await Employee.findById(decoded.id).select('_id');
+        return !!emp;
+    } catch (_) {
+        return false; // not a staff token (owner/website token, or none) — allow
+    }
+}
+
 // ─── Employee Dashboard ───────────────────────────────────────────────────────
 /**
  * GET /api/dashboard/employee
@@ -145,6 +165,10 @@ function sumRent(enquiries, transactions, rentPayments) {
 }
 
 router.get('/:ownerId', async (req, res) => {
+    if (await isStaffRequest(req)) {
+        return res.status(403).json({ success: false, message: 'Forbidden: the Owner Dashboard is not available to staff accounts' });
+    }
+
     const labelId = `dashboard:${req.params.ownerId}:${Date.now()}`;
     console.time(labelId);
 
