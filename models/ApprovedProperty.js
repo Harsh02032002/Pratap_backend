@@ -57,7 +57,7 @@ const ApprovedPropertySchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['approved', 'live', 'offline'],
+        enum: ['approved', 'live', 'offline', 'active', 'inactive', 'blocked', 'pending_approval', 'Approved', 'Active', 'Live', 'Offline'],
         default: 'approved',
         index: true
     },

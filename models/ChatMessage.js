@@ -156,7 +156,17 @@ chatMessageSchema.pre('save', async function(next) {
     if (blockContact) {
       linkRegex.lastIndex = 0;
       if (linkRegex.test(msgText)) {
-        const isPaymentLink = msgText.includes('/website/pay') || msgText.includes('pay?bookingId=');
+        const lower = msgText.toLowerCase();
+        const isPaymentLink =
+          lower.includes('/website/pay') ||
+          lower.includes('bookingid=') ||
+          lower.includes('cashfree') ||
+          lower.includes('razorpay') ||
+          lower.includes('rzp.io') ||
+          lower.includes('roomhy.com') ||
+          lower.includes('localhost') ||
+          lower.includes('127.0.0.1');
+
         if (!isPaymentLink) {
           if (!violation) violation = 'external_link';
           linkRegex.lastIndex = 0;

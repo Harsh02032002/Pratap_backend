@@ -11,7 +11,11 @@ const PropertySchema = new mongoose.Schema({
   ownerLoginId: { type: String },
   ownerName: { type: String },
   ownerPhone: { type: String },
-  status: { type: String, enum: ['inactive','active','blocked','pending_approval'], default: 'inactive' },
+  status: { 
+    type: String, 
+    enum: ['inactive', 'active', 'blocked', 'pending_approval', 'approved', 'rejected', 'pending', 'Inactive', 'Active', 'Blocked', 'Approved', 'Rejected', 'Pending'], 
+    default: 'inactive' 
+  },
   isPublished: { type: Boolean, default: false },
   isLiveOnWebsite: { type: Boolean, default: false },
   visitId: { type: String, index: true },
@@ -58,7 +62,11 @@ const PropertySchema = new mongoose.Schema({
   featuredImage: { type: String },
   
   // Property details
-  propertyType: { type: String, enum: ['pg', 'hostel', 'co-living', 'coliving', 'apartment', 'room'], default: 'pg' },
+  propertyType: { 
+    type: String, 
+    enum: ['pg', 'hostel', 'co-living', 'coliving', 'apartment', 'room', 'flat', 'house', 'villa', 'studio', 'PG', 'Hostel', 'Co-Living', 'Co-living', 'Coliving', 'Apartment', 'Room', 'Flat', 'House', 'Villa', 'Studio'], 
+    default: 'pg' 
+  },
   gender: { type: String, enum: ['male', 'female', 'any'], default: 'any' },
   monthlyRent: { type: Number, default: 0 },
   

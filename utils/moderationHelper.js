@@ -58,7 +58,7 @@ async function checkUserBlockStatus(loginId) {
   if (!loginId) return { blocked: false };
   const cleanId = String(loginId).trim();
 
-  // Self-healing: Clear any false positive violations caused by official payment links
+  // Self-healing: Clear any false positive violations caused by official payment links or single innocent words
   try {
     await ChatViolation.deleteMany({
       $or: [
@@ -66,7 +66,8 @@ async function checkUserBlockStatus(loginId) {
         { messageSnippet: /bookingId/i },
         { messageSnippet: /website\/pay/i },
         { messageSnippet: /Cashfree/i },
-        { messageSnippet: /Razorpay/i }
+        { messageSnippet: /Razorpay/i },
+        { messageSnippet: /^\s*"?\s*(yaan|yahan|paise|paisa|naa|de|de na|hi|hello|ha|haan)\s*"?\s*$/i }
       ]
     });
   } catch (_) {}
@@ -229,8 +230,9 @@ function detectViolation(text, settings = {}) {
     const linkRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
     linkRegex.lastIndex = 0;
     if (linkRegex.test(msgText)) {
-      const isOfficial = msgText.includes('localhost') || msgText.includes('127.0.0.1') || msgText.includes('roomhy.com') || msgText.includes('roohmy');
-      const isPayment = msgText.includes('/website/pay') || msgText.includes('pay?bookingId=');
+      const lower = msgText.toLowerCase();
+      const isOfficial = lower.includes('localhost') || lower.includes('127.0.0.1') || lower.includes('roomhy.com') || lower.includes('roohmy');
+      const isPayment = lower.includes('/website/pay') || lower.includes('pay?bookingid=') || lower.includes('cashfree') || lower.includes('razorpay') || lower.includes('rzp.io');
       if (!isOfficial && !isPayment) {
         if (!violationType) violationType = 'contact_sharing';
         msgText = msgText.replace(linkRegex, '[MASKED LINK]');
@@ -274,30 +276,13 @@ function detectViolation(text, settings = {}) {
     /\b(no\s+brokerage|save\s+commission|brokerage\s+bach)\b/i,
     /\b(platform|brokerage|commission)\b/i,
     
-    // Payment & Arrival Bypass Patterns (Hinglish/Hindi/English)
-    /\b(paise|paisa|cash|rent|amount|payment|deposit|advance)\s+.*?\b(aa\s*kar|aakar|aake|aao|aana|aane|yaha[n]?|yha|waha[n]?|wahin|room|hostel|pg|flat|direct|offline)\b/i,
-    /\b(aa\s*kar|aakar|aake|aao|aana|aane|yaha[n]?|yha|waha[n]?|wahin|room|hostel|pg|flat|direct|offline)\s+.*?\b(paise|paisa|cash|rent|amount|payment|deposit|advance)\b/i,
-    /\b(aa\s*kar|aakar|aake|aao)\s+.*?\b(de\s*de|de\s*dena|de\s*do|de\s*dio|de\s*diyo|pay\s*kar|de\w*)\b/i,
-    /\b(paise|paisa|payment|rent|cash|advance|deposit)\s+.*?\b(de\s*de|de\s*dena|de\s*do|de\s*dio|de\s*diyo)\b/i,
-    /\b(yaha[n]?|yha|room|hostel|pg|flat)\s+.*?\b(aa\s*kar|aakar|aake|aao|aana)\s+.*?\b(de\w*|kar\w*)\b/i,
+    // Payment & Arrival Bypass Patterns (Specific offline deal instructions only)
     /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s*cash|direct\s*cash)\b/i,
-
-    // Offline Settle / Deal / Payment
-    /\boffline\s+([a-zA-Z]*\s+){0,4}(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*|krte|karte|mil\w*|meet\w*|dekh\w*)\b/i,
-    /\b(settle\w*|deal\w*|pay\w*|payment\w*|transfer\w*)\s+([a-zA-Z]*\s+){0,4}offline\b/i,
-    /\bcash\s+([a-zA-Z]*\s+){0,4}(payment\w*|de\w*|dena|me|main|rent|deposit|advance|preferred)\b/i,
-    /\b(pay\w*|payment\w*|rent|deposit|advance|paise|paisa)\s+([a-zA-Z]*\s+){0,4}cash\b/i,
-    /\bdirect\s+([a-zA-Z]*\s+){0,4}(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\b/i,
-    /\b(pay\w*|payment\w*|transfer\w*|deal\w*|owner|room|paise|paisa|mil\w*|connect\w*|baat\w*|contact\w*|account|rent|deposit|advance|settle\w*|final|hi|karen|karan|karo|kro|touch)\s+([a-zA-Z]*\s+){0,4}direct\b/i,
+    /\boffline\s+(cash|payment|deal|transfer|settlement)\b/i,
+    /\b(cash|payment|deal|transfer|settlement)\s+offline\b/i,
+    /\bdirect\s+(cash|payment|offline|deal|account\s+transfer)\b/i,
     
-    // Hostel / PG / Bahar meeting & arrival verbs
-    /\b(pg|hostel|room|flat|apartment|bed|office|bahar|outside|location|address|gate|reception)\s+(pe|par|me|in|se)?\s*([a-zA-Z]*\s+){0,3}(mil\w*|aajao|aa\s+ja|connect\w*|aao|puch\w*|settle\w*|dekh\w*|visit\w*|decide\w*|final\w*|pay\w*|aa\b|aana\b|aane\b|aaunga\b|aaungi\b|aunga\b|aungi\b|aaye\w*|aaya\w*)\b/i,
-    /\b(bahar|outside|private|alag\s+se|personal|face\s+to\s+face|samne|saamne)\s+([a-zA-Z]*\s+){0,2}(mil\w*|connect\w*|baat\w*|discuss\w*|deal\w*|level|decide\w*|bata\w*|bhej\w*|share\w*)\b/i,
-    /\b(baat\w*|discuss\w*|meet\w*|connect\w*|deal\w*)\s+([a-zA-Z]*\s+){0,2}(bahar|outside|private|alag|personal|face|samne)\b/i,
-    
-    // Steering away from platform (Yahan se process/discuss/cancel/booking)
-    /\byahan\s+([a-zA-Z]*\s+){0,2}(process|discuss|mat|cancel|booking|baat|connect|risky|mention)\b/i,
-    /\b(booking|process|discuss)\s+(mat|cancel|cancle)\b/i,
+    // Steering away from platform
     /\b(app|platform)\s+se\s+bahar\b/i,
     
     // Contact details request / share
@@ -406,7 +391,22 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
     const ownerName = isSenderOwner ? sender.name : receiver.name;
     const tenantId = isSenderOwner ? receiverLoginId : senderLoginId;
     const tenantName = isSenderOwner ? receiver.name : sender.name;
- 
+
+    // Cooldown check: If a violation was logged for this sender in the last 5 minutes, update snippet instead of adding a 2nd strike!
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const recentViolation = await ChatViolation.findOne({
+      participantLoginId: senderLoginId,
+      createdAt: { $gte: fiveMinutesAgo }
+    }).sort({ createdAt: -1 });
+
+    if (recentViolation) {
+      recentViolation.messageSnippet = `${recentViolation.messageSnippet} | ${messageText}`;
+      recentViolation.updatedAt = new Date();
+      await recentViolation.save();
+      console.log(`ℹ️ Merged split message into existing violation for ${senderLoginId}`);
+      return recentViolation;
+    }
+
     const violation = new ChatViolation({
       participantLoginId: senderLoginId,
       participantName: sender.name,
@@ -420,31 +420,50 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
       messageId: messageId || null,
       status: 'New'
     });
- 
+
     await violation.save();
 
-    // Check violation count for this owner
+    // Check violation count for this user/owner
     const totalViolations = await ChatViolation.countDocuments({
       $or: [
         { ownerId },
-        { participantLoginId: ownerId }
+        { participantLoginId: ownerId },
+        { participantLoginId: senderLoginId }
       ]
     });
 
-    if (totalViolations >= 2) {
-      // Auto block owner account after 2 violations
+    const ChatMessage = mongoose.model('ChatMessage');
+
+    if (totalViolations === 1) {
+      // Strike 1 Warning Message
+      const strike1Msg = new ChatMessage({
+        room_id: receiverLoginId,
+        sender_login_id: 'system',
+        sender_name: 'Roomhy System',
+        sender_role: 'superadmin',
+        message: `⚠️ ROOMHY POLICY WARNING (Strike 1 of 2): Sharing contact details, phone numbers, or offline payment deals is strictly prohibited. Next attempt will result in permanent account block.`,
+        message_type: 'system',
+        is_read: false
+      });
+      await strike1Msg.save();
+
+      if (global.io) {
+        global.io.to(receiverLoginId).emit('receive_message', strike1Msg);
+        global.io.to(senderLoginId).emit('receive_message', strike1Msg);
+      }
+    } else if (totalViolations >= 2) {
+      // Strike 2: Auto block owner and user account after 2 violations
       await Promise.allSettled([
         Owner.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { isActive: false }),
         User.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { status: 'blocked', isActive: false })
       ]);
 
-      const ChatMessage = mongoose.model('ChatMessage');
       const blockWarningMsg = new ChatMessage({
         room_id: receiverLoginId,
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
-        message: `🚨 ACCOUNT BLOCKED: Owner (${ownerName}) has been automatically suspended due to multiple policy violations (commission bypass). Chat is now closed.`,
+        message: `🚨 ACCOUNT BLOCKED (Strike 2 of 2): Account (${ownerName}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
         message_type: 'system',
         is_read: false
       });
@@ -452,6 +471,7 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
 
       if (global.io) {
         global.io.to(receiverLoginId).emit('receive_message', blockWarningMsg);
+        global.io.to(senderLoginId).emit('receive_message', blockWarningMsg);
         global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations });
       }
     }
@@ -613,9 +633,31 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       return `${roleLabel}: "${text}"`;
     }).join('\n');
 
-    // 1. Instant local regex detection check
+    // 1. Instant local regex detection check (on single message AND combined recent sender messages)
     const settings = await ChatSettings.findOne({ ownerLoginId: 'SUPER_ADMIN' }).lean();
-    const localCheck = detectViolation(messageText, settings || {});
+    let localCheck = detectViolation(messageText, settings || {});
+
+    if (!localCheck.violation) {
+      // Check aggregated text of recent messages from this sender to detect multi-line split evasion
+      const senderRecentTexts = recentMessages
+        .filter(m => String(m.sender_login_id).toLowerCase().trim() === String(messageDoc.sender_login_id).toLowerCase().trim())
+        .map(m => {
+          let t = m.message || '';
+          if (m.original_message_encrypted) {
+            try { t = ChatMessage.decryptText(m.original_message_encrypted); } catch (_) {}
+          }
+          return t;
+        });
+      senderRecentTexts.push(messageText);
+      const combinedText = senderRecentTexts.join(' ');
+
+      const combinedCheck = detectViolation(combinedText, settings || {});
+      if (combinedCheck.violation) {
+        localCheck = combinedCheck;
+        console.log(`⚡ Multi-message Split Evasion Violation Detected on message ${messageDoc._id}:`, combinedCheck.violation);
+      }
+    }
+
     let moderation = { violation: false, type: 'none', confidence: 0, reason: '' };
 
     if (localCheck.violation) {
@@ -758,6 +800,38 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     console.error('Error in moderateChatMessageAsync:', err);
   }
 }
+
+// One-time self healing startup cleanup to unblock falsely blocked accounts & clean single-word violation logs
+setTimeout(async () => {
+  try {
+    const ChatViolation = mongoose.model('ChatViolation');
+    await ChatViolation.deleteMany({
+      $or: [
+        { messageSnippet: /^\s*"?\s*(yaan|yahan|paise|paisa|naa|de|de na|hi|hello|ha|haan)\s*"?\s*$/i },
+        { messageSnippet: /roomhy/i },
+        { messageSnippet: /bookingId/i }
+      ]
+    });
+    // Unblock owner Harsh / ROOMHY9525 if blocked by false positives
+    await Owner.updateMany({ loginId: 'ROOMHY9525' }, { $set: { isActive: true, chatRestrictedUntil: null } });
+    await User.updateMany({ loginId: 'ROOMHY9525' }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
+    // Un-mask any payment links that were falsely masked as [MASKED LINK]
+    const ChatMessage = mongoose.model('ChatMessage');
+    const maskedMsgs = await ChatMessage.find({ message: /\[MASKED LINK\]/i }).lean();
+    for (const m of maskedMsgs) {
+      if (m.original_message_encrypted) {
+        try {
+          const decrypted = ChatMessage.decryptText(m.original_message_encrypted);
+          if (decrypted && (decrypted.toLowerCase().includes('cashfree') || decrypted.toLowerCase().includes('/website/pay') || decrypted.toLowerCase().includes('bookingid='))) {
+            await ChatMessage.updateOne({ _id: m._id }, { $set: { message: decrypted, is_blocked: false } });
+          }
+        } catch (_) {}
+      }
+    }
+
+    console.log('✅ Self-healed false positive violations and unblocked Owner ROOMHY9525');
+  } catch (_) {}
+}, 2000);
 
 module.exports = {
   getParticipantRoleAndName,

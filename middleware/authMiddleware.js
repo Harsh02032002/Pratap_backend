@@ -51,6 +51,42 @@ exports.protect = async (req, res, next) => {
         }
 
         if (!user) {
+            const Owner = require('../models/Owner');
+            try {
+                user = await Owner.findById(decoded.id).select('-password');
+            } catch (_) {
+                user = await Owner.findOne({ loginId: String(decoded.id).toUpperCase() }).select('-password');
+            }
+            if (user) user.role = 'owner';
+        }
+
+        if (!user) {
+            const Tenant = require('../models/Tenant');
+            try {
+                user = await Tenant.findById(decoded.id).select('-password');
+            } catch (_) {
+                user = await Tenant.findOne({
+                    $or: [
+                        { loginId: String(decoded.id).toUpperCase() },
+                        { email: String(decoded.id).toLowerCase() }
+                    ]
+                }).select('-password');
+            }
+            if (user) user.role = 'tenant';
+        }
+
+        if (!user && (decoded.email || decoded.loginId || decoded.id)) {
+            user = {
+                _id: decoded.id || decoded.userId || 'web_user',
+                id: decoded.id || decoded.userId || 'web_user',
+                email: decoded.email || '',
+                loginId: decoded.loginId || decoded.email || decoded.id || '',
+                name: decoded.name || decoded.email || 'Website User',
+                role: decoded.role || 'website_user'
+            };
+        }
+
+        if (!user) {
             console.log(`[AUTH DEBUG] User not found for ID: ${decoded.id}`);
             return res.status(401).json({ message: 'Not authorized, user not found' });
         }

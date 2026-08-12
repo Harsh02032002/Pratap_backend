@@ -958,7 +958,7 @@ exports.getAdminWallet = async (req, res) => {
   try {
     const settings = await getSettings();
 
-    const [pendingAgg, paidAgg, totalAgg] = await Promise.all([
+    const [pendingAgg, paidAgg, totalAgg, commissionAgg] = await Promise.all([
       PaymentTransaction.aggregate([
         { $match: { payout_status: { $in: ['Pending', 'Failed'] } } },
         { $group: { _id: null, total: { $sum: '$owner_amount' }, count: { $sum: 1 } } },
@@ -970,16 +970,25 @@ exports.getAdminWallet = async (req, res) => {
       PaymentTransaction.aggregate([
         { $group: { _id: null, total: { $sum: '$booking_amount' }, count: { $sum: 1 } } },
       ]),
+      PaymentTransaction.aggregate([
+        { $group: { _id: null, total: { $sum: '$commission_fee' } } },
+      ]),
     ]);
+
+    const totalCollected = totalAgg[0]?.total || 0;
+    const pendingPayouts = pendingAgg[0]?.total || 0;
+    const paidPayouts = paidAgg[0]?.total || 0;
+    const rawComm = Math.abs(commissionAgg[0]?.total || 0);
+    const calculatedCommission = rawComm || Math.max(0, totalCollected - pendingPayouts - paidPayouts);
 
     return res.json({
       success: true,
       wallet: {
-        adminBalance:    settings.revenueBalance || 0,
-        totalCollected:  totalAgg[0]?.total   || 0,
-        pendingPayouts:  pendingAgg[0]?.total  || 0,
+        adminBalance:    calculatedCommission,
+        totalCollected:  totalCollected,
+        pendingPayouts:  pendingPayouts,
         pendingCount:    pendingAgg[0]?.count  || 0,
-        paidPayouts:     paidAgg[0]?.total     || 0,
+        paidPayouts:     paidPayouts,
         paidCount:       paidAgg[0]?.count     || 0,
         totalTx:         totalAgg[0]?.count    || 0,
       },

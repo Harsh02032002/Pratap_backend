@@ -28,9 +28,40 @@ const deriveLocationCode = (input = {}) => {
   return 'GEN';
 };
 
+// Helper: strip empty values for ObjectId paths (e.g. owner: "") so Mongoose
+// does not throw a CastError and abort the whole save.
+const sanitizePropertyPayload = (data = {}) => {
+  const cleaned = { ...data };
+  delete cleaned._id;
+  delete cleaned.id;
+
+  for (const key of Object.keys(cleaned)) {
+    const schemaPath = Property.schema.path(key);
+    // Mongoose 8 reports 'ObjectId'; older versions used 'ObjectID'.
+    if (!schemaPath || String(schemaPath.instance).toLowerCase() !== 'objectid') continue;
+
+    const value = cleaned[key];
+    // Owner may arrive as a populated object from the panel — keep just the id.
+    const raw = value && typeof value === 'object' && value._id ? value._id : value;
+    if (!raw || !mongoose.Types.ObjectId.isValid(String(raw))) {
+      delete cleaned[key];
+    } else {
+      cleaned[key] = raw;
+    }
+  }
+
+  return cleaned;
+};
+
+// A property belongs on the public website when it is active/approved and has not
+// been explicitly taken offline. Legacy documents predate isLiveOnWebsite, so only
+// an explicit `false` counts as offline.
+const isPropertyLive = (property) =>
+    property.isLiveOnWebsite !== false && ['active', 'approved'].includes(property.status);
+
 // Helper: Sync Property to ApprovedProperty for website visibility
 const syncToApprovedProperty = async (property) => {
-    if (!property.isLiveOnWebsite || property.status !== 'active') return;
+    if (!isPropertyLive(property)) return;
     try {
         const vId = property.visitId || property._id.toString();
         const approvedPropertyData = {
@@ -77,7 +108,9 @@ const syncToApprovedProperty = async (property) => {
                 loginId: property.ownerLoginId || ''
             },
             isLiveOnWebsite: true,
-            status: 'live',
+            // Must stay 'approved': the public website endpoints
+            // (/api/approved-properties/public/approved and /all) filter on it.
+            status: 'approved',
             updatedAt: new Date()
         };
 
@@ -95,7 +128,7 @@ const syncToApprovedProperty = async (property) => {
 // Create / Add a new Property with auto-geocoding
 exports.addProperty = async (req, res) => {
   try {
-    const propertyData = { ...req.body };
+    const propertyData = sanitizePropertyPayload(req.body);
     propertyData.locationCode = deriveLocationCode(propertyData);
 
     // Auto-geocode address to lat/long ONLY IF coordinates are not already provided
@@ -259,7 +292,7 @@ exports.getAllProperties = async (req, res) => {
 exports.updateProperty = async (req, res) => {
   try {
     const propId = req.params.id;
-    const updateData = { ...req.body };
+    const updateData = sanitizePropertyPayload(req.body);
     if (Object.prototype.hasOwnProperty.call(updateData, 'locationCode') || !updateData.locationCode) {
       updateData.locationCode = deriveLocationCode(updateData);
     }
@@ -287,8 +320,10 @@ exports.updateProperty = async (req, res) => {
     // Sync with ApprovedProperty
     await syncToApprovedProperty(property);
 
-    // If not active OR not live, ensure it's removed from website listing
-    if (!property.isLiveOnWebsite || property.status !== 'active') {
+    // If not active OR not live, ensure it's removed from website listing.
+    // Must be the exact inverse of the sync guard, otherwise a synced property
+    // gets deleted again in the same request.
+    if (!isPropertyLive(property)) {
         try {
             await ApprovedProperty.deleteMany({
                 visitId: property.visitId || property._id.toString()
@@ -666,6 +701,11 @@ exports.deleteProperty = async (req, res) => {
 };
 
 // Assign property verification task to employee
+// Exported for maintenance scripts (scripts/repair-website-visibility.js) so
+// backfills reuse the exact same sync logic instead of copying it.
+exports.syncToApprovedProperty = syncToApprovedProperty;
+exports.isPropertyLive = isPropertyLive;
+
 exports.assignPropertyVerification = async (req, res) => {
     try {
         const propId = req.params.id;
