@@ -9,6 +9,7 @@ const Property = require('../models/Property');
 const mailer = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { clearCache } = require('../middleware/apiCache');
 const VISITS_QUERY_TIMEOUT_MS = 12000;
 const VISITS_CACHE_TTL_MS = 10000;
 const visitsListCache = new Map();
@@ -216,7 +217,7 @@ router.post('/', protect, authorize('superadmin', 'employee', 'manager', 'areama
 // Used by Area Manager / Employee dashboard
 // Supports optional ?staffId / ?staffName parameters to filter by staff
 // ============================================================
-router.get('/', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
+router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const requester = await resolveRequestUser(req);
         const requestedStaffId = String(req.query.staffId || '').trim();
@@ -632,6 +633,10 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                 { upsert: true, new: true }
             );
             console.log('? [visits/approve] Saved to ApprovedProperty collection:', approvedProp._id);
+
+            // Clear cached listings so the new property shows up immediately
+            clearCache('/api/approved-properties');
+            clearCache('/api/properties');
         } catch (approvedErr) {
             console.warn('?? [visits/approve] Warning saving to ApprovedProperty:', approvedErr.message);
             // Don't fail the approval if ApprovedProperty save fails
@@ -1507,6 +1512,10 @@ router.post('/:visitId/approve', protect, authorize('employee', 'manager', 'area
             },
             { upsert: true, new: true }
         );
+
+        // Clear cached listings so the new property shows up immediately
+        clearCache('/api/approved-properties');
+        clearCache('/api/properties');
 
         res.json({
             success: true,

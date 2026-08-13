@@ -352,24 +352,34 @@ exports.assignTenant = async (req, res) => {
         // Generate temporary password (8 chars: mix of alphanumeric)
         const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
 
-        // Create User record for tenant (role: 'tenant', inactive until payment)
-        const user = await User.create({
-            name,
-            email,
-            phone,
-            password: tempPassword, // Will be hashed by pre-save hook
-            role: 'tenant',
-            loginId,
-            locationCode: effectiveLocationCode,
-            status: 'pending',
-            isActive: false,
-            requirePasswordReset: true
-        });
+        // Create the tenant's User + Tenant (+ alternate-proof KYC request) records
+        // inside one transaction: if Tenant.create (or anything after User.create)
+        // throws, the User insert rolls back too, so a failed attempt never leaves
+        // behind an orphaned User blocking retries via the unique phone index.
+        const mongoose = require('mongoose');
+        const session = await mongoose.startSession();
+        let user, tenant, alternateProofRequest = null;
+        try {
+            session.startTransaction();
 
-        // Create Tenant record
-        const tenant = await Tenant.create({
+            // Create User record for tenant (role: 'tenant', inactive until payment)
+            user = (await User.create([{
+                name,
+                email,
+                phone: phoneClean,
+                password: tempPassword, // Will be hashed by pre-save hook
+                role: 'tenant',
+                loginId,
+                locationCode: effectiveLocationCode,
+                status: 'pending',
+                isActive: false,
+                requirePasswordReset: true
+            }], { session }))[0];
+
+            // Create Tenant record
+            tenant = (await Tenant.create([{
             name,
-            phone,
+            phone: phoneClean,
             email,
             dob,
             gender,
@@ -447,22 +457,30 @@ exports.assignTenant = async (req, res) => {
                     securityDeposit: depositTotal || 0
                 }
             }
-        });
+            }], { session }))[0];
 
-        // Queue the alternate ID proof for superadmin review — approval is what
-        // releases the agreement + payment link for this tenant.
-        let alternateProofRequest = null;
-        if (useAlternateProof) {
-            const TenantKycRequest = require('../models/TenantKycRequest');
-            alternateProofRequest = await TenantKycRequest.create({
-                tenantId: tenant._id,
-                ownerLoginId: tenant.ownerLoginId || String(ownerLoginId || property.ownerLoginId || '').toUpperCase(),
-                tenantName: name,
-                proofType: alternateProofType,
-                proofFileUrl: alternateProofFile
-            });
-            console.log(`[TENANT KYC REQUEST] Alternate proof request ${alternateProofRequest._id} created for ${tenant.loginId}`);
+            // Queue the alternate ID proof for superadmin review — approval is what
+            // releases the agreement + payment link for this tenant.
+            if (useAlternateProof) {
+                const TenantKycRequest = require('../models/TenantKycRequest');
+                alternateProofRequest = (await TenantKycRequest.create([{
+                    tenantId: tenant._id,
+                    ownerLoginId: tenant.ownerLoginId || String(ownerLoginId || property.ownerLoginId || '').toUpperCase(),
+                    tenantName: name,
+                    proofType: alternateProofType,
+                    proofFileUrl: alternateProofFile
+                }], { session }))[0];
+                console.log(`[TENANT KYC REQUEST] Alternate proof request ${alternateProofRequest._id} created for ${tenant.loginId}`);
+            }
+
+            await session.commitTransaction();
+        } catch (txError) {
+            console.error('[assignTenant] Transaction failed, rolling back:', txError.message);
+            try { await session.abortTransaction(); } catch (_) { }
+            session.endSession();
+            throw txError;
         }
+        session.endSession();
 
         // Populate for response (include locationCode and owner info)
         await tenant.populate('property', 'title roomType locationCode owner ownerLoginId');

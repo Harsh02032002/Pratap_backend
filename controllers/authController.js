@@ -69,23 +69,18 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
 
         console.log('[ForgotPassword] Request OTP for email:', email);
 
-        // Check if email exists in staff users
+        // Check if email belongs to any account. This endpoint backs the public
+        // website's single forgot-password page, used by tenants and owners just
+        // as much as staff — the User collection holds every role, so the lookup
+        // must not be restricted to staff roles (that restriction previously made
+        // every tenant/owner see "Email not found in staff management system").
         let user = null;
-        
+
         try {
-            // Try MongoDB User model first (superadmin, managers, etc.)
-            user = await User.findOne({ 
-                email, 
-                $or: [
-                    { role: 'superadmin' },
-                    { role: 'areamanager' },
-                    { role: 'manager' },
-                    { role: 'admin' }
-                ]
-            });
-            
+            user = await User.findOne({ email: email.toLowerCase() });
+
             if (user) {
-                console.log('[ForgotPassword] Found user in User collection:', user.email);
+                console.log('[ForgotPassword] Found user in User collection:', user.email, 'role:', user.role);
             }
         } catch (dbErr) {
             console.warn('[ForgotPassword] Error checking User collection:', dbErr.message);
@@ -124,8 +119,8 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         }
 
         if (!user) {
-            console.log('[ForgotPassword] Email not found in any staff system');
-            return res.status(404).json({ message: 'Email not found in staff management system. Please verify the email address.' });
+            console.log('[ForgotPassword] Email not found in any account');
+            return res.status(404).json({ message: 'No account found with this email address. Please verify the email address.' });
         }
 
         if (user.isActive === false) {

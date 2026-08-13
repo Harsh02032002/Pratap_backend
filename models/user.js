@@ -4,9 +4,11 @@ const bcrypt = require('bcryptjs');
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     email: { type: String }, // Optional for Owners/Tenants who use ID
-    // unique: phone doubles as a login identifier (see authController.login) —
-    // a shared phone across accounts would make phone-based login ambiguous.
-    phone: { type: String, required: true, unique: true },
+    // Not unique: multiple accounts (e.g. a tenant and a household member, or
+    // reused test data) may share a phone number. authController.login already
+    // handles this — if a phone lookup matches more than one account, it asks
+    // the caller to log in with their Login ID instead of picking one.
+    phone: { type: String, required: true },
     password: { type: String, required: true },
     
     role: { 

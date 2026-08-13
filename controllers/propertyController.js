@@ -185,6 +185,10 @@ exports.addProperty = async (req, res) => {
     // Auto-approve and make live on website
     await syncToApprovedProperty(property);
 
+    // Clear cached listings so the new property shows up immediately
+    clearCache('/api/approved-properties');
+    clearCache('/api/properties');
+
     res.status(201).json({
       success: true,
       message: 'Property created successfully',
