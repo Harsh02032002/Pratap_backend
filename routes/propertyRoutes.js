@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const propertyController = require('../controllers/propertyController');
 const Property = require('../models/Property');
 const ApprovedProperty = require('../models/ApprovedProperty');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, optionalProtect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
 const { formLimiter } = require('../middleware/security');
 
@@ -14,7 +14,7 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 router.get('/', applyEmployeeScope, propertyController.getAllProperties);
 
 // Add/Create new property with auto-geocoding
-router.post('/add', protect, formLimiter, auditTrail('properties'), propertyController.addProperty);
+router.post('/add', optionalProtect, formLimiter, auditTrail('properties'), propertyController.addProperty);
 
 // Get single property by ID
 router.get('/:id', propertyController.getPropertyById);

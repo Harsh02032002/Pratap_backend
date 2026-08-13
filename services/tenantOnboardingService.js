@@ -11,20 +11,26 @@ const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'http
 
 // Tenant-facing hosts the payment link is allowed to point at. This is checked
 // against the `frontendUrl`/`origin` a client submits so a local dev run emails
-// a localhost link while a deployed run always emails the real tenant domain —
-// admin.roomhy.com is deliberately excluded (that's the staff app, not tenant-facing).
+// a localhost link while a deployed run always emails the real tenant domain.
+// admin.roomhy.com is mapped to app.roomhy.com because superadmin approvals
+// originate from the staff panel, but tenant-facing links must use the client app.
 const TENANT_PAYMENT_HOSTS = new Set(['localhost', '127.0.0.1', 'roomhy.com', 'www.roomhy.com', 'app.roomhy.com', 'www.app.roomhy.com']);
+const TENANT_APP_DEFAULT = process.env.APP_URL || process.env.APP_BASE_URL || process.env.WEB_APP_URL || 'https://app.roomhy.com';
 
 function resolvePaymentAppBase(frontendOrigin) {
     if (frontendOrigin) {
         try {
             const u = new URL(frontendOrigin);
-            if (TENANT_PAYMENT_HOSTS.has(u.hostname.toLowerCase())) {
+            const host = u.hostname.toLowerCase();
+            if (TENANT_PAYMENT_HOSTS.has(host)) {
                 return u.origin;
+            }
+            if (host === 'admin.roomhy.com' || host === 'www.admin.roomhy.com') {
+                return TENANT_APP_DEFAULT.replace(/\/$/, '');
             }
         } catch (_) { /* ignore invalid/untrusted origin */ }
     }
-    let appBase = process.env.FRONTEND_URL || 'https://www.roomhy.com';
+    let appBase = process.env.FRONTEND_URL || TENANT_APP_DEFAULT;
     if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
     return appBase;
 }

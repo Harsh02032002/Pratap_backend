@@ -155,7 +155,8 @@ exports.assignTenant = async (req, res) => {
             electricityCharge, maintenanceCharge,
             minStay, noticePeriod, rentDueDate, accommodationType, lateFee,
             licenseDuration, moveOutCharges, noticePeriodCharges, inclusions, gstCharges, advanceCharge,
-            propertyAddress, permanentAddress
+            propertyAddress, permanentAddress,
+            noAadhaar, alternateProofType, alternateProofFile
         } = req.body;
 
         const advanceChargeAmount = Math.max(0, parseInt(advanceCharge, 10) || 0);
@@ -176,14 +177,17 @@ exports.assignTenant = async (req, res) => {
         const normalizedOwnerLoginId = String(ownerLoginId || '').toUpperCase();
         if (normalizedOwnerLoginId) {
             const ownerProfile = await Owner.findOne({ loginId: normalizedOwnerLoginId })
-                .select('checkinUpiId profile')
+                .select('checkinUpiId checkinBankAccountNumber profile')
                 .lean();
-            const ownerUpiId = String(ownerProfile?.checkinUpiId || ownerProfile?.profile?.upiId || '').trim();
-            if (!ownerUpiId) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Owner UPI details are missing. Please complete owner profile payment details before assigning a tenant.'
-                });
+            const ownerHasPaymentDetails = String(
+                ownerProfile?.checkinUpiId ||
+                ownerProfile?.checkinBankAccountNumber ||
+                ownerProfile?.profile?.upiId ||
+                ownerProfile?.profile?.accountNumber ||
+                ''
+            ).trim();
+            if (!ownerHasPaymentDetails) {
+                console.warn(`[assignTenant] Owner ${normalizedOwnerLoginId} payment details missing, proceeding with tenant onboarding.`);
             }
         }
 
@@ -339,24 +343,35 @@ exports.assignTenant = async (req, res) => {
         // Generate temporary password (8 chars: mix of alphanumeric)
         const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
 
-        // Create User record for tenant (role: 'tenant', inactive until payment)
-        const user = await User.create({
-            name,
-            email,
-            phone,
-            password: tempPassword, // Will be hashed by pre-save hook
-            role: 'tenant',
-            loginId,
-            locationCode: effectiveLocationCode,
-            status: 'pending',
-            isActive: false,
-            requirePasswordReset: true
-        });
+        // Create the tenant's User + Tenant (+ alternate-proof KYC request) records
+        // inside one transaction: if Tenant.create (or anything after User.create)
+        // throws, the User insert rolls back too, so a failed attempt never leaves
+        // behind an orphaned User blocking retries via the unique phone index.
+        const mongoose = require('mongoose');
+        const session = await mongoose.startSession();
+        let user, tenant, alternateProofRequest = null;
+        const useAlternateProof = Boolean(noAadhaar && alternateProofFile && alternateProofType);
+        try {
+            session.startTransaction();
 
-        // Create Tenant record
-        const tenant = await Tenant.create({
+            // Create User record for tenant (role: 'tenant', inactive until payment)
+            user = (await User.create([{
+                name,
+                email,
+                phone: phoneClean,
+                password: tempPassword, // Will be hashed by pre-save hook
+                role: 'tenant',
+                loginId,
+                locationCode: effectiveLocationCode,
+                status: 'pending',
+                isActive: false,
+                requirePasswordReset: true
+            }], { session }))[0];
+
+            // Create Tenant record
+            tenant = (await Tenant.create([{
             name,
-            phone,
+            phone: phoneClean,
             email,
             dob,
             gender,
@@ -397,7 +412,10 @@ exports.assignTenant = async (req, res) => {
                 // Store Aadhaar OCR data for verification
                 aadhaarData: idProof?.aadhaarData || null,
                 fatherName: additional?.fatherName || '',
-                permanentAddress: additional?.permanentAddress || ''
+                permanentAddress: additional?.permanentAddress || '',
+                noAadhaar: useAlternateProof,
+                alternateProofType: useAlternateProof ? alternateProofType : '',
+                alternateProofFile: useAlternateProof ? alternateProofFile : ''
             },
             kycStatus: 'pending', // Always pending upon creation until tenant completes digital check-in
             kycVerificationData: {
@@ -431,7 +449,31 @@ exports.assignTenant = async (req, res) => {
                     securityDeposit: depositTotal || 0
                 }
             }
-        });
+            }], { session }))[0];
+
+            // Queue the alternate ID proof for superadmin review — approval is what
+            // releases the agreement + payment link for this tenant.
+            if (useAlternateProof) {
+                const TenantKycRequest = require('../models/TenantKycRequest');
+                alternateProofRequest = (await TenantKycRequest.create([{
+                    tenantId: tenant._id,
+                    ownerLoginId: tenant.ownerLoginId || String(ownerLoginId || property.ownerLoginId || '').toUpperCase(),
+                    tenantName: name,
+                    proofType: alternateProofType,
+                    proofFileUrl: alternateProofFile
+                }], { session }))[0];
+                console.log(`[TENANT KYC REQUEST] Alternate proof request ${alternateProofRequest._id} created for ${loginId}`);
+            }
+
+            await session.commitTransaction();
+        } catch (txError) {
+            console.error('[assignTenant] Transaction failed, rolling back:', txError.message);
+            try { await session.abortTransaction(); } catch (_) { }
+            session.endSession();
+            throw txError;
+        }
+        session.endSession();
+
 
         // Populate for response (include locationCode and owner info)
         await tenant.populate('property', 'title roomType locationCode owner ownerLoginId');
@@ -715,6 +757,33 @@ exports.assignTenant = async (req, res) => {
             // Do NOT send password to owner yet - will be sent after payment completion
         } catch (err) {
             console.error('[MAIL ERROR] Failed to send tenant credentials:', err && err.message);
+        }
+
+        // ── noAadhaar: Create TenantKycRequest for Superadmin review ─────────
+        // When owner ticks "No Aadhaar" and uploads alternate proof (Voter ID,
+        // PAN, etc.) we create a pending KYC request so Superadmin can verify.
+        if (noAadhaar && alternateProofFile && alternateProofType) {
+            try {
+                const TenantKycRequest = require('../models/TenantKycRequest');
+                const effectiveOwnerLoginId = String(
+                    ownerLoginId ||
+                    property?.ownerLoginId ||
+                    ''
+                ).toUpperCase();
+
+                await TenantKycRequest.create({
+                    tenantId:     tenant._id,
+                    ownerLoginId: effectiveOwnerLoginId,
+                    tenantName:   tenant.name,
+                    proofType:    alternateProofType,  // e.g. 'Voter ID', 'PAN', 'Driving License'
+                    proofFileUrl: alternateProofFile,
+                    status:       'Pending',
+                });
+                console.log(`[KYC REQUEST] Created TenantKycRequest for ${tenant.loginId} — proofType: ${alternateProofType}`);
+            } catch (kycErr) {
+                // Non-fatal: tenant is already saved. Log and continue.
+                console.error('[KYC REQUEST ERROR] Failed to create TenantKycRequest:', kycErr.message);
+            }
         }
 
         // For testing we still return credentials in response

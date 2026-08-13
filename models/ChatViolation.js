@@ -18,8 +18,9 @@ const ChatViolationSchema = new mongoose.Schema({
     enum: ['New', 'Reviewed', 'Warning Sent', 'Resolved'],
     default: 'New'
   },
+  attemptNumber: { type: Number, default: 1 },
   messageSnippet: { type: String },
-  messageId: { type: mongoose.Schema.Types.ObjectId, ref: 'ChatMessage', unique: true, sparse: true },
+  messageId: { type: mongoose.Schema.Types.ObjectId, ref: 'ChatMessage', sparse: true },
   actionTaken: { type: String, enum: ['none', 'warned', 'blocked'], default: 'none' },
   actionHistory: [{
     action: { type: String },

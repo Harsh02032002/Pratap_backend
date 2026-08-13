@@ -37,44 +37,45 @@ router.post('/', auditTrail('owners'), async (req, res) => {
             createdByStaffName: staffName,
             addedByStaffId: staffLoginId,
             addedByStaffName: staffName,
-            isActive: isEmpSub ? false : (req.body.isActive !== undefined ? req.body.isActive : true),
-            status: isEmpSub ? 'pending_approval' : (req.body.status || 'active'),
+            isActive: false, // Inactive until KYC completion & SuperAdmin approval
+            status: 'pending_approval',
             isEmployeeSubmitted: isEmpSub
         };
-        const owner = new Owner(ownerData);
-        await owner.save();
-        console.log('✅ Owner created:', owner.loginId);
 
-        // Send Email based on role:
-        // Employee flow -> Send KYC Link ONLY (No password in URL, No credentials email)
-        // Superadmin flow -> Send Login Credentials email directly (Direct onboarding)
+        // 🔒 SECURITY GUARD: Employee-submitted owners must NOT have credentials set at creation.
+        // Credentials (login/password) are ONLY assigned upon SuperAdmin approval via approveOwner.
+        if (isEmpSub) {
+            delete ownerData.credentials;
+            delete ownerData.checkinPassword;
+            console.log(`🔒 [OwnerPOST] Employee-submitted owner — credentials stripped. Will be set on SuperAdmin approval.`);
+        }
+        const owner = new Owner(ownerData);
+        owner.kyc = owner.kyc || {};
+        owner.kyc.status = 'sent';
+        await owner.save();
+        console.log('✅ Owner created with KYC Pending:', owner.loginId);
+
+        let generatedKycLink = '';
+
+        // ONLY send KYC Link email initially! DO NOT send password/credentials email at creation time!
         if (owner.email) {
             try {
                 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
-                const password = owner.credentials?.password || owner.checkinPassword || (req.body.credentials && req.body.credentials.password) || '';
                 const area = owner.locationCode || owner.area || '';
+                generatedKycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}`;
 
-                if (isEmpSub) {
-                    // Employee Flow: Send KYC Link only without password
-                    const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}`;
-                    await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
-                    owner.kyc = owner.kyc || {};
-                    owner.kyc.status = 'sent';
-                    await owner.save();
-                    console.log(`✉️ [Employee Flow] KYC link sent to ${owner.email} for pending owner ${owner.loginId}`);
-                } else {
-                    // Superadmin Flow: Send login credentials directly
-                    if (mailer.sendCredentials) {
-                        await mailer.sendCredentials(owner.email, owner.loginId, password, 'Owner');
-                    }
-                    console.log(`✉️ [Superadmin Flow] Credentials email sent directly to ${owner.email} for active owner ${owner.loginId}`);
-                }
+                // Send standalone KYC link email ONLY
+                await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'RoomHy Asset Portal', generatedKycLink);
+                console.log(`✉️ KYC link email sent to ${owner.email} for owner ${owner.loginId}`);
             } catch (mailErr) {
-                console.warn('❌ Failed to send email for new Owner:', mailErr.message);
+                console.warn('❌ Failed to send KYC link email for new Owner:', mailErr.message);
             }
         }
 
-        res.status(201).json(owner);
+        res.status(201).json({
+            ...owner.toObject(),
+            kycLink: generatedKycLink
+        });
     } catch (err) {
         console.error('❌ Owner POST error:', err.message);
         if (err.code === 11000) {

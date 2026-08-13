@@ -328,7 +328,11 @@ router.post('/', protect, async (req, res) => {
       $or: [
         {
           status: 'active',
-          moveInDate: { $lte: now }
+          $or: [
+            { moveInDate: { $lte: now } },
+            { moveInDate: { $exists: false } },
+            { moveInDate: null }
+          ]
         },
         {
           status: 'inactive'

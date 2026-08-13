@@ -19,6 +19,9 @@ exports.getOwnerWalletBalance = async (req, res) => {
     // First auto-release any eligible held funds (move-in date + 24 hours)
     await processHeldWalletReleases().catch(() => {});
 
+    const Rent = require('../models/Rent');
+    const RentPayment = require('../models/RentPayment');
+
     const owner = await Owner.findOne({
       $or: [{ loginId }, { _id: req.user?._id }]
     }).lean();
@@ -28,15 +31,17 @@ exports.getOwnerWalletBalance = async (req, res) => {
     }
 
     // Fetch transactions & booking requests
-    const [heldTx, availableTx, payoutLogs, allOwnerTxs, ownerBookings] = await Promise.all([
+    const [heldTx, availableTx, payoutLogs, ownerBookings, rentPayments, rents] = await Promise.all([
       PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }], wallet_status: 'held' }).sort({ createdAt: -1 }).lean(),
       PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }], wallet_status: 'available' }).sort({ createdAt: -1 }).lean(),
       PayoutRequest.find({ login_id: loginId, user_type: 'owner' }).sort({ createdAt: -1 }).lean(),
-      PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }] }).lean(),
       BookingRequest.find({
         $or: [{ owner_id: loginId }, { ownerLoginId: loginId }],
         paymentStatus: { $in: ['PAID', 'completed'] }
-      }).lean()
+      }).lean(),
+      // 💰 Include manual/cash rent payments recorded by admin (RentPayment uses ObjectId, not loginId)
+      RentPayment.find({ ownerId: owner._id }).sort({ createdAt: -1 }).lean().catch(() => []),
+      Rent.find({ ownerLoginId: loginId, ownerPayoutStatus: 'paid' }).sort({ createdAt: -1 }).lean().catch(() => []),
     ]);
 
     let liveHeld = owner.heldBalance || 0;
@@ -47,6 +52,19 @@ exports.getOwnerWalletBalance = async (req, res) => {
 
     if (calcHeld > 0) liveHeld = Math.max(liveHeld, calcHeld);
     if (calcAvail > 0) liveAvailable = Math.max(liveAvailable, calcAvail);
+
+    // 💰 Add manual RentPayments (admin recorded cash/bank transfers)
+    const rentPaymentSum = rentPayments.reduce((s, r) => s + (r.amount || r.paidAmount || 0), 0);
+    const rentSum = rents.reduce((s, r) => s + (r.paidAmount || r.amount || 0), 0);
+    const manualTotal = Math.max(rentPaymentSum, rentSum); // take the larger to avoid double-count
+
+    if (manualTotal > 0) {
+      // Subtract already-withdrawn amount so we don't show withdrawn funds as available
+      const withdrawn = owner.withdrawnBalance || 0;
+      const manualAvailable = Math.max(0, manualTotal - withdrawn);
+      liveAvailable = Math.max(liveAvailable, manualAvailable);
+      console.log(`💰 [WalletCtrl] Owner ${loginId}: RentPayment sum ₹${rentPaymentSum}, Rent sum ₹${rentSum}, manualAvailable ₹${manualAvailable}`);
+    }
 
     // Fallback: If no transaction objects, but confirmed paid booking requests exist
     if (liveHeld === 0 && liveAvailable === 0 && ownerBookings.length > 0) {

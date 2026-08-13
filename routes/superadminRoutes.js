@@ -2123,9 +2123,12 @@ router.get('/support/tickets', protect, authorize('superadmin', 'areamanager', '
 router.post('/support/tickets', protect, authorize('superadmin', 'owner'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
+    const Employee = require('../models/Employee');
+    const Property = require('../models/Property');
     const {
       ticket_type, raised_by_name, raised_by_role, property_name, booking_id,
-      owner_name, subject, description, priority, assigned_admin, assigned_admin_name
+      owner_name, subject, description, priority, assigned_admin, assigned_admin_name,
+      property_id, city, area
     } = req.body;
 
     if (!subject || !description) {
@@ -2134,28 +2137,70 @@ router.post('/support/tickets', protect, authorize('superadmin', 'owner'), async
 
     const isOwner = req.user?.role === 'owner';
 
+    let resolvedCity = city || null;
+    let resolvedArea = area || null;
+    let resolvedPropertyName = property_name || null;
+
+    // Auto-resolve city/area from property if not explicitly provided
+    if ((!resolvedCity || !resolvedArea) && property_id) {
+      try {
+        const prop = await Property.findById(property_id).select('city area title locationCode').lean();
+        if (prop) {
+          resolvedCity = resolvedCity || prop.city || null;
+          resolvedArea = resolvedArea || prop.area || null;
+          resolvedPropertyName = resolvedPropertyName || prop.title || null;
+        }
+      } catch (_) {}
+    }
+
+    // Auto-assign to employee of matching city/area if no explicit assignee provided
+    let autoAssignedAdmin = assigned_admin || null;
+    let autoAssignedAdminName = assigned_admin_name || null;
+    if (!autoAssignedAdmin && resolvedCity) {
+      try {
+        const areaEmployee = await Employee.findOne({
+          $or: [
+            { city: resolvedCity, area: resolvedArea },
+            { city: resolvedCity, areaCode: resolvedArea },
+            { locationCode: resolvedArea }
+          ],
+          role: { $in: ['employee', 'manager', 'areamanager'] }
+        }).select('name loginId role').lean();
+        if (areaEmployee) {
+          autoAssignedAdmin = areaEmployee.loginId;
+          autoAssignedAdminName = areaEmployee.name;
+        }
+      } catch (_) {}
+    }
+
     const ticket = new SupportTicket({
       ticket_type: ticket_type || (isOwner ? 'Owner Complaint' : 'Other'),
       raised_by: req.user?.loginId || req.user?._id || 'superadmin',
       raised_by_name: raised_by_name || req.user?.name || (isOwner ? 'Property Owner' : 'Super Admin'),
       raised_by_role: raised_by_role || (isOwner ? 'property_owner' : 'system'),
-      property_name: property_name || null,
+      property_id: property_id || null,
+      property_name: resolvedPropertyName,
       booking_id: booking_id || null,
       owner_name: owner_name || (isOwner ? req.user?.name : null),
+      city: resolvedCity,
+      area: resolvedArea,
+      location_code: resolvedArea,
       subject,
       description,
       priority: priority || 'Medium',
-      status: (assigned_admin_name || assigned_admin) ? 'Assigned' : 'Open',
-      assigned_admin: assigned_admin || null,
-      assigned_admin_name: assigned_admin_name || null,
-      assigned_at: (assigned_admin || assigned_admin_name) ? new Date() : null,
+      status: (autoAssignedAdminName || autoAssignedAdmin) ? 'Assigned' : 'Open',
+      assigned_admin: autoAssignedAdmin,
+      assigned_admin_name: autoAssignedAdminName,
+      assigned_at: (autoAssignedAdmin || autoAssignedAdminName) ? new Date() : null,
       activity_log: [{
         action: 'Ticket Created',
         performed_by: req.user?.loginId || req.user?._id || 'superadmin',
         performed_by_name: req.user?.name || 'Super Admin',
         from_status: null,
-        to_status: (assigned_admin || assigned_admin_name) ? 'Assigned' : 'Open',
-        note: isOwner ? 'Registered by property owner' : 'Registered by superadmin',
+        to_status: (autoAssignedAdmin || autoAssignedAdminName) ? 'Assigned' : 'Open',
+        note: autoAssignedAdminName
+          ? `Auto-assigned to ${autoAssignedAdminName} (${resolvedArea || resolvedCity || 'area'})`
+          : (isOwner ? 'Registered by property owner' : 'Registered by superadmin'),
         at: new Date()
       }]
     });
@@ -2172,13 +2217,13 @@ router.post('/support/tickets', protect, authorize('superadmin', 'owner'), async
         method: 'POST',
         path: req.originalUrl || '/api/superadmin/support/tickets',
         statusCode: 201,
-        payload: { ticketId: ticket._id, subject }
+        payload: { ticketId: ticket._id, subject, autoAssigned: !!autoAssignedAdminName }
       });
     } catch (auditErr) {
       console.warn('Support ticket create audit log failed:', auditErr.message);
     }
 
-    res.status(201).json({ success: true, ticket });
+    res.status(201).json({ success: true, ticket, auto_assigned: !!autoAssignedAdminName });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

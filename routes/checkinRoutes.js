@@ -874,30 +874,45 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
         const record = await upsertRecord(loginId, 'owner', { 'ownerKyc.otpVerified': true });
 
         // Get owner details
-        const owner = await Owner.findOne({ loginId: String(loginId).toUpperCase() });
-        const isPendingOwner = Boolean(!owner || owner.isEmployeeSubmitted || owner.status === 'pending_approval' || owner.isActive === false);
+        const normalizedLoginId = String(loginId).toUpperCase();
+        const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId });
+        const ownerEmail = ownerDoc?.email || record?.ownerProfile?.email || '';
+        const ownerPassword = ownerDoc?.checkinPassword || ownerDoc?.credentials?.password || record?.ownerProfile?.password || 'Roomhy@123';
         
         const updatedOwner = await Owner.findOneAndUpdate(
-            { loginId: String(loginId).toUpperCase() },
+            { loginId: normalizedLoginId },
             {
                 $set: {
                     'kyc.status': 'verified',
                     kycStatus: 'verified',
                     'kyc.submittedAt': new Date(),
                     'kyc.verifiedAt': new Date(),
-                    isActive: isPendingOwner ? false : true,
-                    status: isPendingOwner ? 'pending_approval' : (owner?.status || 'active'),
-                    isEmployeeSubmitted: isPendingOwner
+                    isActive: true,
+                    status: 'approved',
+                    credentials: {
+                        password: ownerPassword,
+                        firstTime: true
+                    }
                 },
             },
             { new: true }
         );
 
-        // Send login credentials email ONLY if owner was created by Superadmin & already active
-        if (owner && owner.email && !isPendingOwner && owner.isActive === true) {
-            const baseUrl = APP_URL;
-            const ownerPassword = owner.checkinPassword || owner.credentials?.password || 'default';
-            const fullLoginUrl = `${baseUrl}/propertyowner/index`;
+        // Sync User model if exists
+        try {
+            const User = require('../models/user');
+            await User.updateOne(
+                { $or: [{ loginId: normalizedLoginId }, { email: ownerEmail }] },
+                { $set: { isActive: true, status: 'active' } }
+            );
+        } catch (uErr) {
+            console.warn('Sync User on owner KYC verify warning:', uErr.message);
+        }
+
+        // Send login credentials email now that KYC is verified!
+        if (ownerEmail) {
+            const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
+            const fullLoginUrl = `${APP_URL}/propertyowner/ownerlogin`;
             
             const emailHtml = `
                 <!DOCTYPE html>
@@ -905,42 +920,39 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
                 <head>
                     <meta charset="UTF-8">
                     <style>
-                        body { font-family: 'Arial', sans-serif; line-height: 1.6; color: #333; }
-                        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
-                        .header { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
-                        .header h1 { margin: 0; font-size: 28px; }
-                        .content { padding: 30px; background: #f8fafc; }
-                        .credentials { background: white; border-left: 4px solid #4caf50; padding: 15px; margin: 20px 0; border-radius: 4px; }
-                        .credentials p { margin: 8px 0; }
+                        body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+                        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
+                        .header { background: linear-gradient(135deg, #16a34a 0%, #15803d 100%); color: white; padding: 30px; text-align: center; border-radius: 12px 12px 0 0; }
+                        .header h1 { margin: 0; font-size: 26px; }
+                        .content { padding: 30px; background: #ffffff; }
+                        .credentials { background: #f0fdf4; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0; border-radius: 8px; }
+                        .credentials p { margin: 8px 0; font-size: 15px; }
                         .label { font-weight: bold; color: #333; }
-                        .value { font-family: monospace; color: #2563eb; }
-                        .button { display: inline-block; background: #2563eb; color: white; padding: 12px 30px; text-decoration: none; border-radius: 4px; margin-top: 15px; font-weight: bold; }
-                        .footer { text-align: center; padding: 20px; font-size: 12px; color: #999; border-top: 1px solid #eee; }
-                        .success { color: #4caf50; font-weight: bold; font-size: 18px; margin-bottom: 15px; }
+                        .value { font-family: monospace; color: #16a34a; font-weight: bold; font-size: 16px; }
+                        .button { display: inline-block; background: #16a34a; color: white !important; padding: 14px 32px; text-decoration: none; border-radius: 8px; margin-top: 15px; font-weight: bold; }
+                        .success { color: #16a34a; font-weight: bold; font-size: 18px; margin-bottom: 15px; }
                     </style>
                 </head>
                 <body>
                     <div class="container">
                         <div class="header">
-                            <h1>✓ KYC Verified Successfully!</h1>
+                            <h1>✓ KYC Verification Completed!</h1>
                         </div>
                         <div class="content">
-                            <p>Hi <strong>${owner.name || 'Owner'}</strong>,</p>
+                            <p>Dear <strong>${ownerDoc?.name || updatedOwner?.name || 'Property Owner'}</strong>,</p>
                             
-                            <div class="success">🎉 Your Aadhaar verification is complete!</div>
+                            <div class="success">🎉 Your Digital KYC Verification is Successful!</div>
                             
-                            <p>Your RoomHy owner account has been activated. You can now log in to manage your properties and respond to tenant inquiries.</p>
+                            <p>Your RoomHy Property Owner account is now active. Below are your login credentials to access the Owner Portal:</p>
                             
                             <div class="credentials">
-                                <p><span class="label">Login ID:</span> <span class="value">${owner.loginId}</span></p>
-                                <p><span class="label">Password:</span> <span class="value">${owner.checkinPassword || owner.credentials?.password || '[Set during registration]'}</span></p>
-                                <p><span class="label">Email:</span> <span class="value">${owner.email}</span></p>
-                                <p><span class="label">Area:</span> <span class="value">${owner.checkinArea || '-'}</span></p>
+                                <p><span class="label">Login ID / Username:</span> <span class="value">${updatedOwner.loginId}</span></p>
+                                <p><span class="label">Password:</span> <span class="value">${ownerPassword}</span></p>
                             </div>
 
-                            <p style="margin-top: 20px;">
-                                <a href="${fullLoginUrl}" class="button">🔓 Go to Owner Dashboard</a>
-                            </p>
+                            <div style="text-align: center; margin-top: 25px;">
+                                <a href="${fullLoginUrl}" class="button">Log In to Owner Portal</a>
+                            </div>
                         </div>
                     </div>
                 </body>
@@ -948,13 +960,11 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
             `;
 
             try {
-                await sendMail(owner.email, '✓ Welcome to RoomHy Owner Platform - Your login details', '', emailHtml);
-                console.log('[CHECKIN KYC] Sent login email to:', owner.email);
+                await sendMail(ownerEmail, '✓ KYC Verified — Your RoomHy Owner Login Credentials', '', emailHtml);
+                console.log('[CHECKIN KYC] Sent login credentials email to:', ownerEmail);
             } catch (emailErr) {
                 console.error('[CHECKIN KYC] Email error:', emailErr.message);
             }
-        } else {
-            console.log(`ℹ️ [CHECKIN KYC VERIFY OTP] Skipped credentials email for owner ${loginId} (Awaiting Superadmin Approval).`);
         }
 
         return res.json({ success: true, record, owner: updatedOwner, message: 'OTP verified successfully' });
@@ -1105,14 +1115,67 @@ router.post('/owner/kyc/digilocker/complete', otpIpLimiter, otpLimiter, async (r
             {
                 $set: {
                     'kyc.status': 'verified',
+                    kycStatus: 'verified',
                     'kyc.provider': 'digilocker',
                     'kyc.submittedAt': new Date(),
                     'kyc.verifiedAt': new Date(),
                     isActive: true,
+                    status: 'approved'
                 },
             },
             { new: true }
         );
+
+        if (owner && owner.email) {
+            try {
+                const ownerPassword = owner.checkinPassword || owner.credentials?.password || 'Roomhy@123';
+                const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
+                const fullLoginUrl = `${APP_URL}/propertyowner/ownerlogin`;
+                const emailHtml = `
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta charset="UTF-8">
+                        <style>
+                            body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
+                            .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
+                            .header { background: linear-gradient(135deg, #16a34a 0%, #15803d 100%); color: white; padding: 30px; text-align: center; border-radius: 12px 12px 0 0; }
+                            .header h1 { margin: 0; font-size: 26px; }
+                            .content { padding: 30px; background: #ffffff; }
+                            .credentials { background: #f0fdf4; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0; border-radius: 8px; }
+                            .credentials p { margin: 8px 0; font-size: 15px; }
+                            .label { font-weight: bold; color: #333; }
+                            .value { font-family: monospace; color: #16a34a; font-weight: bold; font-size: 16px; }
+                            .button { display: inline-block; background: #16a34a; color: white !important; padding: 14px 32px; text-decoration: none; border-radius: 8px; margin-top: 15px; font-weight: bold; }
+                            .success { color: #16a34a; font-weight: bold; font-size: 18px; margin-bottom: 15px; }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="container">
+                            <div class="header">
+                                <h1>✓ KYC Verification Completed!</h1>
+                            </div>
+                            <div class="content">
+                                <p>Dear <strong>${owner.name || 'Property Owner'}</strong>,</p>
+                                <div class="success">🎉 Your DigiLocker KYC Verification is Successful!</div>
+                                <p>Your RoomHy Property Owner account is now active. Below are your login credentials to access the Owner Portal:</p>
+                                <div class="credentials">
+                                    <p><span class="label">Login ID / Username:</span> <span class="value">${owner.loginId}</span></p>
+                                    <p><span class="label">Password:</span> <span class="value">${ownerPassword}</span></p>
+                                </div>
+                                <div style="text-align: center; margin-top: 25px;">
+                                    <a href="${fullLoginUrl}" class="button">Log In to Owner Portal</a>
+                                </div>
+                            </div>
+                        </div>
+                    </body>
+                    </html>
+                `;
+                await sendMail(owner.email, '✓ KYC Verified — Your RoomHy Owner Login Credentials', '', emailHtml);
+            } catch (mErr) {
+                console.error('[DIGILOCKER KYC] Email error:', mErr.message);
+            }
+        }
 
         return res.json({
             success: true,
@@ -1168,20 +1231,45 @@ router.post('/owner/final-submit', async (req, res) => {
         record.ownerSubmittedAt = new Date();
         await record.save();
 
-        await Owner.findOneAndUpdate(
-            { loginId: normalizedLoginId },
-            {
-                $set: {
-                    'kyc.status': 'verified',
-                    'kyc.verifiedAt': new Date(),
-                    isActive: true,
-                },
-            }
-        );
+        // 🔒 FIX: Employee-submitted owners must NOT be auto-activated on KYC completion.
+        // They remain inactive (isActive: false) until Superadmin explicitly approves them.
+        // Only superadmin-directly-added owners get auto-activated on KYC completion.
+        const freshOwner = await Owner.findOne({ loginId: normalizedLoginId });
+        const isPendingApproval = freshOwner && (freshOwner.isEmployeeSubmitted === true || freshOwner.status === 'pending_approval');
+
+        if (isPendingApproval) {
+            // Employee-submitted owner: mark KYC as 'submitted' (ready for review), keep inactive
+            await Owner.findOneAndUpdate(
+                { loginId: normalizedLoginId },
+                {
+                    $set: {
+                        'kyc.status': 'submitted',
+                        'kyc.submittedAt': new Date(),
+                        checkinSubmittedAt: new Date(),
+                        isActive: false, // stays inactive until superadmin approves
+                    },
+                }
+            );
+            console.log(`⏳ [CHECKIN FINAL SUBMIT] Employee-submitted owner ${normalizedLoginId} KYC submitted — awaiting Superadmin approval.`);
+        } else {
+            // Superadmin-added owner: auto-activate on KYC completion (original behavior)
+            await Owner.findOneAndUpdate(
+                { loginId: normalizedLoginId },
+                {
+                    $set: {
+                        'kyc.status': 'verified',
+                        'kyc.verifiedAt': new Date(),
+                        checkinSubmittedAt: new Date(),
+                        isActive: true,
+                    },
+                }
+            );
+            console.log(`✅ [CHECKIN FINAL SUBMIT] Superadmin-added owner ${normalizedLoginId} KYC verified & activated.`);
+        }
 
         // Send owner dashboard link email ONLY if owner account is active & approved by Superadmin.
         // For employee-submitted pending owners, login link will ONLY be sent when Superadmin approves the account!
-        const owner = ownerDoc || await Owner.findOne({ loginId: normalizedLoginId }).lean();
+        const owner = freshOwner || ownerDoc || await Owner.findOne({ loginId: normalizedLoginId }).lean();
         const targetEmail = (owner && owner.email) || (record.ownerProfile && record.ownerProfile.email) || '';
         const baseUrl = APP_URL;
         const dashboardUrl = `${baseUrl}/propertyowner/index`;

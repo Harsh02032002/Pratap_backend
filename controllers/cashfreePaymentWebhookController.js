@@ -80,6 +80,7 @@ exports.handlePaymentWebhook = async (req, res) => {
         let tx = await PaymentTransaction.findOne({ $or: txQuery }).catch(() => null);
         if (tx) {
           tx.status = 'Verified';
+          if (!tx.payout_status || tx.payout_status === 'Created') tx.payout_status = 'Pending';
           tx.wallet_status = 'held';
           tx.held_at = new Date();
           if (cfPaymentId) tx.cf_payment_id = cfPaymentId;
@@ -120,22 +121,32 @@ exports.handlePaymentWebhook = async (req, res) => {
 
             // Save Wallet Ledger / PaymentTransaction record if not already created
             if (!tx) {
+              const commPct = 5;
+              const commAmt = Math.round(paymentAmount * commPct / 100);
+              const ownerAmt = paymentAmount - commAmt;
+              
               await PaymentTransaction.create({
-                booking_id: booking?._id || rentInvoice?._id || rentRecord?._id || extractedId,
-                owner_id: owner._id,
-                owner_login_id: ownerLoginId,
-                tenant_login_id: tenantLoginId,
-                total_amount: paymentAmount,
-                commission: adminCommission,
-                owner_amount: ownerShare,
-                payment_method: paymentMethod,
-                status: 'Verified',
-                wallet_status: 'held',
-                held_at: new Date(),
-                cf_order_id: orderId,
-                cf_payment_id: cfPaymentId,
-                transaction_id: cfPaymentId || orderId,
-                notes: `Cashfree PG payment received for order ${orderId}`
+                booking_id:            String(booking?._id || rentInvoice?._id || rentRecord?._id || extractedId || `booking_${Date.now()}`),
+                property_id:           String(booking?.property_id || rentInvoice?.propertyId || rentRecord?.propertyId || 'N/A'),
+                property_name:         String(booking?.property_name || rentInvoice?.propertyName || rentRecord?.propertyName || ''),
+                tenant_id:             String(tenantLoginId || booking?.user_id || booking?.email || 'unknown'),
+                tenant_name:           String(booking?.name || rentInvoice?.tenantName || rentRecord?.tenantName || ''),
+                owner_id:              String(owner.loginId || owner._id),
+                owner_name:            String(owner.name || owner.profile?.name || booking?.owner_name || ''),
+                booking_amount:        paymentAmount,
+                commission_percentage: commPct,
+                commission_amount:     commAmt,
+                gst_percentage:        18,
+                gst_amount:            0,
+                owner_amount:          ownerAmt,
+                payout_status:         'Pending',
+                payment_method:        paymentMethod || 'cashfree',
+                status:                'Verified',
+                wallet_status:         'held',
+                held_at:               new Date(),
+                cf_order_id:           orderId,
+                cf_payment_id:         cfPaymentId,
+                notes:                 `Cashfree PG payment received for order ${orderId}`
               }).catch(err => console.warn('PaymentTransaction log warning:', err.message));
             }
           }

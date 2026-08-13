@@ -160,6 +160,7 @@ exports.createOrder = async (req, res) => {
       gst_amount:            gstAmount,
       owner_amount:          ownerAmount,
       status:                'Created',
+      payout_status:         'Pending',
       wallet_status:         'pending',
       payment_method:        'cashfree',
     });
@@ -463,7 +464,7 @@ exports.getPaymentStatus = async (req, res) => {
     if (isPaid && tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
       await PaymentTransaction.updateOne(
         { _id: tx._id },
-        { $set: { status: 'Verified', wallet_status: 'held', held_at: new Date() } }
+        { $set: { status: 'Verified', payout_status: 'Pending', wallet_status: 'held', held_at: new Date() } }
       ).catch(() => {});
     }
 

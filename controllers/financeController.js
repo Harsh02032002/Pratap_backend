@@ -207,13 +207,35 @@ exports.updateOwnerPayoutOption = async (req, res) => {
 exports.getPendingPayouts = async (req, res) => {
   try {
     const pending = await PaymentTransaction.find({ payout_status: { $in: ['Pending', 'Failed'] } })
-      .sort({ payment_date: 1 })
+      .sort({ payment_date: -1, createdAt: -1 })
       .lean();
-    res.json({ success: true, pending });
+
+    // Populate owner bank details for each pending transaction so the TransferModal can auto-fill them
+    const enriched = await Promise.all(
+      pending.map(async (tx) => {
+        // If bank details already stored on transaction, use them
+        if (tx.payout_account_number) return tx;
+        try {
+          const owner = await Owner.findOne({ loginId: tx.owner_id })
+            .select('checkinAccountHolderName checkinBankAccountNumber checkinIfscCode checkinBankName name profile accountNumber ifscCode bankName')
+            .lean();
+          if (owner) {
+            tx.payout_account_holder = owner.checkinAccountHolderName || owner.name || owner.profile?.name || '';
+            tx.payout_account_number = owner.checkinBankAccountNumber || owner.accountNumber || owner.profile?.accountNumber || '';
+            tx.payout_ifsc_code = owner.checkinIfscCode || owner.ifscCode || owner.profile?.ifscCode || '';
+            tx.payout_bank_name = owner.checkinBankName || owner.bankName || owner.profile?.bankName || '';
+          }
+        } catch (_) {}
+        return tx;
+      })
+    );
+
+    res.json({ success: true, pending: enriched });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 exports.processPayout = async (req, res) => {
   try {

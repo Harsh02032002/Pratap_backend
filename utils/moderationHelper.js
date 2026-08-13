@@ -139,7 +139,6 @@ function detectViolation(text, settings = {}) {
   if (!text) return { violation: null, maskedText: '' };
 
   // 0. Official RoomHy Links & Payment Messages Exemption Check
-  // Official system payment links (e.g. roomhy.com/website/pay, CashFree, etc.) are NEVER policy violations!
   const isOfficialRoomhyMsg = (
     text.includes('roomhy.com') ||
     text.includes('app.roomhy.com') ||
@@ -163,11 +162,10 @@ function detectViolation(text, settings = {}) {
   if (isShortChatter && !hasDigitsOrUrl && shortExemptPattern.test(trimmed)) {
     return { violation: null, maskedText: text };
   }
-  
+
   const blockPhone = settings.blockPhoneNumbers !== false;
   const blockEmail = settings.blockEmails !== false;
   const blockLink = settings.blockLinks !== false;
-  const strict = settings.strictModeration !== false;
 
   let msgText = text;
   let violationType = null;
@@ -186,23 +184,20 @@ function detectViolation(text, settings = {}) {
   // 2. Phone Number Check (Raw 10 digits, spaced out, or word-based)
   if (blockPhone) {
     const phoneRegex = /(\+?\d{1,4}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
-    // Strip URLs before digit extraction so hex Mongo ObjectIds in links don't trigger false 10-digit phone detection
     const textWithoutUrls = msgText.replace(/(https?:\/\/[^\s]+|www\.[^\s]+)/gi, '');
     const cleanDigits = textWithoutUrls.replace(/[\s\-().,_/*]/g, '');
     const hasTenDigits = /\d{10}/.test(cleanDigits);
-    
-    // Check for spaced digits e.g. 9 8 7 6 5 4 3 2 1 0, or with hyphens/dots
+
     const spacedDigitsRegex = /(\d[\s\-.,_*/]*){10,12}/g;
     spacedDigitsRegex.lastIndex = 0;
     const hasSpacedDigits = spacedDigitsRegex.test(msgText);
 
-    // Check for word-based numbers e.g. "nine eight..." including Hinglish
     const numWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ek', 'teen', 'chaar', 'char', 'paanch', 'panch', 'chhe', 'che', 'saat', 'aath', 'nau', 'noo', 'shunya', 'double', 'triple'];
     let wordNumCount = 0;
     const lowerText = msgText.toLowerCase();
     numWords.forEach(word => {
-      const regex = new RegExp(`\\b${word}\\b`, 'gi');
-      const matches = lowerText.match(regex);
+      const wRx = new RegExp(`\\b${word}\\b`, 'gi');
+      const matches = lowerText.match(wRx);
       if (matches) wordNumCount += matches.length;
     });
 
@@ -236,7 +231,7 @@ function detectViolation(text, settings = {}) {
     msgText = msgText.replace(socialRegex, '[MASKED SOCIAL]');
   }
 
-  // 5. External Link Check (excluding official website domains & payment links)
+  // 5. External Link Check
   if (blockLink) {
     const linkRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
     linkRegex.lastIndex = 0;
@@ -253,22 +248,15 @@ function detectViolation(text, settings = {}) {
 
   // 6. External Settlement & Commission Bypass Keywords
   const bypassKeywords = [
-    // Social Media Handles & Keywords
     /\B@[a-zA-Z0-9_]{3,30}\b/i,
     /\b(insta|instagram|ig|telegram|tg|facebook|fb|snapchat|snap|linkedin|twitter|x\.com|social\s+media|social\s+handle|same\s+username|handle\s+wahi)\b/i,
-    
-    // Email & Mail contextual checks (avoids false positives on general mail/email words)
     /\b(via|through|on|share|send|write|give|my)\s+(email|mail|gmail|yahoo|hotmail|outlook)\b/i,
     /\b(email|mail|gmail|yahoo|hotmail|outlook)\s+(id|address)\b/i,
     /\b(email|mail|gmail|yahoo|hotmail|outlook)\s+(par|pe)\s+(bhej\w*|send\w*|de\w*|share\w*|karo|kr|kro)\b/i,
     /\b(mail|email)\s+(me|mujhe|us)\b/i,
-    
-    // WhatsApp & Messaging Variations
     /\b(whatsapp|watsapp|watsp|wtsp|green\s+app)\b/i,
     /\b(wa|wp)\s*(pe|par|msg|message|chat|contact|no|num|number)\b/i,
     /\b(msg|message|chat|contact|no|num|number)\s*(wa|wp)\b/i,
-    
-    // Indirect Messaging Apps & Profile (Meta app, Purple app, Call wali app, DP, initials)
     /\b(meta|purple|call\s+wali|photo\s+sharing|meta\s+photo|reels|reels\s+wali|green|blue)\s+([a-zA-Z]*\s+)?app\b/i,
     /\bDP\s*(dikhegi|dikhe|dekh|check|profile|photo|wahi|same|pe|par)\b/i,
     /\b(profile|my|meri)\s+DP\b/i,
@@ -277,35 +265,23 @@ function detectViolation(text, settings = {}) {
     /\binitials\s*(search|yaad)?\b/i,
     /\bgoogle\s*(karo|kr|kro|search|kar\s+lena)?\b/i,
     /\b(net\s+par|net\s+pe|profile\s+picture|same\s+id)\b/i,
-    
-    // Booking Cancellation & Platform Bypass
     /\bbooking\s+cancel\b/i,
     /\bcancel\s+booking\b/i,
     /\bcancel\s+(kardo|krdo|kar\s+do|kr\s+do|karke|krke|karna|krna|karwa|krwa)\b/i,
     /\bplatform\s*(ki|ko|se|par|fees|charge|commission|brokerage)?\s*(zaroorat|beech|mat|bachao|save|bypass|hata)\b/i,
     /\b(commission|comm|brokerage|fees|charge|charges)\s*([a-zA-Z]*\s+){0,2}(save|bach|bacha|bachao|bachayein|saving|cut|discount|kyu|kyun|bahao|nahi|na|mat|deni)\b/i,
     /\b(no\s+brokerage|save\s+commission|brokerage\s+bach|bypass\s+commission|without\s+commission)\b/i,
-    
-    // Payment & Arrival Bypass Patterns (Specific offline deal instructions only)
-    /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s*cash|direct\s*cash)\b/i,
+    /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s+cash|direct\s+cash)\b/i,
     /\boffline\s+(cash|payment|deal|transfer|settlement)\b/i,
     /\b(cash|payment|deal|transfer|settlement)\s+offline\b/i,
     /\bdirect\s+(cash|payment|offline|deal|account\s+transfer)\b/i,
-    
-    // Steering away from platform
     /\b(app|platform)\s+se\s+bahar\b/i,
-    
-    // Contact details request / share
     /\b(number|no|num|contact|mobile|phone|phn|call)\s+([a-zA-Z]*\s+){0,2}(bhej\w*|de\w*|share\w*|note\w*|kar|kr|karo|kro|lena|le|karta|likha)\b/i,
     /\b(bhej\w*|de\w*|share\w*|note\w*)\s+([a-zA-Z]*\s+){0,2}(number|no|num|contact|mobile|phone|phn|call)\b/i,
     /\b(call|phone|phn|baat\w*|connect\w*)\s+([a-zA-Z]*\s+){0,2}(kar|kr|karo|kro|lena|le)\b/i,
     /\bboard\s+(pe|par)\s+number\b/i,
-    
-    // Payment Bypass Specifics
     /\b(advance|deposit|payment|rent|money|paise|paisa|cash|account|kharcha|kharch)\s+([a-zA-Z]*\s+){0,2}(direct|offline|cash|transfer|account|bhej\w*|de\w*|mat|outside|bach|save|wahin)\b/i,
     /\b(direct|offline|cash|transfer|account|outside|bach|save|wahin)\s+([a-zA-Z]*\s+){0,2}(advance|deposit|payment|rent|money|paise|paisa|cash|account|pay\w*|kharcha|kharch)\b/i,
-    
-    // Coded Settlement / Bypassing terms
     /\b(dalal|middleman|beech\s+wala|teesra\s+beech)\s+(hata|mat|na)\b/i,
     /\bseedha\s+(hisaab|hisab|len\s*den|deal\w*|payment|pay\w*|malik|kirayedar|owner|tenant|baat\w*|nahi)\b/i,
     /\b(apas|aapas)\s+mein\s+(deal|payment|cash|settle|hisaab)\b/i,
@@ -313,58 +289,37 @@ function detectViolation(text, settings = {}) {
     /\bopen\s+me(in)?\s+nahi\b/i,
     /\b(pg|hostel)\s+(pe|par|me|in)\s+mil\w*\b/i,
     /\bbeech\s+(ka|ko|se|me|mein|wala|wale|waale)\b/i,
-    
-    // Smart / Hidden Intent
     /\b(samajh\s+jao|samajh\s+gaya|samajh\s+gaye|samajh\s+rhe|samajh\s+rahe|samajhdar|ishara)\b/i,
     /\b(outside\s+website|external\s+link|other\s+website)\b/i,
     /\b(koi\s+aur\s+tareeka|skip\s+formalities|formalities\s+skip|bina\s+app)\b/i,
-    
-    // Specific custom sentences from user sets
-    /\b(extra\s+lagega|doosra\s+option|bacha\s+sakta|dono\s+ka\s+fayda|unnecessary\s+cost|sasta\s+padega|bina\s+platform|aapka\s+benefit|benefit\s+hai|sasta\s+padega|kharcha\s+bach|bach\s+jayega|fayda\s+ho)\b/i,
+    /\b(extra\s+lagega|doosra\s+option|bacha\s+sakta|dono\s+ka\s+fayda|unnecessary\s+cost|sasta\s+padega|bina\s+platform|aapka\s+benefit|benefit\s+hai|kharcha\s+bach|bach\s+jayega|fayda\s+ho)\b/i,
     /\b(watchman|reception|gate\s+pe|owner\s+se\s+mil\w*|milkar\s+final|face\s+to\s+face\s+clear|har\s+jagah\s+isi\s+naam|net\s+par\s+mil\w*|profile\s+picture\s+pehchan|same\s+id\s+har\s+app|rules\s+ki\s+wajah|hint\s+de\s+diya|samne\s+baith|personally\s+mil\w*|property\s+par\s+mil\w*|wahin\s+details|aane\s+ke\s+baad|hostel\s+mein\s+hi|same\s+username|handle\s+wahi)\b/i,
-    /\b(gate\s+pe\s+aa|watchman\s+ko\s+mera|owner\s+se\s+milwa\w*|direct\s+location|face\s+to\s+face\s+clear|har\s+jagah\s+isi\s+naam|net\s+par\s+mil\w*|google\s+kar\s+lena|search\s+karoge|same\s+id|initials\s+yaad|booking\s+ki\s+zaroorat|entry\s+ke\s+time|deposit\s+wahin|cash\s+preferred|online\s+mat|details\s+de\s+dunga|smart\s+banna|baaki\s+([a-zA-Z]*\s+){0,2}mil\w*|visit\s+ke\s+baad|property\s+par\s+mil\w*|meta\s+wali|blue\s+app|same\s+username|handle\s+wahi)\b/i,
-
-    // Contextual property visit
+    /\b(gate\s+pe\s+aa|watchman\s+ko\s+mera|owner\s+se\s+milwa\w*|direct\s+location|google\s+kar\s+lena|search\s+karoge|same\s+id|initials\s+yaad|booking\s+ki\s+zaroorat|entry\s+ke\s+time|deposit\s+wahin|cash\s+preferred|online\s+mat|details\s+de\s+dunga|smart\s+banna|visit\s+ke\s+baad|property\s+par\s+mil\w*|meta\s+wali|blue\s+app|same\s+username|handle\s+wahi)\b/i,
     /\b(property\s+)?visit\s+([a-zA-Z]*\s+){0,3}(pe\s+)?(discuss\w*|baat\w*|final\w*|settle\w*|deal\w*|decide\w*|mil\w*|connect\w*)\b/i,
     /\b(discuss\w*|baat\w*|final\w*|settle\w*|deal\w*|decide\w*|mil\w*|connect\w*)\s+([a-zA-Z]*\s+){0,3}(pe\s+)?property\s+visit\b/i,
-    
-    // Milkar discuss / Baat krna milke
     /\bmil(kar|ke|te)\s+([a-zA-Z]*\s+){0,3}(discuss|baat|final|settle|deal)\b/i,
     /\b(discuss|baat|final|settle|deal)\s+([a-zA-Z]*\s+){0,3}mil(kar|ke|te)\b/i,
-    
-    // Baaki milne par
     /\bbaaki\s+([a-zA-Z]*\s+){0,2}mil\w*\b/i,
-    
-    // Wahan pahunch kar settle / decide
     /\b(wahan|wahin|location|pg|hostel|flat|apartment|gate|address)\s+([a-zA-Z]*\s+){0,3}(settle\w*|deal\w*|pay\w*|payment\w*|baat\w*|discuss\w*|final\w*|decide\w*)\b/i,
     /\b(settle\w*|deal\w*|pay\w*|payment\w*|baat\w*|discuss\w*|final\w*|decide\w*)\s+([a-zA-Z]*\s+){0,3}(wahan|wahin|location|pg|hostel|flat|apartment|gate|address)\b/i,
-    
-    // Online ki zaroorat nahi
     /\bonline\s+([a-zA-Z]*\s+){0,2}(mat|nahi|na|no|skip|avoid|zaroorat)\b/i,
     /\b(mat|nahi|na|no|skip|avoid|zaroorat)\s+([a-zA-Z]*\s+){0,2}online\b/i,
-    
-    // Bina beech wale ke / Bina beech
     /\bbina\s+([a-zA-Z]*\s+){0,2}beech\b/i,
-    
-    // Owner ka naam yaad rakhna
     /\b(owner|malik)\s+([a-zA-Z]*\s+){0,2}(naam|name)\b/i,
-    
-    // App ke bina
     /\b(app|platform)\s+([a-zA-Z]*\s+){0,2}bina\b/i,
     /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i
   ];
-  
-  // Clean "payment link", official payment URLs, and "pasand aaya" to avoid false blocks on official link referrals and safe room liked indicators
+
+  // Clean payment links and safe phrases before bypass check
   let cleanBypassText = msgText;
   const officialUrls = [
     /https?:\/\/(www\.)?roomhy\.com\/website\/pay[^\s]*/gi,
     /https?:\/\/localhost(:\d+)?\/website\/pay[^\s]*/gi,
     /https?:\/\/127\.0\.0\.1(:\d+)?\/website\/pay[^\s]*/gi
   ];
-  officialUrls.forEach(urlRegex => {
-    cleanBypassText = cleanBypassText.replace(urlRegex, '');
+  officialUrls.forEach(urlRx => {
+    cleanBypassText = cleanBypassText.replace(urlRx, '');
   });
-
   cleanBypassText = cleanBypassText
     .replace(/\bpayment\s+link\b/gi, '')
     .replace(/\bpasand\s+aay\w*\b/gi, '');
@@ -378,16 +333,81 @@ function detectViolation(text, settings = {}) {
   if (settings.blockedKeywords && Array.isArray(settings.blockedKeywords)) {
     settings.blockedKeywords.forEach(kw => {
       if (kw && kw.trim()) {
-        const regex = new RegExp(`\\b${kw.trim()}\\b`, 'gi');
-        if (regex.test(msgText)) {
+        const kwRx = new RegExp(`\\b${kw.trim()}\\b`, 'gi');
+        if (kwRx.test(msgText)) {
           if (!violationType) violationType = 'commission_bypass';
-          msgText = msgText.replace(regex, '[CENSORED]');
+          msgText = msgText.replace(kwRx, '[CENSORED]');
         }
       }
     });
   }
 
   return { violation: violationType, maskedText: msgText };
+}
+
+// Helper to record or group violation attempts (consecutive messages in same session = Attempt 1)
+async function recordOrGroupViolation(ownerId, offenderId, participantName, tenantId, tenantName, roomId, violationType, messageSnippet, messageId, confidence, reason, decision) {
+  const ChatViolation = mongoose.model('ChatViolation');
+
+  // Find all violations for this specific owner/offender PAIR only (not any random violation)
+  const pairViolations = await ChatViolation.find({
+    $or: [
+      { ownerId, participantLoginId: offenderId },
+      { ownerId: offenderId, participantLoginId: ownerId }
+    ]
+  }).sort({ createdAt: -1 });
+
+  const latestViolation = pairViolations[0] || null;
+
+  const ATTEMPT_SESSION_WINDOW = 5 * 60 * 1000; // 5 minutes grouping window for consecutive messages
+  const isSameSession = latestViolation && (Date.now() - new Date(latestViolation.createdAt).getTime() < ATTEMPT_SESSION_WINDOW);
+
+  if (isSameSession) {
+    // Group into same attempt — DO NOT create a new violation document!
+    const cleanSnippet = String(messageSnippet || '').slice(0, 300);
+    if (!latestViolation.messageSnippet.includes(cleanSnippet)) {
+      latestViolation.messageSnippet = `${latestViolation.messageSnippet} | ${cleanSnippet}`;
+      latestViolation.updatedAt = new Date();
+      await latestViolation.save();
+    }
+    console.log(`ℹ️ Grouped consecutive message into Attempt ${latestViolation.attemptNumber || 1} for ${offenderId}`);
+    return { violation: latestViolation, attemptNumber: latestViolation.attemptNumber || 1, isNewAttempt: false };
+  }
+
+  // Genuinely NEW session/attempt — count existing pair documents to determine attempt number
+  const distinctAttempts = pairViolations.length; // each saved doc = 1 past session
+  const attemptNumber = distinctAttempts + 1;
+
+  const violation = new ChatViolation({
+    participantLoginId: offenderId,
+    participantName,
+    ownerId,
+    ownerName: participantName,
+    tenantId,
+    tenantName,
+    conversationId: roomId,
+    violationType: violationType || 'commission_bypass',
+    messageSnippet: String(messageSnippet || '').slice(0, 500),
+    messageId: messageId || null,
+    attemptNumber,
+    aiConfidence: confidence || 0.95,
+    aiReason: reason || '',
+    aiDecision: decision || null,
+    moderatedAt: new Date(),
+    status: 'New'
+  });
+
+  try {
+    await violation.save();
+  } catch (saveErr) {
+    if (saveErr.code === 11000) {
+      console.log(`[recordOrGroupViolation] Duplicate violation for message ${messageId} ignored.`);
+      return { violation: latestViolation, attemptNumber: latestViolation?.attemptNumber || 1, isNewAttempt: false };
+    }
+    throw saveErr;
+  }
+
+  return { violation, attemptNumber, isNewAttempt: true };
 }
 
 // Log violation and alert Super Admin
@@ -402,56 +422,28 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
     const tenantId = isSenderOwner ? receiverLoginId : senderLoginId;
     const tenantName = isSenderOwner ? receiver.name : sender.name;
 
-    // Cooldown check: If a violation was logged for this sender in the last 5 minutes, update snippet instead of adding a 2nd strike!
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const recentViolation = await ChatViolation.findOne({
-      participantLoginId: senderLoginId,
-      createdAt: { $gte: fiveMinutesAgo }
-    }).sort({ createdAt: -1 });
-
-    if (recentViolation) {
-      recentViolation.messageSnippet = `${recentViolation.messageSnippet} | ${messageText}`;
-      recentViolation.updatedAt = new Date();
-      await recentViolation.save();
-      console.log(`ℹ️ Merged split message into existing violation for ${senderLoginId}`);
-      return recentViolation;
-    }
-
-    const violation = new ChatViolation({
-      participantLoginId: senderLoginId,
-      participantName: sender.name,
+    const { violation, attemptNumber, isNewAttempt } = await recordOrGroupViolation(
       ownerId,
-      ownerName,
+      senderLoginId,
+      sender.name,
       tenantId,
       tenantName,
-      conversationId: receiverLoginId, // room_id of chat message
+      receiverLoginId,
       violationType,
-      messageSnippet: messageText,
-      messageId: messageId || null,
-      status: 'New'
-    });
-
-    await violation.save();
-
-    // Check violation count for this user/owner
-    const totalViolations = await ChatViolation.countDocuments({
-      $or: [
-        { ownerId },
-        { participantLoginId: ownerId },
-        { participantLoginId: senderLoginId }
-      ]
-    });
+      messageText,
+      messageId
+    );
 
     const ChatMessage = mongoose.model('ChatMessage');
 
-    if (totalViolations === 1) {
+    if (attemptNumber === 1 && isNewAttempt) {
       // Strike 1 Warning Message
       const strike1Msg = new ChatMessage({
         room_id: receiverLoginId,
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
-        message: `⚠️ ROOMHY POLICY WARNING (Strike 1 of 2): Sharing contact details, phone numbers, or offline payment deals is strictly prohibited. Next attempt will result in permanent account block.`,
+        message: `⚠️ ROOMHY POLICY WARNING (Attempt 1 of 2): Sharing contact details, phone numbers, or offline payment deals is strictly prohibited. Next attempt will result in permanent account block.`,
         message_type: 'system',
         is_read: false
       });
@@ -461,8 +453,8 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         global.io.to(receiverLoginId).emit('receive_message', strike1Msg);
         global.io.to(senderLoginId).emit('receive_message', strike1Msg);
       }
-    } else if (totalViolations >= 2) {
-      // Strike 2: Auto block owner and user account after 2 violations
+    } else if (attemptNumber >= 2 && isNewAttempt) {
+      // Strike 2: Auto block owner and user account after 2 genuine attempts
       await Promise.allSettled([
         Owner.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { isActive: false }),
         User.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { status: 'blocked', isActive: false })
@@ -473,7 +465,7 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
-        message: `🚨 ACCOUNT BLOCKED (Strike 2 of 2): Account (${ownerName}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
+        message: `🚨 ACCOUNT BLOCKED (Attempt 2 of 2): Account (${ownerName}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
         message_type: 'system',
         is_read: false
       });
@@ -482,13 +474,14 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
       if (global.io) {
         global.io.to(receiverLoginId).emit('receive_message', blockWarningMsg);
         global.io.to(senderLoginId).emit('receive_message', blockWarningMsg);
-        global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations });
+        global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations: attemptNumber });
       }
     }
- 
-    // Trigger Super Admin Notification & WebSocket Alert
-    await notifySuperAdminAlert(violation);
- 
+
+    if (isNewAttempt) {
+      await notifySuperAdminAlert(violation);
+    }
+
     return violation;
   } catch (err) {
     console.error('Error in logViolation:', err);
@@ -575,10 +568,9 @@ async function notifySuperAdminAlert(violation) {
   }
 }
 
-// Asynchronous background moderation function using Groq AI
+// Asynchronous background moderation function using Groq AI & local detection
 async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
   try {
-    // 1. Skip system messages, non-text, or messages that have already been moderated by AI
     if (
       !messageDoc ||
       messageDoc.sender_login_id === 'system' ||
@@ -589,19 +581,15 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     }
 
     const ChatMessage = mongoose.model('ChatMessage');
-    
-    // Check if already moderated
     const currentMsg = await ChatMessage.findById(messageDoc._id).lean();
     if (!currentMsg || currentMsg.aiModeratedAt) {
       return;
     }
 
-    // Determine roles
     const senderRole = messageDoc.sender_role || 'tenant';
     const receiverInfo = await getParticipantRoleAndName(receiverLoginId);
     const receiverRole = receiverInfo.role || 'property_owner';
 
-    // Retrieve original message text if it was masked/encrypted by local pre-save hook
     let messageText = messageDoc.message || '';
     if (messageDoc.original_message_encrypted) {
       try {
@@ -616,7 +604,6 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     const senderVariants = [...new Set([sender, sender.toLowerCase(), sender.toUpperCase()])];
     const receiverVariants = [...new Set([receiver, receiver.toLowerCase(), receiver.toUpperCase()])];
 
-    // Fetch last 8 messages of this specific 1:1 conversation context (both directions)
     const recentMessages = await ChatMessage.find({
       $or: [
         { room_id: { $in: receiverVariants }, sender_login_id: { $in: senderVariants } },
@@ -628,7 +615,6 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       .limit(8)
       .lean();
 
-    // Reverse them to chronological order
     recentMessages.reverse();
 
     const contextHistory = recentMessages.map(msg => {
@@ -640,87 +626,228 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       }
       const cleanRole = String(msg.sender_role || '').toLowerCase().trim();
       const roleLabel = (cleanRole === 'property_owner' || cleanRole === 'owner') ? 'Owner' : 'Tenant';
-        : `⚠️ ROOMHY SECURITY WARNING: Asking for offline payments, commission bypass, or sharing direct contact details is strictly prohibited. Continued violations will result in IMMEDIATE ACCOUNT BLOCK & PERMANENT SUSPENSION.`;
+      return `${roleLabel}: "${text}"`;
+    }).join('\n');
 
-      const systemMsgDoc = {
-        sender_login_id: 'system',
-        sender_name: 'Roomhy System',
-        sender_role: 'superadmin',
-        message: warningText,
-        message_type: 'system',
-        is_read: false,
-        created_at: new Date()
+    const settings = await ChatSettings.findOne({ ownerLoginId: 'SUPER_ADMIN' }).lean();
+    let localCheck = detectViolation(messageText, settings || {});
+
+    // Aggregate recent messages to detect split typing evasion (e.g. typing "de", "naa", "paise", "yahan")
+    const senderRecentTexts = recentMessages
+      .filter(m => String(m.sender_login_id).toLowerCase().trim() === String(messageDoc.sender_login_id).toLowerCase().trim())
+      .map(m => {
+        let t = m.message || '';
+        if (m.original_message_encrypted) {
+          try { t = ChatMessage.decryptText(m.original_message_encrypted); } catch (_) {}
+        }
+        return t;
+      });
+    senderRecentTexts.push(messageText);
+    const combinedSenderText = senderRecentTexts.join(' ');
+
+    if (!localCheck.violation) {
+      const combinedCheck = detectViolation(combinedSenderText, settings || {});
+      if (combinedCheck.violation) {
+        localCheck = combinedCheck;
+        console.log(`⚡ Multi-message Split Evasion Violation Detected on message ${messageDoc._id}:`, combinedCheck.violation);
+      }
+    }
+
+    let moderation = { violation: false, type: 'none', confidence: 0, reason: '' };
+
+    if (localCheck.violation) {
+      console.log(`⚡ Instant Local Violation Detected on message ${messageDoc._id}:`, localCheck.violation);
+      moderation = {
+        violation: true,
+        type: localCheck.violation,
+        confidence: 0.98,
+        reason: `Detected ${localCheck.violation} keyword pattern in chat message.`
       };
+    } else {
+      moderation = await aiModerationService.moderateMessage(
+        messageText,
+        senderRole,
+        receiverRole,
+        contextHistory,
+        combinedSenderText
+      );
+    }
 
-      const roomIdsToWarn = [...new Set([messageDoc.room_id, messageDoc.sender_login_id, receiverLoginId].filter(Boolean))];
-      
-      for (const rId of roomIdsToWarn) {
-        const sysMsg = await ChatMessage.create({
-          ...systemMsgDoc,
-          room_id: rId,
-          conversation_id: pairKey
-        });
+    await ChatMessage.updateOne(
+      { _id: messageDoc._id },
+      { 
+        $set: { 
+          aiModeratedAt: new Date(), 
+          aiModerationResult: moderation,
+          is_blocked: moderation.violation,
+          violation_type: moderation.violation ? (moderation.type || 'commission_bypass') : null
+        } 
+      }
+    );
 
-        if (global.io) {
-          const payload = {
-            _id: sysMsg._id,
+    if (moderation.violation) {
+      console.log(`⚠️ AI Moderation Violation Detected on message ${messageDoc._id}:`, moderation);
+
+      const sender = await getParticipantRoleAndName(messageDoc.sender_login_id);
+      const receiver = await getParticipantRoleAndName(receiverLoginId);
+
+      const isSenderOwner = sender.role === 'property_owner';
+      const ownerId = isSenderOwner ? messageDoc.sender_login_id : receiverLoginId;
+      const ownerName = isSenderOwner ? sender.name : receiver.name;
+      const tenantId = isSenderOwner ? receiverLoginId : messageDoc.sender_login_id;
+      const tenantName = isSenderOwner ? receiver.name : sender.name;
+
+      const offenderId = messageDoc.sender_login_id;
+
+      const { violation, attemptNumber, isNewAttempt } = await recordOrGroupViolation(
+        ownerId,
+        offenderId,
+        sender.name,
+        tenantId,
+        tenantName,
+        messageDoc.room_id,
+        moderation.type || 'commission_bypass',
+        messageText,
+        messageDoc._id,
+        moderation.confidence,
+        moderation.reason,
+        moderation
+      );
+
+      if (isNewAttempt) {
+        const isRepeatedOrSevere = attemptNumber >= 2;
+
+        if (isRepeatedOrSevere) {
+          console.log(`🚨 Auto-blocking offender ${offenderId} (Genuine Attempt 2 failed)`);
+          await Promise.allSettled([
+            Owner.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' }),
+            User.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { status: 'blocked', isActive: false })
+          ]);
+          if (global.io) {
+            global.io.to(offenderId).to(ownerId).emit('account_blocked', {
+              blocked: true,
+              accountBlocked: true,
+              reason: 'Your account has been permanently blocked due to repeated commission bypass attempts.'
+            });
+          }
+        } else {
+          // New Attempt 1 — emit warning
+          if (global.io) {
+            global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+              warning: true,
+              warningType: '1st_warning',
+              attemptCount: 1,
+              message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
+            });
+          }
+        }
+
+        // Create system chat message for new attempts
+        const pairKey = [messageDoc.sender_login_id, receiverLoginId].sort().join(':').toUpperCase();
+        const warningText = isRepeatedOrSevere
+          ? `🚨 ACCOUNT BLOCKED: Account (${sender.name || offenderId}) has been AUTOMATICALLY BLOCKED & SUSPENDED due to repeated commission bypass / security policy violations. Chat is now closed.`
+          : `⚠️ ROOMHY SECURITY WARNING: Asking for offline payments, commission bypass, or sharing direct contact details is strictly prohibited. Continued violations will result in IMMEDIATE ACCOUNT BLOCK & PERMANENT SUSPENSION.`;
+
+        const systemMsgDoc = {
+          sender_login_id: 'system',
+          sender_name: 'Roomhy System',
+          sender_role: 'superadmin',
+          message: warningText,
+          message_type: 'system',
+          is_read: false,
+          created_at: new Date()
+        };
+
+        const roomIdsToWarn = [...new Set([messageDoc.room_id, messageDoc.sender_login_id, receiverLoginId].filter(Boolean))];
+        
+        for (const rId of roomIdsToWarn) {
+          const sysMsg = await ChatMessage.create({
+            ...systemMsgDoc,
             room_id: rId,
-            conversation_id: sysMsg.conversation_id,
-            sender_login_id: 'system',
-            sender_name: 'Roomhy System',
-            sender_role: 'superadmin',
-            message: sysMsg.message,
-            message_type: 'system',
-            created_at: sysMsg.created_at
-          };
-          global.io.to(rId).emit('receive_message', payload);
-          global.io.to(rId).emit('new_message', sysMsg);
+            conversation_id: pairKey
+          });
+
+          if (global.io) {
+            const payload = {
+              _id: sysMsg._id,
+              room_id: rId,
+              conversation_id: sysMsg.conversation_id,
+              sender_login_id: 'system',
+              sender_name: 'Roomhy System',
+              sender_role: 'superadmin',
+              message: sysMsg.message,
+              message_type: 'system',
+              created_at: sysMsg.created_at
+            };
+            global.io.to(rId).emit('receive_message', payload);
+            global.io.to(rId).emit('new_message', sysMsg);
+          }
+        }
+
+        if (isRepeatedOrSevere && global.io) {
+          global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations: attemptNumber });
+        }
+
+        await notifySuperAdminAlert(violation);
+      } else {
+        // Grouped consecutive message — STILL show warning if it's Attempt 1 session
+        if (attemptNumber < 2 && global.io) {
+          global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+            warning: true,
+            warningType: '1st_warning',
+            attemptCount: 1,
+            message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
+          });
         }
       }
-
-      if (isRepeatedOrSevere && global.io) {
-        global.io.to('SUPER_ADMIN').emit('owner_account_blocked', { ownerId, ownerName, totalViolations });
-      }
-
-      // Emit new_violation_alert to Super Admin
-      await notifySuperAdminAlert(violation);
     }
+
   } catch (err) {
     console.error('Error in moderateChatMessageAsync:', err);
   }
 }
 
-// One-time self healing startup cleanup to unblock falsely blocked accounts & clean single-word violation logs
-setTimeout(async () => {
+// Cleanup task to consolidate past duplicate single-word violations into 1 attempt and heal false blocks
+setInterval(async () => {
   try {
     const ChatViolation = mongoose.model('ChatViolation');
-    await ChatViolation.deleteMany({
-      $or: [
-        { messageSnippet: /^\s*"?\s*(yaan|yahan|paise|paisa|naa|de|de na|hi|hello|ha|haan)\s*"?\s*$/i },
-        { messageSnippet: /roomhy/i },
-        { messageSnippet: /bookingId/i }
-      ]
-    });
-    // Unblock owner Harsh / ROOMHY9525 if blocked by false positives
-    await Owner.updateMany({ loginId: 'ROOMHY9525' }, { $set: { isActive: true, chatRestrictedUntil: null } });
-    await User.updateMany({ loginId: 'ROOMHY9525' }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
-    // Un-mask any payment links that were falsely masked as [MASKED LINK]
-    const ChatMessage = mongoose.model('ChatMessage');
-    const maskedMsgs = await ChatMessage.find({ message: /\[MASKED LINK\]/i }).lean();
-    for (const m of maskedMsgs) {
-      if (m.original_message_encrypted) {
-        try {
-          const decrypted = ChatMessage.decryptText(m.original_message_encrypted);
-          if (decrypted && (decrypted.toLowerCase().includes('cashfree') || decrypted.toLowerCase().includes('/website/pay') || decrypted.toLowerCase().includes('bookingid='))) {
-            await ChatMessage.updateOne({ _id: m._id }, { $set: { message: decrypted, is_blocked: false } });
-          }
-        } catch (_) {}
+    // Group multiple violations from same user created within 5 mins of each other into 1
+    const allViolations = await ChatViolation.find({}).sort({ createdAt: 1 }).lean();
+    const userGroups = new Map();
+    const toDeleteIds = [];
+
+    for (const v of allViolations) {
+      const key = v.ownerId || v.participantLoginId;
+      if (!key) continue;
+      if (!userGroups.has(key)) {
+        userGroups.set(key, [v]);
+      } else {
+        const list = userGroups.get(key);
+        const last = list[list.length - 1];
+        const diffMs = new Date(v.createdAt).getTime() - new Date(last.createdAt).getTime();
+        if (diffMs < 5 * 60 * 1000) {
+          // Duplicate within 5 mins — mark for deletion
+          toDeleteIds.push(v._id);
+        } else {
+          list.push(v);
+        }
       }
     }
 
-    console.log('✅ Self-healed false positive violations and unblocked Owner ROOMHY9525');
+    if (toDeleteIds.length > 0) {
+      await ChatViolation.deleteMany({ _id: { $in: toDeleteIds } });
+      console.log(`✅ Consolidated ${toDeleteIds.length} duplicate single-message violation records into 1 attempt`);
+    }
+
+    // Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
+    for (const [ownerKey, list] of userGroups.entries()) {
+      if (list.length < 2) {
+        await Owner.updateMany({ $or: [{ loginId: ownerKey }, { _id: ownerKey }] }, { $set: { isActive: true, chatRestrictedUntil: null } });
+        await User.updateMany({ loginId: ownerKey }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
+      }
+    }
   } catch (_) {}
-}, 2000);
+}, 15000);
 
 module.exports = {
   getParticipantRoleAndName,

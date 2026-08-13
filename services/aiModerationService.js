@@ -17,7 +17,7 @@ const axios = require('axios');
  * @param {string} [contextHistory] - Formatted recent conversation history for context.
  * @returns {Promise<object>} Returns { violation: boolean, type: string, confidence: number, reason: string }
  */
-async function moderateMessage(text, senderRole, receiverRole, contextHistory) {
+async function moderateMessage(text, senderRole, receiverRole, contextHistory, combinedSenderText) {
     // 1. Resolve Provider
     const provider = (process.env.AI_MODERATION_PROVIDER || 'groq').toLowerCase().trim();
 
@@ -82,7 +82,7 @@ async function moderateMessage(text, senderRole, receiverRole, contextHistory) {
     sanitizedText = sanitizedText.replace(/\b[A-Z]{5}\d{4}[A-Z]\b/gi, '[REDACTED PAN]');
 
     const systemPrompt = `You are an AI Chat Moderator for Roomhy, a property rental and room booking platform.
-Your task is to analyze user chat messages (often written in Hinglish, Hindi, or split into multiple short messages) to identify policy violations.
+Your task is to analyze user chat messages (often written in Hinglish, Hindi, or split into multiple short consecutive messages like "paise", "naa", "de") to identify policy violations.
 
 The platform allows property negotiations, rent discussion, property address sharing, and room detail sharing. These are NOT violations.
 
@@ -91,16 +91,19 @@ Violations to look for:
 2. Commission Bypass / External Settlement Attempts: Actively trying to bypass the platform commission, proposing direct off-platform transactions, asking to pay cash, asking to pay offline, or asking not to pay on the app/platform.
 3. Moving Communication Outside: Directing or requesting the other party to move chat to WhatsApp, Telegram, phone call, or email.
 
+CRITICAL - CONTEXTUAL MULTI-MESSAGE & SPLIT-TYPING INTENT EVALUATION:
+- Users often type one single intent/thought across multiple short messages sent back-to-back (e.g., Message 1: "paise", Message 2: "naa", Message 3: "de").
+- You MUST evaluate the combined intent of the user's recent consecutive messages ("paise naa de") together as ONE SINGLE INTENT/ACTION.
+- Do NOT treat each short word in isolation as a separate intent or separate violation attempt.
+
 CRITICAL - HINGLISH COMPREHENSION:
 Users often write in Hinglish (Hindi using Latin/English alphabet). You must translate and interpret the context.
 Examples of violations in Hinglish:
-- "yahan paise mat do, wahan aake de dena" or "yahan paise naa de mujhe, vahan aake de dio" (meaning: don't pay here on the app, pay in person/offline) -> This is a commission_bypass.
-- "cash de dena" or "in hand de dena" (meaning: pay cash directly) -> This is a commission_bypass.
-- "direct account me transfer kar do" -> This is a commission_bypass.
-- "booking cancel kar do, direct deal karte hain" -> This is a commission_bypass.
-- "whatsapp par aao" or "wa pe message karo" -> This is a contact_sharing / moving communication outside.
-
-Analyze the current message in the context of the recent conversation history to catch split-sentence attempts.
+- "yahan paise mat do, wahan aake de dena" or "yahan paise naa de mujhe, vahan aake de dio" -> commission_bypass.
+- "cash de dena" or "in hand de dena" -> commission_bypass.
+- "direct account me transfer kar do" -> commission_bypass.
+- "booking cancel kar do, direct deal karte hain" -> commission_bypass.
+- "whatsapp par aao" or "wa pe message karo" -> contact_sharing / external_settlement.
 
 You must respond ONLY with a JSON object in this format:
 {
@@ -112,6 +115,9 @@ You must respond ONLY with a JSON object in this format:
 
     const userMessageContent = `Recent Conversation History (context for detecting split/follow-up messages):
 ${contextHistory || 'No previous message history.'}
+
+Combined Recent User Statement (consecutive short messages merged):
+"${combinedSenderText || sanitizedText}"
 
 Current Message to evaluate:
 Message: "${sanitizedText}"

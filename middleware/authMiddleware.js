@@ -141,3 +141,32 @@ exports.protectPasswordReset = (req, res, next) => {
         return res.status(401).json({ message: 'Not authorized, token invalid or expired' });
     }
 };
+
+exports.optionalProtect = async (req, res, next) => {
+    let token = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+        token = req.headers.authorization.split(' ')[1];
+    }
+    if (!token) return next();
+    try {
+        const decoded = jwt.verify(token, getJwtSecret());
+        let user = null;
+        try {
+            user = await User.findById(decoded.id).select('-password');
+        } catch (_) {
+            user = await User.findOne({ loginId: String(decoded.id).toUpperCase() }).select('-password');
+        }
+        if (!user) {
+            const Owner = require('../models/Owner');
+            try {
+                user = await Owner.findById(decoded.id).select('-password');
+            } catch (_) {
+                user = await Owner.findOne({ loginId: String(decoded.id).toUpperCase() }).select('-password');
+            }
+            if (user) user.role = 'owner';
+        }
+        if (user) req.user = user;
+    } catch (_) {}
+    next();
+};
+

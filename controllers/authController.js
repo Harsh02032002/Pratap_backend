@@ -69,23 +69,19 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
 
         console.log('[ForgotPassword] Request OTP for email:', email);
 
-        // Check if email exists in staff users
+        // Check if email belongs to any account. This endpoint backs the public
+        // website's single forgot-password page, used by tenants and owners just
+        // as much as staff — the User collection holds every role, so the lookup
+        // must not be restricted to staff roles (that restriction previously made
+        // every tenant/owner see "Email not found in staff management system").
         let user = null;
         
         try {
-            // Try MongoDB User model first (superadmin, managers, etc.)
-            user = await User.findOne({ 
-                email, 
-                $or: [
-                    { role: 'superadmin' },
-                    { role: 'areamanager' },
-                    { role: 'manager' },
-                    { role: 'admin' }
-                ]
-            });
+            // Search ALL roles — no restriction
+            user = await User.findOne({ email: email.toLowerCase() });
             
             if (user) {
-                console.log('[ForgotPassword] Found user in User collection:', user.email);
+                console.log('[ForgotPassword] Found user in User collection:', user.email, 'role:', user.role);
             }
         } catch (dbErr) {
             console.warn('[ForgotPassword] Error checking User collection:', dbErr.message);
@@ -124,8 +120,8 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         }
 
         if (!user) {
-            console.log('[ForgotPassword] Email not found in any staff system');
-            return res.status(404).json({ message: 'Email not found in staff management system. Please verify the email address.' });
+            console.log('[ForgotPassword] Email not found in any account');
+            return res.status(404).json({ message: 'No account found with this email address. Please verify the email address.' });
         }
 
         if (user.isActive === false) {
@@ -866,7 +862,15 @@ exports.login = async (req, res) => {
                 user.isActive = true;
                 user.status = 'active';
             }
-            if (!isDemoAccount && user.isActive === false) {
+
+            // Auto-heal owner User model if user is an owner with valid credentials or KYC
+            if (user.role === 'owner' && user.isActive === false) {
+                user.isActive = true;
+                user.status = 'active';
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+            }
+
+            if (!isDemoAccount && user.role !== 'owner' && user.isActive === false) {
                 return res.status(403).json({ message: 'Account disabled' });
             }
 
@@ -905,27 +909,6 @@ exports.login = async (req, res) => {
                 }
             }
 
-            // Check if owner is inactive/deleted/deactivated
-            if (user.role === 'owner') {
-                let owner = await Owner.findOne({
-                    $or: [
-                        { loginId: user.loginId },
-                        { email: user.email },
-                        { phone: user.phone }
-                    ]
-                });
-                const isDemo = user.loginId === 'ROOMHY0000';
-                if (!owner) {
-                    // Do not auto-create owner unless created via superadmin or approved flow
-                    return res.status(403).json({ message: 'Owner record not found or pending approval.' });
-                } else if (isDemo && (owner.isActive === false || owner.isDeleted)) {
-                    // Auto-heal demo owner record
-                    await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, isDeleted: false, status: 'active' } });
-                } else if (!isDemo && (owner.isActive === false || owner.status === 'pending_approval' || (owner.isEmployeeSubmitted && owner.status !== 'approved' && owner.status !== 'active'))) {
-                    return res.status(403).json({ message: 'Your owner account is pending Superadmin approval. Credentials will be sent after approval.' });
-                }
-            }
-
             // Owners can login using email, loginId, or phone
             isMatch = await user.matchPassword(password);
             
@@ -936,15 +919,53 @@ exports.login = async (req, res) => {
                 await user.save().catch(() => {});
             }
 
-            if (!isMatch && user.role === 'owner') {
-                const ownerDoc = await Owner.findOne({ loginId: user.loginId }).lean();
-                if (ownerDoc) {
-                    const ownerPass = ownerDoc.credentials?.password || ownerDoc.checkinPassword;
+            let ownerDocForPass = null;
+            if (user.role === 'owner') {
+                ownerDocForPass = await Owner.findOne({ loginId: user.loginId }).lean();
+                if (!isMatch && ownerDocForPass) {
+                    const ownerPass = ownerDocForPass.credentials?.password || ownerDocForPass.checkinPassword;
                     if (ownerPass && String(ownerPass).trim() === String(password).trim()) {
                         isMatch = true;
                         user.password = password;
                         await user.save().catch(() => {});
                     }
+                }
+            }
+
+            // Check if owner is inactive/deleted/deactivated
+            if (user.role === 'owner') {
+                let owner = ownerDocForPass || await Owner.findOne({
+                    $or: [
+                        { loginId: user.loginId },
+                        { email: user.email },
+                        { phone: user.phone }
+                    ]
+                }).lean();
+
+                const isDemo = user.loginId === 'ROOMHY0000';
+                const isKycVerified = Boolean(
+                    isMatch ||
+                    owner?.kycStatus === 'verified' ||
+                    (owner?.kyc?.status && owner.kyc.status === 'verified') ||
+                    owner?.checkinSubmittedAt ||
+                    owner?.checkinAadhaarNumber ||
+                    owner?.kyc?.aadharNumber ||
+                    owner?.kyc?.aadhaarNumber
+                );
+
+                if (!owner) {
+                    return res.status(403).json({ message: 'Owner record not found.' });
+                } else if (isDemo && (owner.isActive === false || owner.isDeleted)) {
+                    // Auto-heal demo owner record
+                    await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, isDeleted: false, status: 'active' } });
+                } else if (isKycVerified && (owner.isActive === false || owner.status === 'pending_approval')) {
+                    // Auto-heal / activate owner whose KYC is completed or credentials matched
+                    await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, status: 'approved', 'kyc.status': 'verified', kycStatus: 'verified' } });
+                    await User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } });
+                    user.isActive = true;
+                    user.status = 'active';
+                } else if (!isDemo && !isKycVerified && (owner.isActive === false || owner.status === 'pending_approval')) {
+                    return res.status(403).json({ message: 'Your owner account KYC is pending. Please complete KYC using the link sent to your email.' });
                 }
             }
             

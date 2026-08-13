@@ -471,12 +471,12 @@ function getLoginUrlForRole(role, originUrl = '') {
     }
 
     if (r.includes('manager') || r.includes('employee') || r.includes('staff') || r.includes('warden') || r.includes('reception') || r.includes('accountant') || r.includes('electrician') || r.includes('plumber') || r.includes('security') || r.includes('housekeeping') || r.includes('maintenance') || r.includes('custom')) {
-        return `${adminAppUrl}/staff`;
+        return `${adminAppUrl}/login`;
     }
     return `${adminAppUrl}/superadmin/index`;
 }
 
-function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {
+function credentialsHtml(loginId, password, role = 'Account', originUrl = '', kycLink = '') {
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -501,6 +501,8 @@ function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {
         .footer p { margin: 0; color: #999; font-size: 12px; }
         .warning { background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 15px; margin-top: 20px; font-size: 13px; color: #856404; }
         .btn { display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; text-decoration: none; border-radius: 8px; margin-top: 20px; font-weight: 500; }
+        .kyc-box { background: #f0f9ff; border: 1px solid #7dd3fc; border-radius: 12px; padding: 20px; margin: 20px 0; text-align: center; }
+        .kyc-btn { display: inline-block; background: #0284c7; color: white !important; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -526,6 +528,14 @@ function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {
                     </div>
                 </div>
                 
+                ${kycLink ? `
+                <div class="kyc-box">
+                    <h3 style="margin-top:0; color:#0369a1; font-size:16px;">📋 Complete Digital KYC Verification</h3>
+                    <p style="font-size:13px; color:#0369a1; margin-bottom:12px;">Please submit your identity &amp; bank verification details using the link below:</p>
+                    <a href="${kycLink}" class="kyc-btn">Complete KYC Link</a>
+                </div>
+                ` : ''}
+
                 <div class="warning">
                     ⚠️ <strong>Important:</strong> Please change your password after first login for security.
                 </div>
@@ -544,12 +554,12 @@ function credentialsHtml(loginId, password, role = 'Account', originUrl = '') {
 </html>`;
 }
 
-async function sendCredentials(toEmail, loginId, password, role = 'Account', originUrl = '') {
+async function sendCredentials(toEmail, loginId, password, role = 'Account', originUrl = '', kycLink = '') {
     if (!toEmail) return;
     const loginUrl = getLoginUrlForRole(role, originUrl);
     const subject = `${role} credentials for RoomHy`;
-    const html = credentialsHtml(loginId, password, role, originUrl);
-    const text = `Your ${role} credentials\nLogin ID: ${loginId}\nPassword: ${password}\n\nLogin here: ${loginUrl}`;
+    const html = credentialsHtml(loginId, password, role, originUrl, kycLink);
+    const text = `Your ${role} credentials\nLogin ID: ${loginId}\nPassword: ${password}\n${kycLink ? `KYC Link: ${kycLink}\n` : ''}\nLogin here: ${loginUrl}`;
     return sendMail(toEmail, subject, text, html);
 }
 

@@ -18,11 +18,6 @@ exports.healOwnerProperties = async (loginId) => {
         const normalizedLoginId = String(loginId || '').trim().toUpperCase();
         if (!normalizedLoginId) return;
 
-        if (healedOwners.has(normalizedLoginId)) {
-            return;
-        }
-        healedOwners.add(normalizedLoginId);
-
         const mongoose = require('mongoose');
         const Owner = mongoose.models.Owner || require('../models/Owner');
         const Property = mongoose.models.Property || require('../models/Property');
@@ -368,26 +363,108 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
 // Get properties for an owner
 exports.getOwnerProperties = async (req, res) => {
     try {
-        const ownerLoginId = req.params.loginId;
-        await exports.healOwnerProperties(ownerLoginId);
-        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } });
+        const rawLoginId = req.params.loginId;
+        const ownerLoginId = String(rawLoginId || '').trim().toUpperCase();
+        await exports.healOwnerProperties(ownerLoginId).catch(err => console.error('Heal error:', err));
+
+        const mongoose = require('mongoose');
+        const Owner = mongoose.models.Owner || require('../models/Owner');
+        const Property = mongoose.models.Property || require('../models/Property');
+        const ApprovedProperty = mongoose.models.ApprovedProperty || require('../models/ApprovedProperty');
+
+        const ownerDoc = await Owner.findOne({
+            $or: [
+                { loginId: ownerLoginId },
+                { loginId: rawLoginId }
+            ]
+        }).lean();
+
+        const ownerEmails = [ownerLoginId, ownerDoc?.email, ownerDoc?.profile?.email, ownerDoc?.checkinEmail]
+            .filter(Boolean).map(e => String(e).toLowerCase());
+        const ownerPhones = [ownerDoc?.phone, ownerDoc?.profile?.phone, ownerDoc?.checkinPhone]
+            .filter(Boolean).map(p => String(p).replace(/\D/g, '')).filter(p => p.length >= 10);
+
+        const matchOr = [
+            { ownerLoginId: ownerLoginId },
+            { ownerLoginId: rawLoginId },
+            { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') }
+        ];
+
+        if (ownerDoc?._id) {
+            matchOr.push({ owner: ownerDoc._id });
+        }
+
+        if (ownerEmails.length > 0) {
+            matchOr.push({ 'email': { $in: ownerEmails } });
+            matchOr.push({ 'contact.email': { $in: ownerEmails } });
+        }
+        if (ownerPhones.length > 0) {
+            ownerPhones.forEach(ph => {
+                const last10 = ph.slice(-10);
+                matchOr.push({ 'ownerPhone': new RegExp(last10 + '$') });
+                matchOr.push({ 'contact.number': new RegExp(last10 + '$') });
+                matchOr.push({ 'phone': new RegExp(last10 + '$') });
+            });
+        }
+
+        let properties = await Property.find({
+            $or: matchOr,
+            isDeleted: { $ne: true }
+        }).lean();
+
+        // Also merge items from ApprovedProperty if not already in properties list
+        const approvedProps = await ApprovedProperty.find({
+            $or: [
+                { 'generatedCredentials.loginId': ownerLoginId },
+                { 'generatedCredentials.loginId': new RegExp('^' + ownerLoginId + '$', 'i') },
+                { ownerLoginId: ownerLoginId },
+                { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') },
+                ...matchOr
+            ]
+        }).lean();
+
+        const existingIds = new Set(properties.map(p => p._id ? p._id.toString() : ''));
+        for (const ap of approvedProps) {
+          const apId = ap._id ? ap._id.toString() : '';
+          const propIdStr = ap.propertyId ? ap.propertyId.toString() : '';
+          if (apId && !existingIds.has(apId) && !existingIds.has(propIdStr)) {
+            const mapped = {
+              _id: ap._id,
+              title: ap.propertyInfo?.name || ap.title || 'Property',
+              city: ap.propertyInfo?.city || ap.city || '',
+              locality: ap.propertyInfo?.area || ap.locality || '',
+              address: ap.propertyInfo?.address || ap.address || '',
+              monthlyRent: ap.propertyInfo?.rent || ap.monthlyRent || 0,
+              propertyType: ap.propertyInfo?.propertyType || ap.propertyType || 'pg',
+              status: ap.status || 'active',
+              images: ap.images || ap.photos || [],
+              ownerLoginId: ownerLoginId,
+              ...ap
+            };
+            properties.push(mapped);
+          }
+        }
 
         const syncedProperties = [];
         for (const prop of properties) {
-            // Use existing stored occupancy fields; avoid blocking sync on each request.
-            // Trigger async sync in background to keep data fresh without delaying response.
-            exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
-            const propObj = prop.toObject ? prop.toObject() : prop;
-            propObj.roomCount = prop.roomCount ?? propObj.roomCount;
-            propObj.bedCount = prop.bedCount ?? propObj.bedCount;
-            propObj.occupiedBeds = prop.occupiedBeds ?? propObj.occupiedBeds;
-            propObj.occupiedRooms = prop.occupiedRooms ?? propObj.occupiedRooms;
-            propObj.vacantRooms = prop.vacantRooms ?? propObj.vacantRooms;
-            propObj.vacantBeds = prop.vacantBeds ?? propObj.vacantBeds;
-            syncedProperties.push(propObj);
+            if (prop._id) {
+                exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
+            }
+            syncedProperties.push({
+                ...prop,
+                title: prop.title || prop.name || 'Property',
+                status: prop.status || 'pending_approval',
+                roomCount: prop.roomCount ?? 0,
+                bedCount: prop.bedCount ?? 0,
+                occupiedBeds: prop.occupiedBeds ?? 0,
+                occupiedRooms: prop.occupiedRooms ?? 0,
+                vacantRooms: prop.vacantRooms ?? 0,
+                vacantBeds: prop.vacantBeds ?? 0
+            });
         }
         res.json({ properties: syncedProperties });
     } catch (err) {
+        console.error('Error fetching owner properties:', err);
         res.status(500).json({ message: err.message });
     }
 };

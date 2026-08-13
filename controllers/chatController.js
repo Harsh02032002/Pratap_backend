@@ -295,7 +295,7 @@ exports.getConversation = async (req, res) => {
         { room_id: 'Verified Owner', sender_login_id: { $in: [...user1Variants, ...user2Variants] } },
         { room_id: { $in: [...user1Variants, ...user2Variants] }, sender_login_id: 'Verified Owner' },
         { conversation_id: pairKey, sender_login_id: { $in: ['system', 'System'] } },
-        { room_id: { $in: [...user1Variants, ...user2Variants] }, sender_login_id: { $in: ['system', 'System'] } }
+        { conversation_id: pairKey, message_type: 'system' }
       ]
     };
 
@@ -509,12 +509,16 @@ exports.sendMessage = async (req, res) => {
 
     const originalText = String(message).trim();
 
+    // 🔒 Phone Number Masking: detect & mask phone numbers before saving to DB
+    const { maskPhoneNumbers } = require('../utils/maskPhoneNumbers');
+    const maskedText = maskPhoneNumbers(originalText);
+
     const msg = new ChatMessage({
       room_id: targetRoomId,
       sender_login_id: from_login_id,
       sender_name: senderName,
       sender_role: senderRole,
-      message: originalText,
+      message: maskedText,
       message_type: message_type || 'text',
       file_url: file_url || undefined,
       is_blocked: false,

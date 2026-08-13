@@ -4,13 +4,16 @@ const { completeTenantAgreementAndNotify } = require('../services/tenantOnboardi
 
 exports.getRequests = async (req, res) => {
     try {
-        const { status, ownerLoginId } = req.query;
+        const { status, ownerLoginId, tenantId } = req.query;
         let query = {};
         if (status && status !== 'All') {
             query.status = status;
         }
         if (ownerLoginId) {
             query.ownerLoginId = String(ownerLoginId).toUpperCase();
+        }
+        if (tenantId) {
+            query.tenantId = tenantId;
         }
 
         // Populate the full tenant record the owner filled in at Add Tenant time,

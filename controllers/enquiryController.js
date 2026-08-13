@@ -151,20 +151,28 @@ exports.listEnquiries = async (req, res) => {
       });
     }
 
-    // Include open city bids for owner's cities
+    // Include open city bids ONLY if they have no property assigned to any other owner.
+    // This prevents showing bids from "Roomhy Premium PG - 1" to owner of "Property01" etc.
     if (ownerCities.length > 0) {
       ownerCities.forEach(city => {
         bookingQuery.$or.push({
           $and: [
             { request_type: 'bid' },
-            { $or: [{ city: new RegExp(city, 'i') }, { 'filter_criteria.city': new RegExp(city, 'i') }] }
+            { $or: [{ city: new RegExp(city, 'i') }, { 'filter_criteria.city': new RegExp(city, 'i') }] },
+            // Only truly open bids — no specific property assigned to another owner
+            { $or: [
+              { property_id: { $in: propIds } },     // bid is for this owner's property
+              { property_id: { $exists: false } },    // bid has no property
+              { property_id: null },                  // bid has no property
+              { property_id: '' },                    // bid has no property
+              { owner_id: { $in: [normalizedOwnerId, ownerLoginId] } } // bid is assigned to this owner
+            ]}
           ]
         });
       });
-    } else {
-      // If owner has no specific city set, include general unassigned bids
-      bookingQuery.$or.push({ request_type: 'bid' });
     }
+    // Note: removed the broad fallback { request_type: 'bid' } that was pulling ALL bids when no city
+
 
     const bookingRequests = await BookingRequest.find(bookingQuery).sort({ created_at: -1 }).lean();
 

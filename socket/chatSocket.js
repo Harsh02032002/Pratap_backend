@@ -98,13 +98,17 @@ module.exports = (io) => {
 
         const originalText = String(message).trim();
 
+        // 🔒 Phone Number Masking: detect & mask phone numbers before saving
+        const { maskPhoneNumbers } = require('../utils/maskPhoneNumbers');
+        const maskedText = maskPhoneNumbers(originalText);
+
         // Save message to database immediately
         const msg = new ChatMessage({
           room_id: to_login_id,
           sender_login_id: from_login_id,
           sender_name: socket.userName,
           sender_role: socket.userRole,
-          message: originalText,
+          message: maskedText,
           message_type: message_type || 'text',
           file_url: file_url || undefined,
           is_blocked: false,

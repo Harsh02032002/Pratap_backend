@@ -143,20 +143,54 @@ exports.addProperty = async (req, res) => {
       }
     }
 
-    // Staff members or requests explicitly marked active (e.g. Superadmin wizard) create active/published properties. Owner requests default to pending_approval.
-    const isStaff = (req.user && ['superadmin', 'admin', 'employee', 'manager', 'areamanager'].includes(req.user.role)) || req.body.status === 'active';
+    // Only superadmin/admin can directly make a property active/live.
+    // Employees and area managers submit properties for admin approval.
+    const isSuperAdmin = req.user && ['superadmin', 'admin'].includes(req.user.role);
+    const isEmployeeOrManager = req.user && ['employee', 'manager', 'areamanager'].includes(req.user.role);
+    const isStaff = isSuperAdmin || req.body.status === 'active';
     
-    if (isStaff) {
+    if (isSuperAdmin || req.body.status === 'active') {
         propertyData.status = req.body.status || 'active'; 
         propertyData.isPublished = propertyData.status === 'active';
         propertyData.isLiveOnWebsite = propertyData.status === 'active';
     } else {
+        // employee, areamanager, owner — all go to pending_approval
         propertyData.status = 'pending_approval';
         propertyData.isPublished = false;
         propertyData.isLiveOnWebsite = false;
+        if (isEmployeeOrManager) {
+            propertyData.isEmployeeSubmitted = true;
+            propertyData.submittedByRole = req.user.role;
+            propertyData.submittedByLoginId = req.user.loginId || '';
+        }
+    }
+
+    // Auto-assign to area employee for pending properties
+    let autoAssignedTo = null;
+    let autoAssignedToName = null;
+    if (propertyData.status === 'pending_approval' && (propertyData.city || propertyData.area || propertyData.locationCode)) {
+      try {
+        const Employee = require('../models/Employee');
+        const areaEmployee = await Employee.findOne({
+          $or: [
+            { city: propertyData.city, area: propertyData.area },
+            { city: propertyData.city, areaCode: propertyData.area },
+            { locationCode: propertyData.locationCode || propertyData.area }
+          ],
+          role: { $in: ['employee', 'manager', 'areamanager'] }
+        }).select('name loginId role').lean();
+        if (areaEmployee) {
+          autoAssignedTo = areaEmployee.loginId;
+          autoAssignedToName = areaEmployee.name;
+        }
+      } catch (_) {}
     }
 
     const property = new Property(propertyData);
+    if (autoAssignedTo) {
+      property.assignedTo = autoAssignedTo;
+      property.assignedToName = autoAssignedToName;
+    }
     await property.save();
 
     // Notify superadmins if it requires approval
@@ -184,6 +218,27 @@ exports.addProperty = async (req, res) => {
 
     // Auto-approve and make live on website
     await syncToApprovedProperty(property);
+
+    // Send assignment notification if auto-assigned
+    if (autoAssignedTo && !isStaff) {
+      try {
+        await Notification.create({
+          toRole: 'employee',
+          toLoginId: autoAssignedTo,
+          from: req.user?.loginId || 'system',
+          type: 'property_assigned',
+          message: `New property "${property.title}" assigned to you for verification (${property.city || ''} ${property.area || ''})`,
+          meta: {
+            propertyId: property._id.toString(),
+            propertyTitle: property.title,
+            city: property.city || '',
+            area: property.area || ''
+          }
+        });
+      } catch (notifyErr) {
+        console.warn('Property assignment notification failed:', notifyErr.message);
+      }
+    }
 
     res.status(201).json({
       success: true,
