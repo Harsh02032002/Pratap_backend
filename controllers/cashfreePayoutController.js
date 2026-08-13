@@ -378,8 +378,7 @@ exports.getWalletSummary = async (req, res) => {
     return res.json({
       success: true,
       wallet: {
-        heldBalance:      owner.heldBalance      || 0,
-        availableBalance: owner.availableBalance || 0,
+        availableBalance: owner.availableBalance || owner.walletBalance || 0,
         withdrawnBalance: owner.withdrawnBalance  || 0,
         bankDetails: owner.bankDetails ? {
           accountHolderName: owner.bankDetails.accountHolderName,
@@ -392,7 +391,6 @@ exports.getWalletSummary = async (req, res) => {
         } : null,
       },
       ledger: {
-        held:      held.map(t => ({ id: t._id, bookingId: t.booking_id, amount: t.owner_amount, heldAt: t.held_at, moveInDate: t.move_in_date })),
         available: available.map(t => ({ id: t._id, bookingId: t.booking_id, amount: t.owner_amount, availableAt: t.available_at })),
         withdrawn: withdrawn.map(t => ({ id: t._id, bookingId: t.booking_id, amount: t.owner_amount, withdrawnAt: t.withdrawn_at, ref: t.payout_reference })),
       }

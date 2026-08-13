@@ -110,14 +110,15 @@ exports.handlePaymentWebhook = async (req, res) => {
         const adminCommission = Math.round(paymentAmount * commissionRate);
         const ownerShare = Math.max(0, paymentAmount - adminCommission);
 
-        // 3. Credit Owner's HELD BALANCE & Add Ledger Entry
+        // 3. Credit Owner's WALLET BALANCE & Add Ledger Entry
         if (ownerLoginId) {
           const owner = await Owner.findOne({ loginId: ownerLoginId });
           if (owner) {
-            owner.heldBalance = (owner.heldBalance || owner.pendingBalance || 0) + ownerShare;
+            owner.walletBalance = (owner.walletBalance || owner.availableBalance || 0) + ownerShare;
+            owner.availableBalance = (owner.availableBalance || 0) + ownerShare;
             await owner.save().catch(() => {});
 
-            console.log(`💰 [Cashfree Webhook] Held balance updated for Owner ${ownerLoginId}: +₹${ownerShare}`);
+            console.log(`💰 [Cashfree Webhook] Wallet balance updated for Owner ${ownerLoginId}: +₹${ownerShare}`);
 
             // Save Wallet Ledger / PaymentTransaction record if not already created
             if (!tx) {

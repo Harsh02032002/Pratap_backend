@@ -319,11 +319,22 @@ router.post('/', protect, async (req, res) => {
     }
     // ✅ GATE: Only active moved-in tenants or ex-tenants can submit reviews
     const Tenant = require('../models/Tenant');
+    const ApprovedProperty = require('../models/ApprovedProperty');
+    const mongoose = require('mongoose');
     const now = new Date();
+
+    // Resolve ApprovedProperty._id → Property._id if needed
+    let actualPropertyId = propertyId;
+    try {
+      const approvedProp = await ApprovedProperty.findById(propertyId).select('propertyId').lean();
+      if (approvedProp?.propertyId) {
+        actualPropertyId = mongoose.Types.ObjectId(approvedProp.propertyId);
+      }
+    } catch (_) {}
 
     // First: Check if they have an active or inactive Tenant record for this property
     const tenantRecord = await Tenant.findOne({
-      property: propertyId,
+      property: actualPropertyId,
       isDeleted: { $ne: true },
       $or: [
         {
@@ -352,7 +363,7 @@ router.post('/', protect, async (req, res) => {
     const BookingRequest = require('../models/BookingRequest');
     const userBooking = await BookingRequest.findOne({
       $and: [
-        { property_id: propertyId },
+        { property_id: actualPropertyId },
         { 
           $or: [
             { user_id: String(userId) },

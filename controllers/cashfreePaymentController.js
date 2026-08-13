@@ -381,11 +381,11 @@ exports.handleWebhook = async (req, res) => {
         });
       }
 
-      // Update Owner heldBalance (skip for cash payments)
+      // Update Owner wallet balance directly (no hold)
       if (!isCashPayment && tx.owner_id) {
         await Owner.findOneAndUpdate(
           { loginId: tx.owner_id },
-          { $inc: { heldBalance: tx.owner_amount, walletBalance: 0 } }
+          { $inc: { walletBalance: tx.owner_amount, availableBalance: tx.owner_amount } }
         );
 
         // Notify owner
@@ -396,7 +396,7 @@ exports.handleWebhook = async (req, res) => {
             from:      'system',
             type:      'payment_received',
             title:     '💰 Payment Received',
-            message:   `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is held until move-in date.`,
+            message:   `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is now available in your wallet.`,
             meta:      { bookingId: tx.booking_id, amount: tx.owner_amount }
           });
         } catch (notifErr) {
@@ -527,11 +527,11 @@ exports.initiateRefund = async (req, res) => {
     tx.wallet_status = 'skipped';
     await tx.save();
 
-    // Reverse owner held balance if applicable
+    // Reverse owner wallet balance if applicable
     if (tx.owner_id) {
       await Owner.findOneAndUpdate(
         { loginId: tx.owner_id },
-        { $inc: { heldBalance: -tx.owner_amount } }
+        { $inc: { walletBalance: -tx.owner_amount, availableBalance: -tx.owner_amount } }
       );
     }
 

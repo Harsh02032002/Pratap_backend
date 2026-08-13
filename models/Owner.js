@@ -172,8 +172,7 @@ const ownerSchema = new mongoose.Schema({
         curfewTime: { type: String, default: "11:00 PM" },
         electricityUnitRate: { type: Number, default: 12 }
     },
-    walletBalance:     { type: Number, default: 0 },  // alias of availableBalance
-    heldBalance:       { type: Number, default: 0 },  // awaiting move-in date
+    walletBalance:     { type: Number, default: 0 },  // available for withdrawal
     availableBalance:  { type: Number, default: 0 },  // ready to withdraw
     pendingBalance:    { type: Number, default: 0 },  // legacy
     withdrawnBalance:  { type: Number, default: 0 },

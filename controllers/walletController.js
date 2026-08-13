@@ -3,7 +3,6 @@ const BookingRequest = require('../models/BookingRequest');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const PayoutRequest = require('../models/PayoutRequest');
 const { directBankTransfer } = require('../services/cashfreePayoutService');
-const { processHeldWalletReleases } = require('../services/walletReleaseService');
 
 /**
  * GET /api/wallet/owner/balance
@@ -17,7 +16,7 @@ exports.getOwnerWalletBalance = async (req, res) => {
     }
 
     // First auto-release any eligible held funds (move-in date + 24 hours)
-    await processHeldWalletReleases().catch(() => {});
+    // Held balance removed - funds go directly to wallet
 
     const Rent = require('../models/Rent');
     const RentPayment = require('../models/RentPayment');
@@ -31,8 +30,7 @@ exports.getOwnerWalletBalance = async (req, res) => {
     }
 
     // Fetch transactions & booking requests
-    const [heldTx, availableTx, payoutLogs, ownerBookings, rentPayments, rents] = await Promise.all([
-      PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }], wallet_status: 'held' }).sort({ createdAt: -1 }).lean(),
+    const [availableTx, payoutLogs, ownerBookings, rentPayments, rents] = await Promise.all([
       PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }], wallet_status: 'available' }).sort({ createdAt: -1 }).lean(),
       PayoutRequest.find({ login_id: loginId, user_type: 'owner' }).sort({ createdAt: -1 }).lean(),
       BookingRequest.find({
@@ -44,13 +42,10 @@ exports.getOwnerWalletBalance = async (req, res) => {
       Rent.find({ ownerLoginId: loginId, ownerPayoutStatus: 'paid' }).sort({ createdAt: -1 }).lean().catch(() => []),
     ]);
 
-    let liveHeld = owner.heldBalance || 0;
     let liveAvailable = owner.availableBalance || owner.walletBalance || 0;
 
-    const calcHeld = heldTx.reduce((s, t) => s + (t.owner_amount || Math.round((t.total_amount || 0) * 0.95)), 0);
     const calcAvail = availableTx.reduce((s, t) => s + (t.owner_amount || Math.round((t.total_amount || 0) * 0.95)), 0);
 
-    if (calcHeld > 0) liveHeld = Math.max(liveHeld, calcHeld);
     if (calcAvail > 0) liveAvailable = Math.max(liveAvailable, calcAvail);
 
     // 💰 Add manual RentPayments (admin recorded cash/bank transfers)
@@ -67,21 +62,19 @@ exports.getOwnerWalletBalance = async (req, res) => {
     }
 
     // Fallback: If no transaction objects, but confirmed paid booking requests exist
-    if (liveHeld === 0 && liveAvailable === 0 && ownerBookings.length > 0) {
+    if (liveAvailable === 0 && ownerBookings.length > 0) {
       const bookingSum = ownerBookings.reduce((s, b) => s + (b.total_amount || b.rent_amount || 2500), 0);
-      liveHeld = Math.round(bookingSum * 0.95);
+      liveAvailable = Math.round(bookingSum * 0.95);
     }
 
     return res.json({
       success: true,
       wallet: {
-        heldBalance:       liveHeld,
         availableBalance:  liveAvailable,
         walletBalance:     liveAvailable,
         withdrawnBalance:  owner.withdrawnBalance || 0,
         bankDetails:       owner.bankDetails || {},
       },
-      heldTransactions:      heldTx,
       availableTransactions: availableTx,
       payoutHistory:         payoutLogs,
     });
@@ -110,7 +103,7 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
     }
 
     // Run auto-release check first
-    await processHeldWalletReleases().catch(() => {});
+    // Held balance removed - funds go directly to wallet
 
     const owner = await Owner.findOne({
       $or: [{ loginId }, { _id: req.user?._id }]
@@ -337,19 +330,6 @@ exports.withdrawAdminEarningsInstant = async (req, res) => {
     }
   } catch (err) {
     console.error('[WalletCtrl] withdrawAdminEarningsInstant error:', err);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * POST /api/wallet/release-held-now
- * Helper trigger endpoint to run move-in date + 24 hours release check manually or via cron.
- */
-exports.triggerHeldRelease = async (req, res) => {
-  try {
-    const result = await processHeldWalletReleases();
-    return res.json(result);
-  } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
