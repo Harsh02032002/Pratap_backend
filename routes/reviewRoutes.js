@@ -320,7 +320,6 @@ router.post('/', protect, async (req, res) => {
     // ✅ GATE: Only active moved-in tenants or ex-tenants can submit reviews
     const Tenant = require('../models/Tenant');
     const ApprovedProperty = require('../models/ApprovedProperty');
-    const mongoose = require('mongoose');
     const now = new Date();
 
     // Resolve ApprovedProperty._id → Property._id if needed
