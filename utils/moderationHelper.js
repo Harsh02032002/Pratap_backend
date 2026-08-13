@@ -575,7 +575,10 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       !messageDoc ||
       messageDoc.sender_login_id === 'system' ||
       messageDoc.message_type === 'system' ||
-      messageDoc.sender_role === 'superadmin'
+      messageDoc.sender_role === 'superadmin' ||
+      messageDoc.message_type === 'image' ||
+      messageDoc.message_type === 'file' ||
+      messageDoc.message_type === 'video'
     ) {
       return;
     }
