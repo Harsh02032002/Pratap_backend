@@ -95,6 +95,130 @@ function escapeRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Resolve the owner login ID for a visit.
+//
+// Once a KYC link has been sent, an Owner record exists under that login ID and
+// every piece of KYC the owner submits is attached to it. isOwnerLoginIdTaken()
+// would then report that ID as "taken" (by this very visit) and callers used to
+// mint a brand new ID — creating a second, empty Owner and orphaning the KYC the
+// owner had just completed. Always reuse the ID already issued to this visit.
+async function resolveVisitOwnerLoginId(visit, requestedLoginId) {
+    const alreadyIssued = normalizeOwnerLoginId(visit?.generatedCredentials?.loginId);
+    if (alreadyIssued) return alreadyIssued;
+
+    const requested = normalizeOwnerLoginId(requestedLoginId);
+    if (requested && !(await isOwnerLoginIdTaken(requested))) return requested;
+
+    return generateUniqueOwnerLoginId();
+}
+
+// True when the owner behind this login ID has finished digital KYC.
+// Owner stores KYC as `kyc.status` and `checkinAadhaarNumber` (see models/Owner.js) —
+// there is no top-level `aadhaarNumber`/`kycStatus`, so those must not be checked.
+function isOwnerKycComplete(owner) {
+    if (!owner) return false;
+    const status = String(owner?.kyc?.status || '').toLowerCase();
+    return !!(
+        owner?.checkinAadhaarNumber ||
+        owner?.kyc?.aadharNumber ||
+        status === 'verified' ||
+        status === 'completed'
+    );
+}
+
+// Reconcile VisitData.kycStatus with the owner's actual digital check-in progress.
+// The owner completes KYC on the digital-checkin pages, which write to Owner — nothing
+// there calls back into VisitData, so the visit's own kycStatus goes stale. Every read
+// path that surfaces or acts on kycStatus must run this first, otherwise the superadmin
+// Approve button stays disabled after the owner has already finished.
+// Mutates the passed (lean) visit objects in place and persists any change.
+async function syncVisitKycStatus(visits = []) {
+    const pending = visits.filter(
+        v => v && v.kycStatus !== 'completed' && v.generatedCredentials?.loginId
+    );
+    if (pending.length === 0) return visits;
+
+    await Promise.all(pending.map(async (v) => {
+        try {
+            const owner = await Owner.findOne({ loginId: v.generatedCredentials.loginId })
+                .select('kyc checkinAadhaarNumber')
+                .lean();
+            if (isOwnerKycComplete(owner)) {
+                await VisitData.updateOne(
+                    { visitId: v.visitId },
+                    { kycStatus: 'completed', kycCompletedAt: new Date() }
+                );
+                v.kycStatus = 'completed';
+            }
+        } catch (err) {
+            console.warn('[syncVisitKycStatus] failed for visit', v.visitId, err.message);
+        }
+    }));
+
+    return visits;
+}
+
+// Issue owner credentials + email the digital-KYC link for a visit.
+// Shared by the automatic send on visit submission and the manual resend endpoint.
+async function sendOwnerKycLink(visit) {
+    const ownerEmail = visit.ownerEmail || '';
+    if (!ownerEmail) {
+        const err = new Error('No owner email found on this visit');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    const loginId = await resolveVisitOwnerLoginId(visit);
+    // Keep the password already issued to this visit so a resend does not
+    // invalidate credentials the owner may have started using.
+    const tempPassword = visit.generatedCredentials?.tempPassword || Math.random().toString(36).slice(-8);
+
+    const ownerName = visit.ownerName || 'Owner';
+    const ownerPhone = visit.ownerPhone || visit.contactPhone || '';
+    const ownerArea = visit.area || '';
+    const propertyLocationCode = String(ownerArea || visit.city || loginId).trim().toUpperCase();
+    const occupancy = normalizeOccupancyFields(visit);
+
+    // Create/update Owner record so the digital-checkin page can look it up
+    await Owner.findOneAndUpdate(
+        { loginId },
+        {
+            $set: {
+                loginId,
+                name: ownerName,
+                email: ownerEmail,
+                phone: ownerPhone,
+                area: ownerArea,
+                locationCode: propertyLocationCode,
+                profile: { name: ownerName, email: ownerEmail, phone: ownerPhone, locationCode: propertyLocationCode, updatedAt: new Date() },
+                ...occupancy,
+                credentials: { password: tempPassword, firstTime: true },
+                checkinPassword: tempPassword,
+                isActive: true
+            },
+            $setOnInsert: { createdAt: new Date() }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    await VisitData.findOneAndUpdate(
+        { visitId: visit.visitId },
+        {
+            kycStatus: 'sent',
+            kycSentAt: new Date(),
+            ownerLoginId: loginId,
+            generatedCredentials: { loginId, tempPassword }
+        }
+    );
+
+    const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(loginId)}&email=${encodeURIComponent(ownerEmail)}&area=${encodeURIComponent(ownerArea)}&password=${encodeURIComponent(tempPassword)}`;
+
+    await mailer.sendKycLinkEmail(ownerEmail, ownerName, visit.propertyName || 'Property', kycLink);
+
+    console.log(`[sendOwnerKycLink] KYC link sent to ${ownerEmail} for visit ${visit.visitId}, loginId: ${loginId}`);
+    return { loginId, tempPassword };
+}
+
 async function resolveRequestUser(req) {
     try {
         const authHeader = req.headers.authorization || '';
@@ -289,6 +413,10 @@ router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areaman
 
             const [visits, totalCount] = await Promise.all([visitsQuery, countQuery]);
 
+            // Refresh kycStatus from the owners' digital check-in progress so the
+            // superadmin Approve button reflects reality on this list.
+            await syncVisitKycStatus(visits);
+
             console.log(`? [visits/GET] Returning ${visits.length} visits from ${totalCount} total (limit: ${limit}, skip: ${skip})`);
             return {
                 success: true,
@@ -345,26 +473,8 @@ router.get('/pending', protect, authorize('superadmin'), async (req, res) => {
             status: { $in: ['submitted', 'pending_review'] }
         }).sort({ submittedAt: -1 }).lean();
 
-        // Auto-sync kycStatus: for visits with kycStatus 'sent', check if owner completed KYC via digital-checkin
-        const sentVisits = visits.filter(v => v.kycStatus === 'sent' && v.generatedCredentials?.loginId);
-        if (sentVisits.length > 0) {
-            await Promise.all(sentVisits.map(async (v) => {
-                try {
-                    const owner = await Owner.findOne({ loginId: v.generatedCredentials.loginId })
-                        .select('aadhaarNumber checkinAadhaarNumber kycStatus').lean();
-                    const kycDone = !!(
-                        owner?.aadhaarNumber ||
-                        owner?.checkinAadhaarNumber ||
-                        owner?.kycStatus === 'verified' ||
-                        owner?.kycStatus === 'completed'
-                    );
-                    if (kycDone) {
-                        await VisitData.findOneAndUpdate({ visitId: v.visitId }, { kycStatus: 'completed' });
-                        v.kycStatus = 'completed';
-                    }
-                } catch (_) {}
-            }));
-        }
+        // Auto-sync kycStatus from the owners' digital check-in progress
+        await syncVisitKycStatus(visits);
 
         console.log(`[visits/pending] Returning ${visits.length} pending visits`);
         res.json({ success: true, count: visits.length, visits });
@@ -395,24 +505,12 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
         }
 
         // KYC must be completed before approval.
-        // KYC is done via /digital-checkin/ownerprofile which writes aadhaarNumber to Owner record.
-        const visitForKycCheck = await VisitData.findOne({ visitId }).select('kycStatus generatedCredentials').lean();
-        let kycCompleted = visitForKycCheck?.kycStatus === 'completed';
-
-        if (!kycCompleted && visitForKycCheck?.generatedCredentials?.loginId) {
-            const ownerRecord = await Owner.findOne({ loginId: visitForKycCheck.generatedCredentials.loginId })
-                .select('aadhaarNumber checkinAadhaarNumber kycStatus').lean();
-            kycCompleted = !!(
-                ownerRecord?.aadhaarNumber ||
-                ownerRecord?.checkinAadhaarNumber ||
-                ownerRecord?.kycStatus === 'verified' ||
-                ownerRecord?.kycStatus === 'completed'
-            );
-            // Sync back to VisitData so UI shows Completed
-            if (kycCompleted) {
-                await VisitData.findOneAndUpdate({ visitId }, { kycStatus: 'completed' });
-            }
-        }
+        // KYC is done via /digital-checkin/ownerprofile, which writes to the Owner record;
+        // syncVisitKycStatus reconciles that back onto this visit.
+        const visitForKycCheck = await VisitData.findOne({ visitId })
+            .select('visitId kycStatus generatedCredentials').lean();
+        await syncVisitKycStatus([visitForKycCheck].filter(Boolean));
+        const kycCompleted = visitForKycCheck?.kycStatus === 'completed';
 
         if (!kycCompleted) {
             return res.status(400).json({
@@ -421,13 +519,14 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             });
         }
 
-        // Enforce login ID format ROOMHY + 4 digits and ensure uniqueness
-        const requestedLoginId = normalizeOwnerLoginId(loginId);
-        let finalLoginId = requestedLoginId;
-        if (!finalLoginId || await isOwnerLoginIdTaken(finalLoginId)) {
-            finalLoginId = await generateUniqueOwnerLoginId();
-        }
-        const finalPassword = tempPassword || Math.random().toString(36).slice(-8);
+        // Reuse the login ID already issued to this visit — the owner's completed KYC
+        // is attached to that Owner record. Minting a new one here would publish the
+        // property under an empty Owner and strand the KYC that just unblocked approval.
+        const finalLoginId = await resolveVisitOwnerLoginId(visitForKycCheck, loginId);
+        const finalPassword =
+            tempPassword ||
+            visitForKycCheck?.generatedCredentials?.tempPassword ||
+            Math.random().toString(36).slice(-8);
 
         console.log('?? [visits/approve] Finding visit by visitId:', visitId);
         
@@ -928,6 +1027,20 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
         // Save to MongoDB
         await visit.save();
 
+        // Issue owner credentials and email the digital-KYC link straight away —
+        // the owner completing KYC is what unblocks superadmin approval, so this
+        // must not wait on a manual step. Failure here is reported but never
+        // fails the submission: the report is saved and the link can be resent.
+        let kycLinkSent = false;
+        let kycLinkError = null;
+        try {
+            await sendOwnerKycLink(visit);
+            kycLinkSent = true;
+        } catch (kycErr) {
+            kycLinkError = kycErr.message;
+            console.warn('[visits/submit] KYC link auto-send failed:', kycErr.message);
+        }
+
         try {
             await notifySuperadmin({
                 type: 'new_enquiry',
@@ -949,8 +1062,12 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
 
         res.status(201).json({
             success: true,
-            message: 'Visit submitted successfully',
+            message: kycLinkSent
+                ? 'Visit submitted successfully. Digital KYC link sent to the owner.'
+                : 'Visit submitted successfully, but the KYC link could not be emailed. Resend it from Visit Reports.',
             visitId: visitId,
+            kycLinkSent,
+            kycLinkError,
             data: visit
         });
 
@@ -1008,154 +1125,33 @@ router.get('/approved', protect, authorize('superadmin'), async (req, res) => {
         });
     }
 });
-// POST: Send KYC link to property owner's email
-// Generates credentials, creates Owner record, sends digital-checkin link
+// POST: Resend the digital-KYC link to the property owner's email
+// The link is sent automatically on visit submission; this is the manual resend.
 // ============================================================
-router.post('/:visitId/send-kyc-link', async (req, res) => {
+router.post('/:visitId/send-kyc-link', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
         const visit = await VisitData.findOne({ visitId: req.params.visitId });
         if (!visit) {
             return res.status(404).json({ success: false, message: 'Visit not found' });
         }
 
-        const ownerEmail = visit.ownerEmail || '';
-        if (!ownerEmail) {
-            return res.status(400).json({ success: false, message: 'No owner email found on this visit' });
-        }
-
-        // Reuse existing credentials if already generated, otherwise create new ones
-        let loginId = visit.generatedCredentials?.loginId || '';
-        let tempPassword = visit.generatedCredentials?.tempPassword || '';
-
-        const normalizedLoginId = normalizeOwnerLoginId(loginId);
-        if (!normalizedLoginId || await isOwnerLoginIdTaken(normalizedLoginId)) {
-            loginId = await generateUniqueOwnerLoginId();
-            tempPassword = Math.random().toString(36).slice(-8);
-        } else {
-            loginId = normalizedLoginId;
-            if (!tempPassword) tempPassword = Math.random().toString(36).slice(-8);
-        }
-
-        const ownerName = visit.ownerName || 'Owner';
-        const ownerPhone = visit.ownerPhone || visit.contactPhone || '';
-        const ownerArea = visit.area || '';
-        const propertyLocationCode = String(ownerArea || visit.city || loginId).trim().toUpperCase();
-        const occupancy = normalizeOccupancyFields(visit);
-
-        // Create/update Owner record so the digital-checkin page can look it up
-        await Owner.findOneAndUpdate(
-            { loginId },
-            {
-                $set: {
-                    loginId,
-                    name: ownerName,
-                    email: ownerEmail,
-                    phone: ownerPhone,
-                    area: ownerArea,
-                    locationCode: propertyLocationCode,
-                    profile: { name: ownerName, email: ownerEmail, phone: ownerPhone, locationCode: propertyLocationCode, updatedAt: new Date() },
-                    ...occupancy,
-                    credentials: { password: tempPassword, firstTime: true },
-                    checkinPassword: tempPassword,
-                    isActive: true
-                },
-                $setOnInsert: { createdAt: new Date() }
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
-        // Save credentials + kycStatus on VisitData
-        await VisitData.findOneAndUpdate(
-            { visitId: visit.visitId },
-            {
-                kycStatus: 'sent',
-                kycSentAt: new Date(),
-                generatedCredentials: { loginId, tempPassword }
-            }
-        );
-
-        // Build link to existing digital-checkin ownerprofile page
-        const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(loginId)}&email=${encodeURIComponent(ownerEmail)}&area=${encodeURIComponent(ownerArea)}&password=${encodeURIComponent(tempPassword)}`;
-
-        await mailer.sendKycLinkEmail(ownerEmail, ownerName, visit.propertyName || 'Property', kycLink);
-
-        console.log(`[visits/send-kyc-link] KYC link sent to ${ownerEmail} for visit ${visit.visitId}, loginId: ${loginId}`);
+        const { loginId } = await sendOwnerKycLink(visit);
         res.json({ success: true, message: 'KYC link sent successfully to owner email', loginId });
     } catch (error) {
         console.error('[visits/send-kyc-link] Error:', error.message);
-        res.status(500).json({ success: false, message: 'Error sending KYC link', error: error.message });
-    }
-});
-
-// ============================================================
-// GET: Validate KYC token and return visit info (used by owner KYC form)
-// ============================================================
-router.get('/kyc/:token', async (req, res) => {
-    try {
-        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET || 'secret');
-        const visit = await VisitData.findOne({
-            visitId: decoded.visitId,
-            kycToken: req.params.token
-        }).select('visitId propertyName ownerName ownerEmail kycStatus').lean();
-
-        if (!visit) {
-            return res.status(404).json({ success: false, message: 'Invalid or expired KYC link' });
-        }
-        if (visit.kycStatus === 'completed') {
-            return res.status(410).json({ success: false, message: 'KYC already completed for this property' });
-        }
-
-        res.json({
-            success: true,
-            visitId: visit.visitId,
-            propertyName: visit.propertyName,
-            ownerName: visit.ownerName
+        res.status(error.statusCode || 500).json({
+            success: false,
+            message: error.statusCode ? error.message : 'Error sending KYC link',
+            error: error.message
         });
-    } catch (_) {
-        res.status(401).json({ success: false, message: 'KYC link is invalid or has expired. Please contact RoomHy.' });
     }
 });
 
-// ============================================================
-// POST: Submit KYC data from owner (used by owner KYC form)
-// ============================================================
-router.post('/kyc/:token/submit', async (req, res) => {
-    try {
-        const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET || 'secret');
-        const { aadhaarNumber, phone } = req.body;
-
-        if (!aadhaarNumber || !phone) {
-            return res.status(400).json({ success: false, message: 'Aadhaar number and phone are required' });
-        }
-
-        const visit = await VisitData.findOne({
-            visitId: decoded.visitId,
-            kycToken: req.params.token
-        });
-
-        if (!visit) {
-            return res.status(404).json({ success: false, message: 'Invalid or expired KYC link' });
-        }
-        if (visit.kycStatus === 'completed') {
-            return res.status(409).json({ success: false, message: 'KYC already submitted for this property' });
-        }
-
-        await VisitData.findOneAndUpdate(
-            { visitId: decoded.visitId },
-            {
-                kycStatus: 'completed',
-                kycAadhaarNumber: aadhaarNumber.trim(),
-                kycPhone: phone.trim(),
-                kycCompletedAt: new Date()
-            }
-        );
-
-        console.log(`[visits/kyc/submit] KYC completed for visit ${decoded.visitId}`);
-        res.json({ success: true, message: 'KYC submitted successfully. The admin will review and approve your property.' });
-    } catch (_) {
-        res.status(401).json({ success: false, message: 'KYC link is invalid or has expired. Please contact RoomHy.' });
-    }
-});
+// NOTE: the token-based KYC routes that used to live here (GET /kyc/:token and
+// POST /kyc/:token/submit) were removed. Owners complete KYC on the digital
+// check-in pages — which is where the emailed link has always pointed — and that
+// flow writes to the Owner record, reconciled back here by syncVisitKycStatus().
+// The token routes were never reachable and duplicated kycStatus handling.
 
 // ============================================================
 // GET: Get a single visit by ID
@@ -1455,84 +1451,12 @@ router.put('/:visitId', protect, authorize('employee', 'manager', 'areamanager')
 });
 
 // ============================================================
-// POST: Approve a visit (from enquiry.html)
+// NOTE: the legacy `POST /:visitId/approve` route was removed. It set the visit
+// to approved WITHOUT the owner-KYC gate and wrote a malformed ApprovedProperty
+// document (flat fields instead of the propertyInfo shape the website reads), so
+// it never actually published anything. `POST /api/visits/approve` is the single
+// approval path: it enforces KYC, provisions the Owner + Property, and publishes.
 // ============================================================
-router.post('/:visitId/approve', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
-    try {
-        const { approvalNotes, approvedBy } = req.body;
-        
-        const visit = await VisitData.findOneAndUpdate(
-            { visitId: req.params.visitId },
-            {
-                status: 'approved',
-                approvedAt: new Date(),
-                approvalNotes,
-                approvedBy,
-                updatedAt: new Date()
-            },
-            { new: true }
-        );
-
-        if (!visit) {
-            return res.status(404).json({
-                success: false,
-                message: 'Visit not found'
-            });
-        }
-
-        // Now also create/update in ApprovedProperty collection
-        const ApprovedProperty = require('../models/ApprovedProperty');
-        
-        const approvedProperty = await ApprovedProperty.findOneAndUpdate(
-            { propertyId: visit.visitId },
-            {
-                propertyId: visit.visitId,
-                visitDataId: visit.visitId,
-                propertyName: visit.propertyName,
-                propertyType: visit.propertyType,
-                city: visit.city,
-                area: visit.area,
-                address: visit.address,
-                pincode: visit.pincode,
-                description: visit.description,
-                amenities: visit.amenities,
-                genderSuitability: visit.genderSuitability,
-                monthlyRent: visit.monthlyRent,
-                deposit: visit.deposit,
-                ownerName: visit.ownerName,
-                ownerEmail: visit.ownerEmail,
-                ownerPhone: visit.ownerPhone,
-                ownerCity: visit.ownerCity,
-                photos: visit.photos,
-                professionalPhotos: visit.professionalPhotos,
-                approvedAt: new Date(),
-                approvalNotes: approvalNotes,
-                approvedBy: approvedBy,
-                submittedAt: visit.submittedAt
-            },
-            { upsert: true, new: true }
-        );
-
-        // Clear cached listings so the new property shows up immediately
-        clearCache('/api/approved-properties');
-        clearCache('/api/properties');
-
-        res.json({
-            success: true,
-            message: 'Visit approved and added to approved properties',
-            visit: visit,
-            approvedProperty: approvedProperty
-        });
-
-    } catch (error) {
-        console.error('Error approving visit:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error approving visit',
-            error: error.message
-        });
-    }
-});
 
 // ============================================================
 // POST: Reject a visit
