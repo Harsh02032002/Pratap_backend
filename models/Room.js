@@ -38,7 +38,9 @@ const RoomSchema = new mongoose.Schema({
 		readings: [ElectricityReadingSchema]
 	},
 	createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-	status: { type: String, enum: ['inactive','active'], default: 'inactive' },
+	// `isAvailable` is the occupancy flag. `available` is retained here as a
+	// legacy room-status value because existing import/seed flows still emit it.
+	status: { type: String, enum: ['inactive', 'active', 'available'], default: 'inactive' },
 	isPromoted: { type: Boolean, default: false },
 	isDeleted: { type: Boolean, default: false },
 	createdAt: { type: Date, default: Date.now },

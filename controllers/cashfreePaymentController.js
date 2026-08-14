@@ -22,6 +22,32 @@ const Notification       = require('../models/Notification');
 const SystemSettings     = require('../models/SystemSettings');
 const cfPay = require('../services/cashfreePaymentService');
 
+// The public onboarding page historically sent its signed payment-link JWT in
+// `bookingId`. Resolve it before it is used in a Cashfree order ID; JWTs are
+// considerably longer than Cashfree's 130-character order_id limit.
+async function resolveBookingReference(bookingId) {
+  const reference = String(bookingId || '').trim();
+  if (!reference.includes('.')) return reference;
+
+  const jwt = require('jsonwebtoken');
+  let decoded;
+  try {
+    decoded = jwt.verify(reference, process.env.JWT_SECRET);
+  } catch (err) {
+    const error = new Error('Invalid or expired onboarding payment link');
+    error.statusCode = err.name === 'TokenExpiredError' ? 410 : 401;
+    throw error;
+  }
+
+  if (decoded?.purpose !== 'onboarding_payment' || !mongoose.Types.ObjectId.isValid(decoded.rentRecordId)) {
+    const error = new Error('Invalid onboarding payment link');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return String(decoded.rentRecordId);
+}
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 async function getCommissionSettings() {
@@ -51,11 +77,13 @@ function calcBreakdown(amount, commissionPct, gstPct) {
  */
 exports.createOrder = async (req, res) => {
   try {
-    const { bookingId, amount, customerInfo = {} } = req.body;
+    const { bookingId: requestedBookingId, amount, customerInfo = {} } = req.body;
 
-    if (!bookingId || !amount) {
+    if (!requestedBookingId || !amount) {
       return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
     }
+
+    const bookingId = await resolveBookingReference(requestedBookingId);
 
     let booking = null;
     const isValidObjectId = mongoose.Types.ObjectId.isValid(bookingId);
@@ -176,7 +204,7 @@ exports.createOrder = async (req, res) => {
 
   } catch (err) {
     console.error('[CashfreePaymentCtrl] createOrder error:', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
