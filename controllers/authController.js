@@ -772,6 +772,53 @@ exports.login = async (req, res) => {
             }
         }
 
+        // Fallback for Tenants: Search Tenant collection directly by loginId, email, or phone
+        if (!user) {
+            const tenantOr = [
+                { email: normalizedIdentifier.toLowerCase() }
+            ];
+            if (isPhone && phone10) {
+                tenantOr.push(
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `0${phone10}` }
+                );
+            }
+            if (isLoginId) {
+                tenantOr.push(
+                    { loginId: normalizedIdentifier.toUpperCase() },
+                    { loginId: normalizedIdentifier.toLowerCase() }
+                );
+            }
+            const tenantDoc = await Tenant.findOne({ $or: tenantOr }).lean();
+            if (tenantDoc) {
+                user = await User.findOne({
+                    $or: [
+                        { loginId: tenantDoc.loginId },
+                        { email: tenantDoc.email },
+                        { phone: tenantDoc.phone }
+                    ]
+                });
+                if (!user && tenantDoc.isActive !== false && !tenantDoc.isDeleted) {
+                    try {
+                        user = await User.create({
+                            name: tenantDoc.name || 'Tenant',
+                            email: tenantDoc.email || normalizedIdentifier.toLowerCase(),
+                            phone: tenantDoc.phone || phone10,
+                            password: tenantDoc.tempPassword || password,
+                            role: 'tenant',
+                            loginId: tenantDoc.loginId,
+                            isActive: tenantDoc.isActive !== false,
+                            status: tenantDoc.status || 'active'
+                        });
+                    } catch (createErr) {
+                        user = await User.findOne({ loginId: tenantDoc.loginId });
+                    }
+                }
+            }
+        }
+
         // Fallback for Owners: Search Owner collection directly by loginId, email, or phone
         if (!user) {
             const ownerOr = [
