@@ -58,26 +58,22 @@ async function checkUserBlockStatus(loginId) {
   if (!loginId) return { blocked: false };
   const cleanId = String(loginId).trim();
 
-  // Self-healing: Clear any false positive violations caused by official payment links or single innocent words
-  try {
-    await ChatViolation.deleteMany({
-      $or: [
-        { messageSnippet: /roomhy/i },
-        { messageSnippet: /bookingId/i },
-        { messageSnippet: /website\/pay/i },
-        { messageSnippet: /Cashfree/i },
-        { messageSnippet: /Razorpay/i },
-        { messageSnippet: /^\s*"?\s*(yaan|yahan|paise|paisa|naa|de|de na|hi|hello|ha|haan)\s*"?\s*$/i }
-      ]
-    });
-  } catch (_) {}
-
   // 1. Check if explicitly suspended/blocked on User model
   const user = await User.findOne({ loginId: cleanId }).lean();
 
   // 2. Check Owner suspension & chatRestrictedUntil
   const upperId = cleanId.toUpperCase();
   const owner = await Owner.findOne({ loginId: upperId }).lean();
+
+  // A previous strike has already blocked this account. This must be checked
+  // before any self-healing/count logic, otherwise a blocked user could keep
+  // sending messages.
+  if (user?.status === 'blocked' || owner?.status === 'blocked' || owner?.isActive === false) {
+    return {
+      blocked: true,
+      reason: 'Your account has been blocked because of repeated chat-policy violations.'
+    };
+  }
 
   // Check if remaining real violations >= 2
   const realViolationsCount = await ChatViolation.countDocuments({
@@ -89,49 +85,27 @@ async function checkUserBlockStatus(loginId) {
   });
 
   if (realViolationsCount < 2) {
-    // Restore account if it was falsely blocked by payment links
-    if (owner && (!owner.isActive || owner.chatRestrictedUntil)) {
+    // A single strike is a warning only. It must not lock the account.
+    if (owner && owner.chatRestrictedUntil) {
       await Owner.updateOne({ loginId: upperId }, { $set: { isActive: true, chatRestrictedUntil: null } });
     }
-    if (user && (user.status === 'blocked' || !user.isActive || user.chatRestrictedUntil)) {
+    if (user && user.chatRestrictedUntil) {
       await User.updateOne({ loginId: cleanId }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
     }
     return { blocked: false };
   }
 
-  // 4. Check unresolved violations count in last 24 hours
-  const settings = await ChatSettings.findOne({ ownerLoginId: 'SUPER_ADMIN' }).lean();
-  const limit = settings?.strikeLimit || 3;
-  const autoBan = false; // Disabled automatic restriction (Only manual Super Admin restriction is allowed)
-
-  if (autoBan) {
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const violationsCount = await ChatViolation.countDocuments({
-      participantLoginId: cleanId,
-      resolvedAt: { $exists: false },
-      createdAt: { $gte: cutoff }
-    });
-
-    if (violationsCount >= limit) {
-      // Automatically restrict user for banDurationHours (default 24h)
-      const durationHours = settings?.banDurationHours || 24;
-      const restrictUntil = new Date(Date.now() + durationHours * 60 * 60 * 1000);
-
-      if (user) {
-        await User.updateOne({ loginId: cleanId }, { chatRestrictedUntil: restrictUntil });
-      }
-      if (owner) {
-        await Owner.updateOne({ loginId: upperId }, { chatRestrictedUntil: restrictUntil });
-      }
-
-      return {
-        blocked: true,
-        reason: `Your chat is blocked for ${durationHours} hours due to warnings.`
-      };
-    }
-  }
-
-  return { blocked: false };
+  // Safety net for violations recorded by an earlier deployment: two genuine
+  // attempts mean the sender is blocked even if the async moderation worker
+  // was interrupted before it applied the block.
+  await Promise.allSettled([
+    Owner.updateOne({ loginId: upperId }, { $set: { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' } }),
+    User.updateOne({ loginId: cleanId }, { $set: { status: 'blocked', isActive: false } })
+  ]);
+  return {
+    blocked: true,
+    reason: 'Your account has been blocked because of repeated chat-policy violations.'
+  };
 }
 
 // Detect violations in message content
@@ -719,6 +693,23 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
 
       if (isNewAttempt) {
         const isRepeatedOrSevere = attemptNumber >= 2;
+
+        await ChatViolation.updateOne(
+          { _id: violation._id },
+          {
+            $set: {
+              status: isRepeatedOrSevere ? 'Reviewed' : 'Warning Sent',
+              actionTaken: isRepeatedOrSevere ? 'blocked' : 'warned'
+            },
+            $push: {
+              actionHistory: {
+                action: isRepeatedOrSevere ? 'blocked' : 'warned',
+                adminId: 'system',
+                reason: isRepeatedOrSevere ? 'Automatic block after attempt 2 of 2' : 'Automatic warning for attempt 1 of 2'
+              }
+            }
+          }
+        );
 
         if (isRepeatedOrSevere) {
           console.log(`🚨 Auto-blocking offender ${offenderId} (Genuine Attempt 2 failed)`);

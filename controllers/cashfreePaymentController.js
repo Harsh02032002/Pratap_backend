@@ -145,7 +145,10 @@ exports.createOrder = async (req, res) => {
       };
     }
 
-    const orderId = `RMH_${bookingId}_${Date.now()}`;
+    // Generate short order_id to stay within Cashfree's 130 character limit
+    const timestamp = Date.now();
+    const shortId = bookingId.slice(0, 20); // Use first 20 chars of bookingId
+    const orderId = `RMH_${shortId}_${timestamp}`;
 
     const orderResult = await cfPay.createOrder({
       orderId,
