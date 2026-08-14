@@ -870,7 +870,14 @@ exports.login = async (req, res) => {
                 User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
             }
 
-            if (!isDemoAccount && user.role !== 'owner' && user.isActive === false) {
+            // Auto-heal tenant User model if user is a tenant with valid credentials
+            if (user.role === 'tenant' && user.isActive === false) {
+                user.isActive = true;
+                user.status = 'active';
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+            }
+
+            if (!isDemoAccount && user.role !== 'owner' && user.role !== 'tenant' && user.isActive === false) {
                 return res.status(403).json({ message: 'Account disabled' });
             }
 

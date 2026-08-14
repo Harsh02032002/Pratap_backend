@@ -769,21 +769,55 @@ exports.assignPropertyVerification = async (req, res) => {
         if (!property) {
             return res.status(404).json({ success: false, message: "Property not found" });
         }
+
+        // Auto-assign to employee of same city/area if no employee specified
+        let assignedEmployeeId = employeeId;
+        let assignedEmployeeName = employeeName;
+
+        if (!assignedEmployeeId) {
+            // Find employee matching property's city/area
+            const propertyCity = property.city || property.locationCode || '';
+            const propertyArea = property.locality || property.area || '';
+            
+            const matchingEmployee = await Employee.findOne({
+                isActive: true,
+                isDeleted: false,
+                $or: [
+                    { city: propertyCity },
+                    { locationCode: propertyCity },
+                    { area: propertyArea },
+                    { areaCode: propertyArea }
+                ]
+            });
+
+            if (matchingEmployee) {
+                assignedEmployeeId = matchingEmployee._id;
+                assignedEmployeeName = matchingEmployee.name;
+            } else {
+                // No employee found for this area
+                return res.json({ 
+                    success: false, 
+                    message: "No employee of that area, you can assign",
+                    autoAssignFailed: true,
+                    property 
+                });
+            }
+        }
         
         // If it's a new property pending approval (status === 'pending_approval')
         if (property.status === 'pending_approval') {
-            property.assignedTo = employeeId;
-            property.assignedToName = employeeName;
+            property.assignedTo = assignedEmployeeId;
+            property.assignedToName = assignedEmployeeName;
         } else if (property.pendingChanges && property.pendingChanges.status === 'pending') {
             // If it's an edit request
-            property.pendingChanges.assignedTo = employeeId;
-            property.pendingChanges.assignedToName = employeeName;
+            property.pendingChanges.assignedTo = assignedEmployeeId;
+            property.pendingChanges.assignedToName = assignedEmployeeName;
         } else {
             return res.status(400).json({ success: false, message: "Property has no pending creation or edit request to assign" });
         }
 
         await property.save();
-        res.json({ success: true, message: `Property verification assigned to ${employeeName}`, property });
+        res.json({ success: true, message: `Property verification assigned to ${assignedEmployeeName}`, property });
     } catch (err) {
         console.error("Error assigning property verification:", err);
         res.status(500).json({ success: false, message: err.message });

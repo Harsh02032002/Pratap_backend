@@ -152,11 +152,11 @@ function detectViolation(text, settings = {}) {
     return { violation: null, maskedText: text };
   }
 
-  // Exemption for short conversational chatter (< 4 words) without explicit phone/email/links/digits
+  // Exemption for short conversational chatter (< 6 words) without explicit phone/email/links/digits
   const trimmed = text.trim();
   const words = trimmed.split(/\s+/);
-  const isShortChatter = words.length <= 4;
-  const shortExemptPattern = /^\s*"?\s*(de|naa|na|paise|paisa|yahan|yaan|ha|haa|haan|thik|theek|bhej|bhejo|dena|karo|kro|hi|hello|ok|okay|aata|aaya|bhai|sir|mam|rent|room|ac|non ac|single|double|sharing|mil|baat|kaise|ho|acha|achha|batao|chahiye|mileyga|milraha|kab|kitna)\s*"?\s*$/i;
+  const isShortChatter = words.length <= 6;
+  const shortExemptPattern = /^\s*"?\s*(de|naa|na|paise|paisa|yahan|yaan|ha|haa|haan|thik|theek|bhej|bhejo|dena|karo|kro|hi|hello|ok|okay|aata|aaya|bhai|sir|mam|rent|room|ac|non ac|single|double|sharing|mil|baat|kaise|ho|acha|achha|batao|chahiye|mileyga|milraha|kab|kitna|haan|ji|yes|no|theek|hai|hain|karta|karti|kar|kri|lega|lenge|di|dunga|deta|deti|please|thanks|thank|you|welcome|bye|goodbye|morning|evening|night|afternoon|suno|sunna|bol|bolo|sunai|sunao|acha|achhi|badhi|badi|chota|choti|kam|zyada|kam|kum|jaldi|deri|abhi|ab|kal|parso|aaj|kal|pehle|baad|mein|mere|tumhare|uski|unki|sab|kuch|koi|kuch|bhi|nahi|na|to|fir|phir|lekin|magar|ya|aur|ki|ka|ke|ko|se|pe|par|mein|tum|main|hum|aap|tu|tera|mera|tumhara|hamara|uska|unki|unke|in|is|it|us|un|ye|wo|vah|ve|yeh|woh|kya|kyun|kaise|kahan|kidhar|kab|kaun|kaunsi|kaunse|kitna|kitne|kitni|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi)\s*"?\s*$/i;
 
   const hasDigitsOrUrl = /\d{5,}|http|www|\.com|@/.test(trimmed);
   if (isShortChatter && !hasDigitsOrUrl && shortExemptPattern.test(trimmed)) {

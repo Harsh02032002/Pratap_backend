@@ -56,7 +56,7 @@ const OTP_MAX      = parseInt(process.env.RATE_LIMIT_OTP_MAX,     10) || 5;
 const FORM_MAX     = parseInt(process.env.RATE_LIMIT_FORM_MAX,    10) || 20;
 const CONTACT_MAX  = parseInt(process.env.RATE_LIMIT_CONTACT_MAX, 10) || 10;
 const REFUND_MAX   = parseInt(process.env.RATE_LIMIT_REFUND_MAX,  10) || 5;
-const CHAT_MAX     = parseInt(process.env.RATE_LIMIT_CHAT_MAX,    10) || 30;
+const CHAT_MAX     = parseInt(process.env.RATE_LIMIT_CHAT_MAX,    10) || 1000;
 
 const globalApiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
