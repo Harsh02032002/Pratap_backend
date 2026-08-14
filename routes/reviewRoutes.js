@@ -332,13 +332,12 @@ router.post('/', protect, async (req, res) => {
     } catch (_) {}
 
     // First: Check if they have an active or inactive Tenant record for this property
-    // Try multiple property ID matches (actualPropertyId, original propertyId, and by propertyTitle)
+    // STRICT: Only match by exact property ID to ensure tenants can only review their actual property
     const tenantRecord = await Tenant.findOne({
       isDeleted: { $ne: true },
       $or: [
         { property: actualPropertyId },
-        { property: propertyId },
-        { propertyTitle: propertyName }
+        { property: propertyId }
       ],
       $or: [
         {
@@ -364,15 +363,14 @@ router.post('/', protect, async (req, res) => {
     let resolvedOwnerId = '';
 
     // Query BookingRequest to find the booking ID
-    // Try multiple property ID matches for flexibility
+    // STRICT: Only match by exact property ID to ensure tenants can only review their actual property
     const BookingRequest = require('../models/BookingRequest');
     const userBooking = await BookingRequest.findOne({
       $and: [
         {
           $or: [
             { property_id: actualPropertyId },
-            { property_id: propertyId },
-            { property_title: propertyName }
+            { property_id: propertyId }
           ]
         },
         {

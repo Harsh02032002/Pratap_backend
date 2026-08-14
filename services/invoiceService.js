@@ -396,7 +396,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
     }).select('_id').lean();
     const propertyIds = properties.map(p => p._id);
 
-    // Find all active, non-deleted tenants for this owner
+    // Find all active, non-deleted tenants for this owner who have completed payment
     const tenants = await Tenant.find({
       $or: [
         { ownerLoginId },
@@ -405,9 +405,10 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
       ],
       isDeleted: { $ne: true },
       status: { $ne: 'inactive' },
+      paymentLinkStatus: 'paid' // Only create invoices for tenants who have actually paid
     }).lean();
 
-    console.log(`[AUTO-HEAL DIAGNOSTIC] Owner: ${ownerLoginId}, Found ${tenants.length} tenants to check`);
+    console.log(`[AUTO-HEAL DIAGNOSTIC] Owner: ${ownerLoginId}, Found ${tenants.length} tenants with paid status to check`);
 
     const now = new Date();
     const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -421,7 +422,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
       const moveInMonthNum = moveIn.getMonth() + 1;
       const moveInMonthStr = `${moveInYear}-${String(moveInMonthNum).padStart(2, '0')}`;
 
-      // ONLY auto-create PAID invoice if move-in month IS the current month!
+      // ONLY auto-create PAID invoice if move-in month IS the current month AND payment is verified
       if (moveInMonthStr === currentMonth) {
         const existingMoveInInv = await RentInvoice.findOne({
           tenantId: t._id,
@@ -432,6 +433,10 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
           const config = await getEffectiveConfig(ownerObjId, t.property, null).catch(() => null);
           const dueDate = new Date(moveInYear, moveInMonthNum - 1, config?.rentDueDay || 1);
           const invoiceNumber = `INV-${currentMonth}-${String(t._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+          
+          // Include advance charge amount from tenant record for move-in month
+          const advanceCharge = Number(t.advanceChargeAmount || t.digitalCheckin?.agreementDetails?.advanceCharge || 0);
+          const totalWithAdvance = rentAmt + advanceCharge;
 
           const invoice = await RentInvoice.create({
             invoiceNumber,
@@ -443,10 +448,11 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
             tenantPhone: t.phone || '',
             billingMonth: currentMonth,
             rentAmount: rentAmt,
+            advanceChargeAmount: advanceCharge,
             dueDate,
-            totalDue: rentAmt,
+            totalDue: totalWithAdvance,
             outstandingAmount: 0,
-            paidAmount: rentAmt,
+            paidAmount: totalWithAdvance,
             rentPaidAmount: rentAmt,
             status: 'PAID',
             paymentDate: moveIn,
@@ -460,7 +466,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
               propertyId: t.property,
               ownerId: ownerObjId,
               amount: rentAmt,
-              paymentMethod: 'cash',
+              paymentMethod: 'online',
               transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
               isPartial: false,
               remainingAfter: 0,
@@ -468,7 +474,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
               penaltyPaidAmount: 0,
               paymentDate: moveIn,
               recordedBy: ownerLoginId || 'SYSTEM',
-              notes: 'Move-in month rent — auto-recorded on tenant onboarding',
+              notes: 'Move-in month rent — created after payment verification',
             }).catch(() => {});
           }
 
@@ -478,10 +484,10 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
             tenantId: t._id,
             ownerId: ownerObjId,
             propertyId: t.property,
-            meta: { billingMonth: currentMonth, rentAmount: rentAmt, note: 'Move-in month auto-PAID heal' },
+            meta: { billingMonth: currentMonth, rentAmount: rentAmt, note: 'Move-in month invoice created after payment verification' },
           }).catch(() => {});
 
-          console.log(`[MOVE-IN INVOICE HEALED SUCCESS] Auto-created PAID invoice for ${t.name} (${t.loginId}), month: ${currentMonth}`);
+          console.log(`[MOVE-IN INVOICE HEALED SUCCESS] Auto-created PAID invoice for ${t.name} (${t.loginId}), month: ${currentMonth} after payment verification`);
         }
       }
     }

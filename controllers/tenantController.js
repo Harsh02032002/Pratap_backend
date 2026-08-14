@@ -620,10 +620,11 @@ exports.assignTenant = async (req, res) => {
         }
 
         // Send email to tenant with loginId and digital check-in link (NO PASSWORD - will be sent after payment)
+        // SKIP this for tenants without Aadhaar - they will get payment link after superadmin approves alternate proof
         const baseWebUrl = process.env.DIGITAL_CHECKIN_URL || process.env.APP_BASE_URL || process.env.APP_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
         const tenantCheckinLink = `${baseWebUrl}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
         try {
-            if (tenant.email) {
+            if (tenant.email && !useAlternateProof) {
                 console.log(`[MAIL] Attempting to send KYC link to ${tenant.email}`);
                 const subject = 'Your RoomHy Tenant ID - Complete Digital KYC';
                 const html = `

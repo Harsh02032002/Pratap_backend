@@ -247,31 +247,40 @@ if (rooms.length === 0) {
             const tenants = await Tenant.find({
                 property: new mongoose.Types.ObjectId(propertyId),
                 status: { $in: ['active', 'pending'] }
-            }).select('roomNo room').lean();
+            }).select('roomNo room bedNo').lean();
             
-            // Count tenants per room
-            const tenantCountByRoomNo = {};
-            const tenantCountByRoomId = {};
+            // Track occupied beds per room
+            const occupiedBedsByRoom = {};
             
             tenants.forEach(t => {
-                if (t.room) {
-                    const rId = t.room.toString();
-                    tenantCountByRoomId[rId] = (tenantCountByRoomId[rId] || 0) + 1;
+                const roomKey = t.room ? t.room.toString() : String(t.roomNo || '').trim().toLowerCase();
+                if (!occupiedBedsByRoom[roomKey]) {
+                    occupiedBedsByRoom[roomKey] = new Set();
                 }
-                if (t.roomNo) {
-                    const rNo = String(t.roomNo).trim().toLowerCase();
-                    tenantCountByRoomNo[rNo] = (tenantCountByRoomNo[rNo] || 0) + 1;
+                if (t.bedNo) {
+                    occupiedBedsByRoom[roomKey].add(String(t.bedNo).trim());
                 }
             });
             
             rooms = rooms.filter(room => {
-                const countById = tenantCountByRoomId[room._id.toString()] || 0;
-                const countByNo = tenantCountByRoomNo[String(room.title).trim().toLowerCase()] || 0;
-                const activeCount = Math.max(countById, countByNo);
-                const capacity = Array.isArray(room.beds)
-                    ? (room.beds.length || Number(room.capacity || room.totalBeds) || 1)
-                    : (Number(room.beds || room.capacity || room.totalBeds) || 1);
-                return activeCount < capacity;
+                const roomKey = room._id.toString();
+                const occupiedBeds = occupiedBedsByRoom[roomKey] || new Set();
+                const capacity = Number(room.beds || room.capacity || room.totalBeds) || 1;
+                
+                // Hide room if all beds are occupied
+                if (occupiedBeds.size >= capacity) {
+                    return false;
+                }
+                
+                // Add available beds info to room object
+                room.availableBeds = [];
+                for (let i = 1; i <= capacity; i++) {
+                    if (!occupiedBeds.has(String(i))) {
+                        room.availableBeds.push(i);
+                    }
+                }
+                
+                return true;
             });
         }
         
