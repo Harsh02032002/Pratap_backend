@@ -52,7 +52,7 @@ async function isCallerSuperadmin(req) {
     if (token === 'superadmin_token') return true;
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
         const user = await User.findById(decoded.id).select('role').lean();
         return user?.role === 'superadmin' || user?.role === 'admin';
     } catch (err) {
