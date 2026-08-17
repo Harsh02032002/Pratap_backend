@@ -314,7 +314,42 @@ async function seedSeoData() {
             }
         }
 
-        // D. Perform Audit of Metadata Completeness across all 266 documents
+        // D. Seed Exact Metadata Records from Sheet Data JSON (132+ exact URLs)
+        console.log('🌱 Seeding Exact Sheet SEO Metadata Records...');
+        if (fs.existsSync(sheetJsonPath)) {
+            const rawSheetData = JSON.parse(fs.readFileSync(sheetJsonPath, 'utf8'));
+            for (const item of rawSheetData) {
+                if (!item.slug) continue;
+                const cleanSlug = item.slug.toLowerCase().trim();
+                const pageKey = item.pageKey || `${cleanSlug}`;
+                
+                await SeoPage.findOneAndUpdate(
+                    { pageKey },
+                    {
+                        $set: {
+                            pageKey,
+                            pageName: item.primaryKeyword || item.h1 || item.slug,
+                            slug: cleanSlug,
+                            metaTitle: item.metaTitle || item.title || '',
+                            metaDescription: item.metaDescription || item.desc || '',
+                            metaKeywords: item.metaKeywords || '',
+                            primaryKeyword: item.primaryKeyword || '',
+                            secondaryKeywords: item.secondaryKeywords || [],
+                            h1: item.h1 || '',
+                            canonicalUrl: item.canonicalUrl || `https://roomhy.com/${cleanSlug}`,
+                            robots: item.robots || 'index, follow',
+                            isIndexed: item.isIndexed !== false,
+                            sitemapPriority: 0.8,
+                            sitemapChangefreq: 'weekly'
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
+                pagesCount++;
+            }
+        }
+
+        // E. Perform Audit of Metadata Completeness across all documents
         const allPages = await SeoPage.find({});
         let h1Present = 0;
         let titlePresent = 0;
