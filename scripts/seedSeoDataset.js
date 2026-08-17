@@ -149,6 +149,33 @@ function slugify(text) {
         .replace(/\-\-+/g, '-');
 }
 
+async function upsertSeoPage(data) {
+    const cleanSlug = data.slug ? data.slug.toLowerCase().trim() : '';
+    const pageKey = data.pageKey;
+
+    let filter = null;
+    if (cleanSlug && pageKey) {
+        filter = { $or: [{ slug: cleanSlug }, { pageKey }] };
+    } else if (cleanSlug) {
+        filter = { slug: cleanSlug };
+    } else if (pageKey) {
+        filter = { pageKey };
+    }
+
+    if (!filter) return null;
+
+    const existing = await SeoPage.findOne(filter);
+    if (existing) {
+        return await SeoPage.findOneAndUpdate(
+            { _id: existing._id },
+            { $set: data },
+            { new: true }
+        );
+    } else {
+        return await SeoPage.create(data);
+    }
+}
+
 async function seedSeoData() {
     const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/roomhy';
     console.log(`🔗 Connecting to MongoDB: ${mongoUri.substring(0, 50)}...`);
@@ -175,74 +202,91 @@ async function seedSeoData() {
             const secondaryKeywords = sheetMeta?.secondaryKeywords || [];
             const metaKeywords = sheetMeta?.metaKeywords || `${item.pageName}, roomhy, student housing`;
 
-            await SeoPage.findOneAndUpdate(
-                { pageKey: item.pageKey },
-                {
-                    $set: {
-                        pageKey: item.pageKey,
-                        pageName: item.pageName,
-                        slug: item.slug,
-                        city: item.city || '',
-                        area: item.area || '',
-                        propertyType: item.propertyType || '',
-                        metaTitle,
-                        metaDescription,
-                        metaKeywords,
-                        primaryKeyword,
-                        secondaryKeywords,
-                        h1,
-                        canonicalUrl: `https://roomhy.com/${item.slug}`.replace(/\/+$/, ''),
-                        robots: item.robots,
-                        isIndexed: item.isIndexed,
-                        sitemapPriority: item.isIndexed ? 0.9 : 0.1,
-                        sitemapChangefreq: 'weekly'
-                    }
-                },
-                { upsert: true, new: true }
-            );
+            await upsertSeoPage({
+                pageKey: item.pageKey,
+                pageName: item.pageName,
+                slug: item.slug,
+                city: item.city || '',
+                area: item.area || '',
+                propertyType: item.propertyType || '',
+                metaTitle,
+                metaDescription,
+                metaKeywords,
+                primaryKeyword,
+                secondaryKeywords,
+                h1,
+                canonicalUrl: `https://roomhy.com/${item.slug}`.replace(/\/+$/, ''),
+                robots: item.robots,
+                isIndexed: item.isIndexed,
+                sitemapPriority: item.isIndexed ? 0.9 : 0.1,
+                sitemapChangefreq: 'weekly'
+            });
             pagesCount++;
         }
 
-        // B. Seed City-Level Landing Pages (40 URLs: 10 Cities x 4 Property Types)
+        // B. Seed City-Level Landing Pages (50 URLs: 10 Cities x 5 Property Types including properties-in-{city})
         console.log('🌱 Seeding City-Level SEO Pages...');
+        const cityPropTypes = [
+            ...propertyTypes,
+            { key: 'properties', typeName: 'All Properties', pluralName: 'Properties' }
+        ];
         for (const city of targetCities) {
             const citySlug = slugify(city);
-            for (const pt of propertyTypes) {
-                const cityPageSlug = `${pt.key}/${citySlug}`;
-                const sheetMeta = sheetMetadataMap.get(cityPageSlug.toLowerCase());
+            for (const pt of cityPropTypes) {
+                const hyphenatedSlug = `${pt.key}-in-${citySlug}`;
+                const slashSlug = `${pt.key}/${citySlug}`;
+
+                const sheetMeta = sheetMetadataMap.get(hyphenatedSlug.toLowerCase()) || sheetMetadataMap.get(slashSlug.toLowerCase());
 
                 const metaTitle = sheetMeta?.metaTitle || `Best ${pt.pluralName} in ${city} - Verified & Broker Free | Roomhy`;
                 const metaDescription = sheetMeta?.metaDescription || `Find top rated ${pt.pluralName} in ${city} with furnished rooms, food, WiFi, zero brokerage and verified options on Roomhy.`;
                 const h1 = sheetMeta?.h1 || `${pt.pluralName} in ${city}`;
-                const primaryKeyword = sheetMeta?.primaryKeyword || `${pt.typeName} in ${city}`;
+                const primaryKeyword = sheetMeta?.primaryKeyword || `${pt.pluralName} in ${city}`;
                 const secondaryKeywords = sheetMeta?.secondaryKeywords || [`${pt.pluralName} in ${city}`, `hostels in ${city}`];
-                const metaKeywords = sheetMeta?.metaKeywords || `${pt.typeName} in ${city}, ${pt.pluralName} in ${city}, student hostel ${city}`;
+                const metaKeywords = sheetMeta?.metaKeywords || `${pt.pluralName} in ${city}, student hostel ${city}`;
 
-                await SeoPage.findOneAndUpdate(
-                    { pageKey: `city-${pt.key}-${citySlug}` },
-                    {
-                        $set: {
-                            pageKey: `city-${pt.key}-${citySlug}`,
-                            pageName: `${pt.typeName} in ${city}`,
-                            slug: cityPageSlug,
-                            city: city,
-                            area: '',
-                            propertyType: pt.typeName,
-                            metaTitle,
-                            metaDescription,
-                            metaKeywords,
-                            primaryKeyword,
-                            secondaryKeywords,
-                            h1,
-                            canonicalUrl: `https://roomhy.com/${cityPageSlug}`,
-                            robots: 'index, follow',
-                            isIndexed: true,
-                            sitemapPriority: 0.85,
-                            sitemapChangefreq: 'weekly'
-                        }
-                    },
-                    { upsert: true, new: true }
-                );
+                // Seed hyphenated clean URL (e.g. pg-in-kota, properties-in-kota)
+                await upsertSeoPage({
+                    pageKey: `city-${pt.key}-${citySlug}`,
+                    pageName: `${pt.pluralName} in ${city}`,
+                    slug: hyphenatedSlug,
+                    city: city,
+                    area: '',
+                    propertyType: pt.typeName,
+                    metaTitle,
+                    metaDescription,
+                    metaKeywords,
+                    primaryKeyword,
+                    secondaryKeywords,
+                    h1,
+                    canonicalUrl: `https://roomhy.com/${hyphenatedSlug}`,
+                    robots: 'index, follow',
+                    isIndexed: true,
+                    sitemapPriority: 0.85,
+                    sitemapChangefreq: 'weekly'
+                });
+                pagesCount++;
+
+                // Seed legacy slash URL (e.g. pg/kota)
+                await upsertSeoPage({
+                    pageKey: `legacy-city-${pt.key}-${citySlug}`,
+                    pageName: `${pt.pluralName} in ${city}`,
+                    slug: slashSlug,
+                    city: city,
+                    area: '',
+                    propertyType: pt.typeName,
+                    metaTitle,
+                    metaDescription,
+                    metaKeywords,
+                    primaryKeyword,
+                    secondaryKeywords,
+                    h1,
+                    canonicalUrl: `https://roomhy.com/${hyphenatedSlug}`,
+                    robots: 'index, follow',
+                    isIndexed: true,
+                    sitemapPriority: 0.85,
+                    sitemapChangefreq: 'weekly'
+                });
                 pagesCount++;
             }
         }
@@ -266,32 +310,26 @@ async function seedSeoData() {
                 const metaKeywords = sheetMeta?.metaKeywords || `${pt.typeName} in ${loc.area}, ${pt.pluralName} in ${loc.city}, broker free pg ${loc.city}`;
                 const canonical = `https://roomhy.com/${seoSlug}`;
 
-                // 1. Seed SeoPage (Idempotent upsert by unique pageKey)
-                await SeoPage.findOneAndUpdate(
-                    { pageKey },
-                    {
-                        $set: {
-                            pageKey,
-                            pageName: `${pt.typeName} in ${loc.area}, ${loc.city}`,
-                            slug: seoSlug,
-                            city: loc.city,
-                            area: loc.area,
-                            propertyType: pt.typeName,
-                            metaTitle,
-                            metaDescription,
-                            metaKeywords,
-                            primaryKeyword,
-                            secondaryKeywords,
-                            h1,
-                            canonicalUrl: canonical,
-                            robots: 'index, follow',
-                            isIndexed: true,
-                            sitemapPriority: 0.8,
-                            sitemapChangefreq: 'weekly'
-                        }
-                    },
-                    { upsert: true, new: true }
-                );
+                // 1. Seed SeoPage (Idempotent upsert via upsertSeoPage)
+                await upsertSeoPage({
+                    pageKey,
+                    pageName: `${pt.typeName} in ${loc.area}, ${loc.city}`,
+                    slug: seoSlug,
+                    city: loc.city,
+                    area: loc.area,
+                    propertyType: pt.typeName,
+                    metaTitle,
+                    metaDescription,
+                    metaKeywords,
+                    primaryKeyword,
+                    secondaryKeywords,
+                    h1,
+                    canonicalUrl: canonical,
+                    robots: 'index, follow',
+                    isIndexed: true,
+                    sitemapPriority: 0.8,
+                    sitemapChangefreq: 'weekly'
+                });
                 pagesCount++;
 
                 // 2. Seed SeoRedirect for legacy path patterns (Idempotent upsert by unique oldUrl)
@@ -321,30 +359,24 @@ async function seedSeoData() {
             for (const item of rawSheetData) {
                 if (!item.slug) continue;
                 const cleanSlug = item.slug.toLowerCase().trim();
-                const pageKey = item.pageKey || `${cleanSlug}`;
+                const pageKey = item.pageKey || `sheet-${cleanSlug}`;
                 
-                await SeoPage.findOneAndUpdate(
-                    { pageKey },
-                    {
-                        $set: {
-                            pageKey,
-                            pageName: item.primaryKeyword || item.h1 || item.slug,
-                            slug: cleanSlug,
-                            metaTitle: item.metaTitle || item.title || '',
-                            metaDescription: item.metaDescription || item.desc || '',
-                            metaKeywords: item.metaKeywords || '',
-                            primaryKeyword: item.primaryKeyword || '',
-                            secondaryKeywords: item.secondaryKeywords || [],
-                            h1: item.h1 || '',
-                            canonicalUrl: item.canonicalUrl || `https://roomhy.com/${cleanSlug}`,
-                            robots: item.robots || 'index, follow',
-                            isIndexed: item.isIndexed !== false,
-                            sitemapPriority: 0.8,
-                            sitemapChangefreq: 'weekly'
-                        }
-                    },
-                    { upsert: true, new: true }
-                );
+                await upsertSeoPage({
+                    pageKey,
+                    pageName: item.primaryKeyword || item.h1 || item.slug,
+                    slug: cleanSlug,
+                    metaTitle: item.metaTitle || item.title || '',
+                    metaDescription: item.metaDescription || item.desc || '',
+                    metaKeywords: item.metaKeywords || '',
+                    primaryKeyword: item.primaryKeyword || '',
+                    secondaryKeywords: item.secondaryKeywords || [],
+                    h1: item.h1 || '',
+                    canonicalUrl: item.canonicalUrl || `https://roomhy.com/${cleanSlug}`,
+                    robots: item.robots || 'index, follow',
+                    isIndexed: item.isIndexed !== false,
+                    sitemapPriority: 0.8,
+                    sitemapChangefreq: 'weekly'
+                });
                 pagesCount++;
             }
         }
