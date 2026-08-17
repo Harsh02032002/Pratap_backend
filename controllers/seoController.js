@@ -98,15 +98,141 @@ exports.getSeoMetadata = async (req, res) => {
             seoRecord = await SeoPage.findOne({ pageKey, entityId: null });
         }
 
-        // If absolutely no record is found, return empty data
-        if (!seoRecord) {
+        // If no explicit DB record was found, check if this is an SEO URL pattern: /{type}-in-{area}-{city}
+        if (!seoRecord && (slug || url)) {
+            const cleanedSlug = cleanPath(slug || url);
+            const seoPatternMatch = cleanedSlug.match(/^(pg|hostels|hostel|co-living|coliving|apartments|apartment)-in-(.+)$/i);
+            
+            if (seoPatternMatch) {
+                const rawType = seoPatternMatch[1].toLowerCase();
+                const rawLocation = seoPatternMatch[2]; // e.g. "talwandi-kota", "mp-nagar-bhopal", "electronic-city-bangalore"
+                
+                let propertyType = 'PG';
+                if (rawType.startsWith('hostel')) propertyType = 'Hostel';
+                else if (rawType.includes('coliving') || rawType.includes('co-living')) propertyType = 'Co-living';
+                else if (rawType.startsWith('apartment')) propertyType = 'Apartment';
+
+                // Match against known cities list for accurate multi-word area resolution
+                const knownCities = [
+                    'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
+                    'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'chennai',
+                    'ahmedabad', 'lucknow', 'chandigarh', 'noida', 'gurugram'
+                ];
+
+                let city = context.city || '';
+                let area = context.area || '';
+
+                if (!city || !area) {
+                    const matchedCityKey = knownCities.find(c => rawLocation.endsWith('-' + c) || rawLocation === c);
+                    if (matchedCityKey) {
+                        city = matchedCityKey.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        if (rawLocation !== matchedCityKey) {
+                            const areaPart = rawLocation.slice(0, rawLocation.length - matchedCityKey.length - 1);
+                            area = areaPart.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        }
+                    } else {
+                        const parts = rawLocation.split('-');
+                        if (parts.length >= 2) {
+                            city = parts[parts.length - 1].charAt(0).toUpperCase() + parts[parts.length - 1].slice(1);
+                            area = parts.slice(0, parts.length - 1).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        } else if (parts.length === 1) {
+                            city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                        }
+                    }
+                }
+
+                const generatedH1 = `${propertyType} in ${area ? area + ', ' : ''}${city}`;
+                const generatedTitle = `${propertyType} in ${area ? area + ' ' : ''}${city} | Roomhy`;
+                const generatedDesc = `Find the best ${propertyType} in ${area ? area + ' ' : ''}${city} with furnished rooms, modern amenities, zero brokerage and verified options on Roomhy.`;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `dynamic-${cleanedSlug}`,
+                        pageName: generatedH1,
+                        slug: cleanedSlug,
+                        city,
+                        area,
+                        propertyType,
+                        metaTitle: generatedTitle,
+                        metaDescription: generatedDesc,
+                        metaKeywords: `${propertyType} in ${area}, ${propertyType} in ${city}, student housing ${city}`,
+                        h1: generatedH1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+
+            // Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
+            const parts = cleanedSlug.split('/');
+            const knownCities = [
+                'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
+                'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'nagpur',
+                'chennai', 'ahmedabad', 'lucknow', 'chandigarh', 'noida', 'gurugram'
+            ];
+
+            if (parts.length === 1 && knownCities.includes(parts[0].toLowerCase())) {
+                const city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                const title = `Rental Properties in ${city} | Roomhy`;
+                const desc = `Browse all verified PGs, Hostels, Co-living spaces, and Apartments for rent in ${city} with zero brokerage on Roomhy.`;
+                const h1 = `Properties in ${city}`;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `city-general-${parts[0]}`,
+                        pageName: h1,
+                        slug: cleanedSlug,
+                        city,
+                        area: '',
+                        propertyType: 'All',
+                        metaTitle: title,
+                        metaDescription: desc,
+                        metaKeywords: `properties in ${city}, pg in ${city}, hostels in ${city}, flats for rent in ${city}`,
+                        h1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+
+            if (parts.length === 2 && knownCities.includes(parts[0].toLowerCase())) {
+                const city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                const area = parts[1].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                const title = `Rental Properties in ${area}, ${city} | Roomhy`;
+                const desc = `Browse all verified PGs, Hostels, Co-living spaces, and Apartments for rent in ${area}, ${city} with zero brokerage on Roomhy.`;
+                const h1 = `Properties in ${area}, ${city}`;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `area-general-${parts[0]}-${parts[1]}`,
+                        pageName: h1,
+                        slug: cleanedSlug,
+                        city,
+                        area,
+                        propertyType: 'All',
+                        metaTitle: title,
+                        metaDescription: desc,
+                        metaKeywords: `properties in ${area} ${city}, pg in ${area}, hostels in ${area} ${city}`,
+                        h1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+
             return res.status(200).json({
                 success: true,
                 data: {
                     metaTitle: '',
                     metaDescription: '',
                     metaKeywords: '',
-                    canonicalUrl: '',
+                    canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
                     robots: 'index, follow',
                     isIndexed: true
                 }
@@ -143,6 +269,52 @@ exports.getSeoMetadata = async (req, res) => {
             message: 'Internal server error while resolving SEO',
             error: error.message
         });
+    }
+};
+
+/**
+ * GENERATE DYNAMIC XML SITEMAP
+ */
+exports.generateSitemapXml = async (req, res) => {
+    try {
+        const pages = await SeoPage.find({ isIndexed: { $ne: false } }).lean();
+
+        let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+        xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
+
+        const defaultUrls = [
+            { loc: 'https://roomhy.com/', priority: '1.0', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/about-us', priority: '0.7', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/contact-us', priority: '0.7', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/list-property', priority: '0.8', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/faq', priority: '0.6', changefreq: 'monthly' }
+        ];
+
+        const addedUrls = new Set();
+        defaultUrls.forEach(item => {
+            addedUrls.add(item.loc);
+            xml += `  <url>\n    <loc>${item.loc}</loc>\n    <changefreq>${item.changefreq}</changefreq>\n    <priority>${item.priority}</priority>\n  </url>\n`;
+        });
+
+        pages.forEach(p => {
+            if (p.robots && p.robots.toLowerCase().includes('noindex')) return;
+
+            const path = (p.slug || '').replace(/^\/+/, '');
+            const url = p.canonicalUrl || `https://roomhy.com/${path}`;
+
+            if (url && !addedUrls.has(url)) {
+                addedUrls.add(url);
+                xml += `  <url>\n    <loc>${url}</loc>\n    <changefreq>${p.sitemapChangefreq || 'weekly'}</changefreq>\n    <priority>${p.sitemapPriority || 0.8}</priority>\n  </url>\n`;
+            }
+        });
+
+        xml += `</urlset>`;
+
+        res.header('Content-Type', 'application/xml');
+        return res.status(200).send(xml);
+    } catch (err) {
+        console.error('Error generating XML sitemap:', err);
+        return res.status(500).send('Error generating sitemap');
     }
 };
 

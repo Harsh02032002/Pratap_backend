@@ -152,6 +152,48 @@ app.use((req, res, next) => {
     next();
 });
 
+// ── HTTP 301 Redirect Middleware for Legacy SEO URLs (Server-Level) ─────────
+const SeoRedirect = require('./models/SeoRedirect');
+const seoController = require('./controllers/seoController');
+
+app.use(async (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    const reqPath = req.path;
+    if (reqPath.startsWith('/api/') || 
+        reqPath.startsWith('/assets/') || 
+        reqPath.startsWith('/images/') || 
+        reqPath.startsWith('/js/') || 
+        reqPath === '/sitemap.xml' ||
+        reqPath.includes('.')) {
+        return next();
+    }
+
+    try {
+        const cleanReqPath = reqPath.replace(/^\/+|\/+$/g, '').toLowerCase();
+        if (!cleanReqPath) return next();
+
+        const redirectMatch = await SeoRedirect.findOne({
+            $or: [
+                { oldUrl: cleanReqPath },
+                { oldUrl: '/' + cleanReqPath },
+                { oldUrl: reqPath }
+            ]
+        }).lean();
+
+        if (redirectMatch && redirectMatch.newUrl) {
+            const destination = redirectMatch.newUrl.startsWith('/') ? redirectMatch.newUrl : '/' + redirectMatch.newUrl;
+            console.log(`🔀 Server HTTP 301 Redirect: ${req.originalUrl} -> ${destination}`);
+            return res.redirect(redirectMatch.statusCode || 301, destination);
+        }
+    } catch (err) {
+        console.warn('⚠️ Redirect middleware error:', err.message);
+    }
+    next();
+});
+
+// Root XML Sitemap Route (Dynamic single source of truth from MongoDB)
+app.get('/sitemap.xml', seoController.generateSitemapXml);
+
 // Optimized Database Connection
 const mongoOptions = {
     serverSelectionTimeoutMS: 30000,
