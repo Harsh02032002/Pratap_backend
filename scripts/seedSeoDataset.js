@@ -176,7 +176,7 @@ async function seedSeoData() {
             const metaKeywords = sheetMeta?.metaKeywords || `${item.pageName}, roomhy, student housing`;
 
             await SeoPage.findOneAndUpdate(
-                { slug: item.slug },
+                { pageKey: item.pageKey },
                 {
                     $set: {
                         pageKey: item.pageKey,
@@ -219,7 +219,7 @@ async function seedSeoData() {
                 const metaKeywords = sheetMeta?.metaKeywords || `${pt.typeName} in ${city}, ${pt.pluralName} in ${city}, student hostel ${city}`;
 
                 await SeoPage.findOneAndUpdate(
-                    { slug: cityPageSlug },
+                    { pageKey: `city-${pt.key}-${citySlug}` },
                     {
                         $set: {
                             pageKey: `city-${pt.key}-${citySlug}`,
@@ -266,9 +266,9 @@ async function seedSeoData() {
                 const metaKeywords = sheetMeta?.metaKeywords || `${pt.typeName} in ${loc.area}, ${pt.pluralName} in ${loc.city}, broker free pg ${loc.city}`;
                 const canonical = `https://roomhy.com/${seoSlug}`;
 
-                // 1. Seed SeoPage (Idempotent upsert by unique slug)
+                // 1. Seed SeoPage (Idempotent upsert by unique pageKey)
                 await SeoPage.findOneAndUpdate(
-                    { slug: seoSlug },
+                    { pageKey },
                     {
                         $set: {
                             pageKey,
