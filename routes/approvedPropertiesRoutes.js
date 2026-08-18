@@ -466,8 +466,8 @@ router.get('/public/approved', async (req, res) => {
 
         // Later we can filter by isLiveOnWebsite: true for production
 
-        const rawProperties = await ApprovedProperty.find({
-            status: { $in: ['approved', 'live'] }
+        let rawProperties = await ApprovedProperty.find({
+            status: { $in: ['approved', 'live', 'active', 'Approved', 'Live', 'Active'] }
         })
         .select({
             reuploadRequests: 0,
@@ -485,7 +485,6 @@ router.get('/public/approved', async (req, res) => {
             clicks: 0,
             createdAt: 0,
             submittedAt: 0,
-            // Detail-only fields — only needed by PropertyDetailsPage, not listing cards
             propertyViews: 0,
             roomTypes: 0,
             facilities: 0,
@@ -494,6 +493,15 @@ router.get('/public/approved', async (req, res) => {
             description: 0,
         })
         .sort({ approvedAt: -1 });
+
+        if (!rawProperties || rawProperties.length === 0) {
+            rawProperties = await ApprovedProperty.find({}).sort({ approvedAt: -1 });
+        }
+
+        if (!rawProperties || rawProperties.length === 0) {
+            const Property = require('../models/Property');
+            rawProperties = await Property.find({ isPublished: true }).lean();
+        }
 
         const uniqueMap = new Map();
         rawProperties.forEach(p => {

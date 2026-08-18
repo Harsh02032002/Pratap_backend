@@ -284,10 +284,22 @@ exports.generateSitemapXml = async (req, res) => {
 
         const defaultUrls = [
             { loc: 'https://roomhy.com/', priority: '1.0', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/properties', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/hostels', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/co-living', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/apartments', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/about-us', priority: '0.7', changefreq: 'monthly' },
             { loc: 'https://roomhy.com/contact-us', priority: '0.7', changefreq: 'monthly' },
             { loc: 'https://roomhy.com/list-property', priority: '0.8', changefreq: 'weekly' },
-            { loc: 'https://roomhy.com/faq', priority: '0.6', changefreq: 'monthly' }
+            { loc: 'https://roomhy.com/faq', priority: '0.6', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/pg-in-kota', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-jaipur', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-delhi', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-indore', priority: '0.8', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-talwandi-kota', priority: '0.85', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/pg-in-vigyan-nagar-kota', priority: '0.85', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/pg-in-landmark-city-kota', priority: '0.85', changefreq: 'weekly' }
         ];
 
         const addedUrls = new Set();
