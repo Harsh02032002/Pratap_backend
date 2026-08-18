@@ -727,7 +727,7 @@ exports.login = async (req, res) => {
         const cleanDigits = normalizedIdentifier.replace(/\D/g, '');
         const phone10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
         const isPhone = phone10.length === 10;
-        const isLoginId = /^roomhy/i.test(normalizedIdentifier);
+        const isLoginId = /^roomhy/i.test(normalizedIdentifier) || /^\d{3,6}$/.test(normalizedIdentifier);
         
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
         
@@ -823,6 +823,8 @@ exports.login = async (req, res) => {
         if (!user) {
             const ownerOr = [
                 { loginId: normalizedIdentifier.toUpperCase() },
+                { loginId: `ROOMHY${normalizedIdentifier}` },
+                { loginId: new RegExp(`${normalizedIdentifier}$`, 'i') },
                 { loginId: normalizedIdentifier.toLowerCase() },
                 { email: normalizedIdentifier.toLowerCase() }
             ];

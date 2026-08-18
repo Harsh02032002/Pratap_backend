@@ -240,7 +240,19 @@ exports.getSeoMetadata = async (req, res) => {
         }
 
         // D. Perform dynamic placeholder rendering (template variables)
-        const seoObj = seoRecord.toObject();
+        if (!seoRecord) {
+            return res.status(200).json({
+                success: true,
+                data: {
+                    metaTitle: 'Roomhy - Premium Broker-Free Student & Professional Living',
+                    metaDescription: 'Find and book verified broker-free PGs, Hostels, and Co-living spaces across top cities in India.',
+                    canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                    robots: 'index, follow',
+                    isIndexed: true
+                }
+            });
+        }
+        const seoObj = typeof seoRecord.toObject === 'function' ? seoRecord.toObject() : (seoRecord || {});
         const renderFields = [
             'metaTitle', 'metaDescription', 'metaKeywords', 'h1', 'seoContent',
             'openGraphTitle', 'openGraphDescription', 'twitterTitle', 'twitterDescription'

@@ -748,15 +748,35 @@ router.get('/subscription-status', async (req, res) => {
     if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
 
     const SystemSettings = require('../models/SystemSettings');
-    const [owner, settings] = await Promise.all([
-      Owner.findOne({
-        loginId: { $regex: new RegExp(`^${loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-        isDeleted: { $ne: true }
-      })
-        .select('loginId name createdAt subscription')
-        .lean(),
-      SystemSettings.findOne().lean()
-    ]);
+    const User = require('../models/User');
+    const escaped = loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(`^${escaped}$`, 'i');
+
+    let owner = await Owner.findOne({
+      $or: [
+        { loginId: rx },
+        { email: loginId.toLowerCase() },
+        { phone: loginId },
+        { 'profile.phone': loginId }
+      ],
+      isDeleted: { $ne: true }
+    })
+      .select('loginId name createdAt subscription')
+      .lean();
+
+    if (!owner) {
+      // Fallback: check User collection for owner role
+      const userDoc = await User.findOne({
+        $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
+        role: 'owner'
+      }).select('loginId name createdAt subscription').lean();
+
+      if (userDoc) {
+        owner = userDoc;
+      }
+    }
+
+    const settings = await SystemSettings.findOne().lean();
 
     if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
