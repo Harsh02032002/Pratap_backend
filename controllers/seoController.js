@@ -93,29 +93,25 @@ exports.getSeoMetadata = async (req, res) => {
             });
         }
 
-        // C. Match by pageKey (fallback template or static page key)
-        if (!seoRecord && pageKey) {
-            seoRecord = await SeoPage.findOne({ pageKey, entityId: null });
-        }
-
-        // If no explicit DB record was found, check if this is an SEO URL pattern: /{type}-in-{area}-{city}
+        // C. Check if slug/url is an SEO URL pattern: /{type}-in-{location}
         if (!seoRecord && (slug || url)) {
             const cleanedSlug = cleanPath(slug || url);
-            const seoPatternMatch = cleanedSlug.match(/^(pg|hostels|hostel|co-living|coliving|apartments|apartment)-in-(.+)$/i);
+            const seoPatternMatch = cleanedSlug.match(/^(properties|pg|hostels|hostel|co-living|coliving|apartments|apartment)-in-(.+)$/i);
             
             if (seoPatternMatch) {
                 const rawType = seoPatternMatch[1].toLowerCase();
-                const rawLocation = seoPatternMatch[2]; // e.g. "talwandi-kota", "mp-nagar-bhopal", "electronic-city-bangalore"
+                const rawLocation = seoPatternMatch[2]; // e.g. "kota", "talwandi-kota", "mp-nagar-bhopal"
                 
                 let propertyType = 'PG';
-                if (rawType.startsWith('hostel')) propertyType = 'Hostel';
+                if (rawType.startsWith('properties')) propertyType = 'Properties';
+                else if (rawType.startsWith('hostel')) propertyType = 'Hostel';
                 else if (rawType.includes('coliving') || rawType.includes('co-living')) propertyType = 'Co-living';
                 else if (rawType.startsWith('apartment')) propertyType = 'Apartment';
 
                 // Match against known cities list for accurate multi-word area resolution
                 const knownCities = [
                     'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
-                    'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'chennai',
+                    'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'nagpur', 'chennai',
                     'ahmedabad', 'lucknow', 'chandigarh', 'noida', 'gurugram'
                 ];
 
@@ -141,9 +137,14 @@ exports.getSeoMetadata = async (req, res) => {
                     }
                 }
 
-                const generatedH1 = `${propertyType} in ${area ? area + ', ' : ''}${city}`;
-                const generatedTitle = `${propertyType} in ${area ? area + ' ' : ''}${city} | Roomhy`;
-                const generatedDesc = `Find the best ${propertyType} in ${area ? area + ' ' : ''}${city} with furnished rooms, modern amenities, zero brokerage and verified options on Roomhy.`;
+                const generatedH1 = `${rawType.startsWith('properties') ? 'Properties in' : propertyType + ' in'} ${area ? area + ', ' : ''}${city}`;
+                let generatedTitle = `Best ${propertyType} in ${area ? area + ' ' : ''}${city} | Boys & Girls | Roomhy`;
+                let generatedDesc = `Find the best ${propertyType.toLowerCase()} in ${area ? area + ', ' : ''}${city} for boys and girls. Enjoy fully furnished rooms with food, Wi-Fi, 24/7 security, and 0% brokerage on Roomhy.`;
+
+                if (rawType.startsWith('properties')) {
+                    generatedTitle = `Top PGs, Hostels & Flats in ${area ? area + ' ' : ''}${city} | Roomhy.com`;
+                    generatedDesc = `Find top verified student PGs, hostels, and flats in ${area ? area + ', ' : ''}${city} with zero brokerage, modern amenities, and prime stays on Roomhy.com.`;
+                }
 
                 return res.status(200).json({
                     success: true,
@@ -156,7 +157,7 @@ exports.getSeoMetadata = async (req, res) => {
                         propertyType,
                         metaTitle: generatedTitle,
                         metaDescription: generatedDesc,
-                        metaKeywords: `${propertyType} in ${area}, ${propertyType} in ${city}, student housing ${city}`,
+                        metaKeywords: `PG in ${area || city}, hostels in ${area || city}, student accommodation ${city}, rooms in ${area || city}, flats in ${area || city}`,
                         h1: generatedH1,
                         canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
                         robots: 'index, follow',
@@ -164,6 +165,12 @@ exports.getSeoMetadata = async (req, res) => {
                     }
                 });
             }
+        }
+
+        // D. Match by pageKey (fallback template or static page key)
+        if (!seoRecord && pageKey && !['pg-main', 'hostels-main', 'co-living-main'].includes(pageKey)) {
+            seoRecord = await SeoPage.findOne({ pageKey, entityId: null });
+        }
 
             // Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
             const parts = cleanedSlug.split('/');
