@@ -7,7 +7,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const SeoPage = require('../models/SeoPage');
 
-const seoPagesSeedData = [
+const allSeoEntries = [
   // --- Core Pages ---
   {
     pageKey: 'home',
@@ -145,58 +145,518 @@ const seoPagesSeedData = [
   },
 
   // --- Properties in City Pages ---
-  { pageKey: 'properties-in-kota', pageName: 'Properties in Kota', slug: 'properties-in-kota', metaTitle: 'Top PGs, Hostels & Flats in Kota | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Kota with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-jaipur', pageName: 'Properties in Jaipur', slug: 'properties-in-jaipur', metaTitle: 'Top PGs, Hostels & Flats in Jaipur | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Jaipur with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-delhi', pageName: 'Properties in Delhi', slug: 'properties-in-delhi', metaTitle: 'Top PGs, Hostels & Flats in Delhi| Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Delhi with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-indore', pageName: 'Properties in Indore', slug: 'properties-in-indore', metaTitle: 'Top PGs, Hostels & Flats in Indore | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Indore with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-bhopal', pageName: 'Properties in Bhopal', slug: 'properties-in-bhopal', metaTitle: 'Top PGs, Hostels & Flats in Bhopal | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Bhopal with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-nagpur', pageName: 'Properties in Nagpur', slug: 'properties-in-nagpur', metaTitle: 'Top PGs, Hostels & Flats in Nagpur | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Nagpur with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-sikar', pageName: 'Properties in Sikar', slug: 'properties-in-sikar', metaTitle: 'Top PGs, Hostels & Flats in Sikar | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Sikar with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-bangalore', pageName: 'Properties in Bangalore', slug: 'properties-in-bangalore', metaTitle: 'Top PGs, Hostels & Flats in Bangalore | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Bangalore with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-pune', pageName: 'Properties in Pune', slug: 'properties-in-pune', metaTitle: 'Top PGs, Hostels & Flats in Pune | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Pune with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'properties-in-hyderabad', pageName: 'Properties in Hyderabad', slug: 'properties-in-hyderabad', metaTitle: 'Top PGs, Hostels & Flats in Hyderabad | Roomhy.com', metaDescription: 'Find top verified student PGs, hostels, and flats in Hyderabad with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
+  {
+    pageKey: 'properties-in-kota',
+    pageName: 'Properties in Kota',
+    slug: 'properties-in-kota',
+    metaTitle: 'Top PGs, Hostels & Flats in Kota | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Kota with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-jaipur',
+    pageName: 'Properties in Jaipur',
+    slug: 'properties-in-jaipur',
+    metaTitle: 'Top PGs, Hostels & Flats in Jaipur | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Jaipur with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-delhi',
+    pageName: 'Properties in Delhi',
+    slug: 'properties-in-delhi',
+    metaTitle: 'Top PGs, Hostels & Flats in Delhi| Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Delhi with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-indore',
+    pageName: 'Properties in Indore',
+    slug: 'properties-in-indore',
+    metaTitle: 'Top PGs, Hostels & Flats in Indore | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Indore with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-bhopal',
+    pageName: 'Properties in Bhopal',
+    slug: 'properties-in-bhopal',
+    metaTitle: 'Top PGs, Hostels & Flats in Bhopal | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Bhopal with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-nagpur',
+    pageName: 'Properties in Nagpur',
+    slug: 'properties-in-nagpur',
+    metaTitle: 'Top PGs, Hostels & Flats in Nagpur | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Nagpur with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-sikar',
+    pageName: 'Properties in Sikar',
+    slug: 'properties-in-sikar',
+    metaTitle: 'Top PGs, Hostels & Flats in Sikar | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Sikar with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-bangalore',
+    pageName: 'Properties in Bangalore',
+    slug: 'properties-in-bangalore',
+    metaTitle: 'Top PGs, Hostels & Flats in Bangalore | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Bangalore with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-pune',
+    pageName: 'Properties in Pune',
+    slug: 'properties-in-pune',
+    metaTitle: 'Top PGs, Hostels & Flats in Pune | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Pune with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'properties-in-hyderabad',
+    pageName: 'Properties in Hyderabad',
+    slug: 'properties-in-hyderabad',
+    metaTitle: 'Top PGs, Hostels & Flats in Hyderabad | Roomhy.com',
+    metaDescription: 'Find top verified student PGs, hostels, and flats in Hyderabad with zero brokerage, modern amenities, and prime stays near top colleges and hubs on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
 
   // --- Category Listing Directories ---
-  { pageKey: 'pg-cities', pageName: 'Top Cities for PGs in India', slug: 'pg-cities', metaTitle: 'Top Cities for PGs in India | Zero Brokerage | Roomhy.com', metaDescription: 'Explore top Indian cities to find verified PGs. Compare student & professional accommodations with zero brokerage and modern amenities on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
-  { pageKey: 'pg-localities', pageName: 'Top Localities for PGs Across India', slug: 'pg-localities', metaTitle: 'Top Localities for PGs Across India | Roomhy.com', metaDescription: 'Browse top student & IT localities for verified PGs across India. Enjoy zero brokerage, budget bidding, furnished rooms, and meals on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
-  { pageKey: 'hostels-cities', pageName: 'Top Cities for Hostels in India', slug: 'hostels-cities', metaTitle: 'Top Cities for Hostels in India | Zero Brokerage | Roomhy.com', metaDescription: 'Discover affordable student and working hostels across major Indian cities. Zero brokerage, verified listings, and secure stays with Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
-  { pageKey: 'hostels-localities', pageName: 'Top Localities for Hostels in India', slug: 'hostels-localities', metaTitle: 'Top Localities for Hostels in India | Roomhy.com', metaDescription: 'Find top student localities for budget hostels across India. Enjoy zero brokerage, furnished rooms, Wi-Fi, and 24/7 security on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
-  { pageKey: 'co-living-cities', pageName: 'Top Cities for Co-Living in India', slug: 'co-living-cities', metaTitle: 'Top Cities for Co-Living in India | Zero Brokerage | Roomhy.com', metaDescription: 'Explore modern co-living spaces across top Indian cities. Zero brokerage, fully furnished community living, and high-speed Wi-Fi on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
-  { pageKey: 'co-living-localities', pageName: 'Top Localities for Co-Living in India', slug: 'co-living-localities', metaTitle: 'Top Localities for Co-Living in India | Roomhy.com', metaDescription: 'Discover premium co-living localities across India. Connect directly with owners, bid your budget, and move into verified stays on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.8, sitemapChangefreq: 'weekly' },
+  {
+    pageKey: 'pg-cities',
+    pageName: 'Top Cities for PGs in India',
+    slug: 'pg-cities',
+    metaTitle: 'Top Cities for PGs in India | Zero Brokerage | Roomhy.com',
+    metaDescription: 'Explore top Indian cities to find verified PGs. Compare student & professional accommodations with zero brokerage and modern amenities on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
+  {
+    pageKey: 'pg-localities',
+    pageName: 'Top Localities for PGs Across India',
+    slug: 'pg-localities',
+    metaTitle: 'Top Localities for PGs Across India | Roomhy.com',
+    metaDescription: 'Browse top student & IT localities for verified PGs across India. Enjoy zero brokerage, budget bidding, furnished rooms, and meals on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
+  {
+    pageKey: 'hostels-cities',
+    pageName: 'Top Cities for Hostels in India',
+    slug: 'hostels-cities',
+    metaTitle: 'Top Cities for Hostels in India | Zero Brokerage | Roomhy.com',
+    metaDescription: 'Discover affordable student and working hostels across major Indian cities. Zero brokerage, verified listings, and secure stays with Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
+  {
+    pageKey: 'hostels-localities',
+    pageName: 'Top Localities for Hostels in India',
+    slug: 'hostels-localities',
+    metaTitle: 'Top Localities for Hostels in India | Roomhy.com',
+    metaDescription: 'Find top student localities for budget hostels across India. Enjoy zero brokerage, furnished rooms, Wi-Fi, and 24/7 security on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
+  {
+    pageKey: 'co-living-cities',
+    pageName: 'Top Cities for Co-Living in India',
+    slug: 'co-living-cities',
+    metaTitle: 'Top Cities for Co-Living in India | Zero Brokerage | Roomhy.com',
+    metaDescription: 'Explore modern co-living spaces across top Indian cities. Zero brokerage, fully furnished community living, and high-speed Wi-Fi on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
+  {
+    pageKey: 'co-living-localities',
+    pageName: 'Top Localities for Co-Living in India',
+    slug: 'co-living-localities',
+    metaTitle: 'Top Localities for Co-Living in India | Roomhy.com',
+    metaDescription: 'Discover premium co-living localities across India. Connect directly with owners, bid your budget, and move into verified stays on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.8,
+    sitemapChangefreq: 'weekly'
+  },
 
   // --- Category by City Pages ---
-  { pageKey: 'pg-in-kota', pageName: 'PG in Kota', slug: 'pg-in-kota', metaTitle: 'Best PG in Kota for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Kota for boys and girls near Allen, Resonance, and coaching hubs. Furnished rooms with food, Wi-Fi, a study table, and 0% brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-jaipur', pageName: 'PG in Jaipur', slug: 'pg-in-jaipur', metaTitle: 'Best PG in Jaipur for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Jaipur for boys and girls near top colleges and coaching centres. Enjoy fully furnished rooms with meals, Wi-Fi, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-delhi', pageName: 'PG in Delhi', slug: 'pg-in-delhi', metaTitle: 'Best PG in Delhi for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Delhi for students and professionals near top universities and metro hubs. Furnished rooms with meals, Wi-Fi, and 0% brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-indore', pageName: 'PG in Indore', slug: 'pg-in-indore', metaTitle: 'Best PG in Indore for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Indore for students near coaching centres and tech parks. Fully furnished rooms with meals, Wi-Fi, daily cleaning, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-bhopal', pageName: 'PG in Bhopal', slug: 'pg-in-bhopal', metaTitle: 'Best PG in Bhopal for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Bhopal for students and working professionals. Enjoy fully furnished rooms with homemade food, Wi-Fi, security, and zero brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-nagpur', pageName: 'PG in Nagpur', slug: 'pg-in-nagpur', metaTitle: 'Best PG in Nagpur for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Nagpur for boys and girls. Verified furnished rooms with Wi-Fi, homemade meals, 24/7 security, and zero brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-sikar', pageName: 'PG in Sikar', slug: 'pg-in-sikar', metaTitle: 'Best PG in Sikar for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Sikar for students near Piprali Road coaching hubs. Fully furnished rooms with food, Wi-Fi, study desks, and zero brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-bangalore', pageName: 'PG in Bangalore', slug: 'pg-in-bangalore', metaTitle: 'Best PG in Bangalore for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Bangalore for students and IT professionals. Furnished rooms with high-speed Wi-Fi, food, housekeeping, and 0% brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-pune', pageName: 'PG in Pune', slug: 'pg-in-pune', metaTitle: 'Best PG in Pune for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Pune for students and professionals near top colleges and IT parks. Fully furnished rooms with Wi-Fi, meals, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'pg-in-hyderabad', pageName: 'PG in Hyderabad', slug: 'pg-in-hyderabad', metaTitle: 'Best PG in Hyderabad for Boys & Girls | Roomhy.com', metaDescription: 'Find the best PG in Hyderabad for students and pros near tech hubs and institutes. Furnished rooms with food, Wi-Fi, 24/7 security, and 0% brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
+  {
+    pageKey: 'pg-in-kota',
+    pageName: 'PG in Kota',
+    slug: 'pg-in-kota',
+    metaTitle: 'Best PG in Kota for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Kota for boys and girls near Allen, Resonance, and coaching hubs. Furnished rooms with food, Wi-Fi, a study table, and 0% brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-jaipur',
+    pageName: 'PG in Jaipur',
+    slug: 'pg-in-jaipur',
+    metaTitle: 'Best PG in Jaipur for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Jaipur for boys and girls near top colleges and coaching centres. Enjoy fully furnished rooms with meals, Wi-Fi, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-delhi',
+    pageName: 'PG in Delhi',
+    slug: 'pg-in-delhi',
+    metaTitle: 'Best PG in Delhi for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Delhi for students and professionals near top universities and metro hubs. Furnished rooms with meals, Wi-Fi, and 0% brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-indore',
+    pageName: 'PG in Indore',
+    slug: 'pg-in-indore',
+    metaTitle: 'Best PG in Indore for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Indore for students near coaching centres and tech parks. Fully furnished rooms with meals, Wi-Fi, daily cleaning, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-bhopal',
+    pageName: 'PG in Bhopal',
+    slug: 'pg-in-bhopal',
+    metaTitle: 'Best PG in Bhopal for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Bhopal for students and working professionals. Enjoy fully furnished rooms with homemade food, Wi-Fi, security, and zero brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-nagpur',
+    pageName: 'PG in Nagpur',
+    slug: 'pg-in-nagpur',
+    metaTitle: 'Best PG in Nagpur for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Nagpur for boys and girls. Verified furnished rooms with Wi-Fi, homemade meals, 24/7 security, and zero brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-sikar',
+    pageName: 'PG in Sikar',
+    slug: 'pg-in-sikar',
+    metaTitle: 'Best PG in Sikar for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Sikar for students near Piprali Road coaching hubs. Fully furnished rooms with food, Wi-Fi, study desks, and zero brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-bangalore',
+    pageName: 'PG in Bangalore',
+    slug: 'pg-in-bangalore',
+    metaTitle: 'Best PG in Bangalore for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Bangalore for students and IT professionals. Furnished rooms with high-speed Wi-Fi, food, housekeeping, and 0% brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-pune',
+    pageName: 'PG in Pune',
+    slug: 'pg-in-pune',
+    metaTitle: 'Best PG in Pune for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Pune for students and professionals near top colleges and IT parks. Fully furnished rooms with Wi-Fi, meals, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'pg-in-hyderabad',
+    pageName: 'PG in Hyderabad',
+    slug: 'pg-in-hyderabad',
+    metaTitle: 'Best PG in Hyderabad for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best PG in Hyderabad for students and pros near tech hubs and institutes. Furnished rooms with food, Wi-Fi, 24/7 security, and 0% brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
 
-  { pageKey: 'hostels-in-kota', pageName: 'Hostel in Kota', slug: 'hostels-in-kota', metaTitle: 'Best Hostels in Kota for Boys & Girls | Roomhy.com', metaDescription: 'Find the best student hostels in Kota near Allen and Motion. Verified rooms with hygienic food, Wi-Fi, 24/7 security, study desks, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-jaipur', pageName: 'Hostel in Jaipur', slug: 'hostels-in-jaipur', metaTitle: 'Best Hostels in Jaipur for Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Jaipur for boys and girls near top colleges. Enjoy fully furnished rooms with meals, Wi-Fi, security, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-delhi', pageName: 'Hostel in Delhi', slug: 'hostels-in-delhi', metaTitle: 'Best Hostels in Delhi for Boys & Girls | Roomhy.com', metaDescription: 'Find the best student and working hostels in Delhi near DU campuses and metro hubs. Furnished stays with food, high-speed Wi-Fi, and 0% brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-indore', pageName: 'Hostel in Indore', slug: 'hostels-in-indore', metaTitle: 'Best Hostels in Indore for Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Indore for students near Bhawarkua and coaching hubs. Fully furnished rooms with meals, Wi-Fi, security, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-bhopal', pageName: 'Hostel in Bhopal', slug: 'hostels-in-bhopal', metaTitle: 'Best Hostels in Bhopal for Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Bhopal for boys and girls near top institutes. Furnished rooms with homemade food, Wi-Fi, CCTV security, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-nagpur', pageName: 'Hostel in Nagpur', slug: 'hostels-in-nagpur', metaTitle: 'Best Hostels in Nagpur for Boys & Girls | Roomhy.com', metaDescription: 'Find the best student hostels in Nagpur with zero brokerage. Enjoy fully furnished rooms, Wi-Fi, nutritious meals, study areas, and 24/7 security.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-sikar', pageName: 'Hostel in Sikar', slug: 'hostels-in-sikar', metaTitle: 'Best Hostels in Sikar for Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Sikar near Piprali Road coaching centres. Fully furnished rooms with healthy meals, Wi-Fi, study desks, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-bangalore', pageName: 'Hostel in Bangalore', slug: 'hostels-in-bangalore', metaTitle: 'Best Hostels in Bangalore | Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Bangalore for students and professionals. Furnished rooms with high-speed Wi-Fi, food, daily cleaning, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-pune', pageName: 'Hostel in Pune', slug: 'hostels-in-pune', metaTitle: 'Best Hostels in Pune for Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Pune for students and young pros near top colleges and IT hubs. Verified stays with meals, Wi-Fi, and zero brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'hostels-in-hyderabad', pageName: 'Hostel in Hyderabad', slug: 'hostels-in-hyderabad', metaTitle: 'Best Hostels in Hyderabad | Boys & Girls | Roomhy.com', metaDescription: 'Find the best hostels in Hyderabad for students and tech pros near HITEC City. Furnished rooms with food, Wi-Fi, security, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
+  {
+    pageKey: 'hostels-in-kota',
+    pageName: 'Hostel in Kota',
+    slug: 'hostels-in-kota',
+    metaTitle: 'Best Hostels in Kota for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best student hostels in Kota near Allen and Motion. Verified rooms with hygienic food, Wi-Fi, 24/7 security, study desks, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-jaipur',
+    pageName: 'Hostel in Jaipur',
+    slug: 'hostels-in-jaipur',
+    metaTitle: 'Best Hostels in Jaipur for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Jaipur for boys and girls near top colleges. Enjoy fully furnished rooms with meals, Wi-Fi, security, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-delhi',
+    pageName: 'Hostel in Delhi',
+    slug: 'hostels-in-delhi',
+    metaTitle: 'Best Hostels in Delhi for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best student and working hostels in Delhi near DU campuses and metro hubs. Furnished stays with food, high-speed Wi-Fi, and 0% brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-indore',
+    pageName: 'Hostel in Indore',
+    slug: 'hostels-in-indore',
+    metaTitle: 'Best Hostels in Indore for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Indore for students near Bhawarkua and coaching hubs. Fully furnished rooms with meals, Wi-Fi, security, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-bhopal',
+    pageName: 'Hostel in Bhopal',
+    slug: 'hostels-in-bhopal',
+    metaTitle: 'Best Hostels in Bhopal for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Bhopal for boys and girls near top institutes. Furnished rooms with homemade food, Wi-Fi, CCTV security, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-nagpur',
+    pageName: 'Hostel in Nagpur',
+    slug: 'hostels-in-nagpur',
+    metaTitle: 'Best Hostels in Nagpur for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best student hostels in Nagpur with zero brokerage. Enjoy fully furnished rooms, Wi-Fi, nutritious meals, study areas, and 24/7 security.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-sikar',
+    pageName: 'Hostel in Sikar',
+    slug: 'hostels-in-sikar',
+    metaTitle: 'Best Hostels in Sikar for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Sikar near Piprali Road coaching centres. Fully furnished rooms with healthy meals, Wi-Fi, study desks, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-bangalore',
+    pageName: 'Hostel in Bangalore',
+    slug: 'hostels-in-bangalore',
+    metaTitle: 'Best Hostels in Bangalore | Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Bangalore for students and professionals. Furnished rooms with high-speed Wi-Fi, food, daily cleaning, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-pune',
+    pageName: 'Hostel in Pune',
+    slug: 'hostels-in-pune',
+    metaTitle: 'Best Hostels in Pune for Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Pune for students and young pros near top colleges and IT hubs. Verified stays with meals, Wi-Fi, and zero brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'hostels-in-hyderabad',
+    pageName: 'Hostel in Hyderabad',
+    slug: 'hostels-in-hyderabad',
+    metaTitle: 'Best Hostels in Hyderabad | Boys & Girls | Roomhy.com',
+    metaDescription: 'Find the best hostels in Hyderabad for students and tech pros near HITEC City. Furnished rooms with food, Wi-Fi, security, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
 
-  { pageKey: 'co-living-in-kota', pageName: 'Co-Living Spaces in Kota', slug: 'co-living-in-kota', metaTitle: 'Best Co-Living Spaces in Kota | Roomhy.com', metaDescription: 'Find the best student co-living spaces in Kota near top coaching hubs. Fully furnished shared stays with Wi-Fi, food, housekeeping, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-jaipur', pageName: 'Co-Living Spaces in Jaipur', slug: 'co-living-in-jaipur', metaTitle: 'Best Co-Living Spaces in Jaipur | Roomhy.com', metaDescription: 'Find modern co-living spaces in Jaipur for students and pros. Fully furnished rooms with high-speed Wi-Fi, daily meals, cleaning, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-delhi', pageName: 'Co-Living Spaces in Delhi', slug: 'co-living-in-delhi', metaTitle: 'Best Co-Living Spaces in Delhi | Roomhy.com', metaDescription: 'Find premium co-living spaces in Delhi near top universities and metro hubs. Furnished rooms with Wi-Fi, meals, modern amenities, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-indore', pageName: 'Co-Living Spaces in Indore', slug: 'co-living-in-indore', metaTitle: 'Best Co-Living Spaces in Indore | Roomhy.com', metaDescription: 'Discover modern co-living spaces in Indore near Vijay Nagar and tech hubs. Fully furnished rooms with high-speed Wi-Fi, meals, and 0% brokerage on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-bhopal', pageName: 'Co-Living Spaces in Bhopal', slug: 'co-living-in-bhopal', metaTitle: 'Best Co-Living Spaces in Bhopal | Roomhy.com', metaDescription: 'Find top verified co-living spaces in Bhopal for students and professionals. Enjoy furnished rooms, Wi-Fi, meals, 24/7 security, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-nagpur', pageName: 'Co-Living Spaces in Nagpur', slug: 'co-living-in-nagpur', metaTitle: 'Best Co-Living Spaces in Nagpur | Roomhy.com', metaDescription: 'Explore premium co-living spaces in Nagpur with zero brokerage. Fully furnished rooms with high-speed Wi-Fi, homemade meals, and community living.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-sikar', pageName: 'Co-Living Spaces in Sikar', slug: 'co-living-in-sikar', metaTitle: 'Best Co-Living Spaces in Sikar | Roomhy.com', metaDescription: 'Find modern co-living spaces in Sikar near Piprali Road coaching centres. Fully furnished stays with meals, Wi-Fi, study spaces, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-bangalore', pageName: 'Co-Living Spaces in Bangalore', slug: 'co-living-in-bangalore', metaTitle: 'Best Co-Living Spaces in Bangalore | Roomhy.com', metaDescription: 'Find premium co-living spaces in Bangalore near tech parks and colleges. Fully furnished rooms with high-speed Wi-Fi, housekeeping, and 0% brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-pune', pageName: 'Co-Living Spaces in Pune', slug: 'co-living-in-pune', metaTitle: 'Best Co-Living Spaces in Pune | Roomhy.com', metaDescription: 'Find modern co-living spaces in Pune for students and IT professionals. Fully furnished rooms with Wi-Fi, housekeeping, meals, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
-  { pageKey: 'co-living-in-hyderabad', pageName: 'Co-Living Spaces in Hyderabad', slug: 'co-living-in-hyderabad', metaTitle: 'Best Co-Living Spaces in Hyderabad | Roomhy.com', metaDescription: 'Find verified co-living spaces in Hyderabad near HITEC City and Gachibowli. Fully furnished stays with Wi-Fi, food, housekeeping, and zero brokerage.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.9, sitemapChangefreq: 'daily' },
+  {
+    pageKey: 'co-living-in-kota',
+    pageName: 'Co-Living Spaces in Kota',
+    slug: 'co-living-in-kota',
+    metaTitle: 'Best Co-Living Spaces in Kota | Roomhy.com',
+    metaDescription: 'Find the best student co-living spaces in Kota near top coaching hubs. Fully furnished shared stays with Wi-Fi, food, housekeeping, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-jaipur',
+    pageName: 'Co-Living Spaces in Jaipur',
+    slug: 'co-living-in-jaipur',
+    metaTitle: 'Best Co-Living Spaces in Jaipur | Roomhy.com',
+    metaDescription: 'Find modern co-living spaces in Jaipur for students and pros. Fully furnished rooms with high-speed Wi-Fi, daily meals, cleaning, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-delhi',
+    pageName: 'Co-Living Spaces in Delhi',
+    slug: 'co-living-in-delhi',
+    metaTitle: 'Best Co-Living Spaces in Delhi | Roomhy.com',
+    metaDescription: 'Find premium co-living spaces in Delhi near top universities and metro hubs. Furnished rooms with Wi-Fi, meals, modern amenities, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-indore',
+    pageName: 'Co-Living Spaces in Indore',
+    slug: 'co-living-in-indore',
+    metaTitle: 'Best Co-Living Spaces in Indore | Roomhy.com',
+    metaDescription: 'Discover modern co-living spaces in Indore near Vijay Nagar and tech hubs. Fully furnished rooms with high-speed Wi-Fi, meals, and 0% brokerage on Roomhy.com.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-bhopal',
+    pageName: 'Co-Living Spaces in Bhopal',
+    slug: 'co-living-in-bhopal',
+    metaTitle: 'Best Co-Living Spaces in Bhopal | Roomhy.com',
+    metaDescription: 'Find top verified co-living spaces in Bhopal for students and professionals. Enjoy furnished rooms, Wi-Fi, meals, 24/7 security, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-nagpur',
+    pageName: 'Co-Living Spaces in Nagpur',
+    slug: 'co-living-in-nagpur',
+    metaTitle: 'Best Co-Living Spaces in Nagpur | Roomhy.com',
+    metaDescription: 'Explore premium co-living spaces in Nagpur with zero brokerage. Fully furnished rooms with high-speed Wi-Fi, homemade meals, and community living.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-sikar',
+    pageName: 'Co-Living Spaces in Sikar',
+    slug: 'co-living-in-sikar',
+    metaTitle: 'Best Co-Living Spaces in Sikar | Roomhy.com',
+    metaDescription: 'Find modern co-living spaces in Sikar near Piprali Road coaching centres. Fully furnished stays with meals, Wi-Fi, study spaces, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-bangalore',
+    pageName: 'Co-Living Spaces in Bangalore',
+    slug: 'co-living-in-bangalore',
+    metaTitle: 'Best Co-Living Spaces in Bangalore | Roomhy.com',
+    metaDescription: 'Find premium co-living spaces in Bangalore near tech parks and colleges. Fully furnished rooms with high-speed Wi-Fi, housekeeping, and 0% brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-pune',
+    pageName: 'Co-Living Spaces in Pune',
+    slug: 'co-living-in-pune',
+    metaTitle: 'Best Co-Living Spaces in Pune | Roomhy.com',
+    metaDescription: 'Find modern co-living spaces in Pune for students and IT professionals. Fully furnished rooms with Wi-Fi, housekeeping, meals, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
+  {
+    pageKey: 'co-living-in-hyderabad',
+    pageName: 'Co-Living Spaces in Hyderabad',
+    slug: 'co-living-in-hyderabad',
+    metaTitle: 'Best Co-Living Spaces in Hyderabad | Roomhy.com',
+    metaDescription: 'Find verified co-living spaces in Hyderabad near HITEC City and Gachibowli. Fully furnished stays with Wi-Fi, food, housekeeping, and zero brokerage.',
+    robots: 'index, follow',
+    isIndexed: true,
+    sitemapPriority: 0.9,
+    sitemapChangefreq: 'daily'
+  },
 
   // --- Specific Locality Pages ---
   // Kota
@@ -386,7 +846,7 @@ const seoPagesSeedData = [
   { pageKey: 'co-living-in-madhapur-hyderabad', pageName: 'Co-Living in Madhapur Hyderabad', slug: 'co-living-in-madhapur-hyderabad', metaTitle: 'Co-living in Madhapur Hyderabad | Roomhy.com', metaDescription: 'Find the best co-living in madhapur hyderabad with furnished rooms, modern amenities and convenient locations. Explore verified options on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.85, sitemapChangefreq: 'weekly' }
 ];
 
-async function seed() {
+async function updateSeo() {
     const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/roomhy';
     console.log(`🔗 Connecting to MongoDB: ${mongoUri.substring(0, 50)}...`);
     
@@ -396,10 +856,10 @@ async function seed() {
     });
     console.log('✅ Connected to Database');
 
-    console.log('\n📊 Seeding SEO Pages...');
+    console.log(`\n📊 Upserting ${allSeoEntries.length} SEO Pages...`);
     
-    let seededCount = 0;
-    for (const data of seoPagesSeedData) {
+    let updatedCount = 0;
+    for (const data of allSeoEntries) {
         const canonicalUrl = `https://roomhy.com/${data.slug}`.replace(/\/+$/, '');
         const payload = {
             ...data,
@@ -410,26 +870,26 @@ async function seed() {
             twitterDescription: data.metaDescription
         };
 
+        // Match by pageKey if entityId is null, OR by clean slug
         const filter = data.slug !== undefined
             ? { slug: data.slug }
             : { pageKey: data.pageKey, entityId: null };
 
-        const updated = await SeoPage.findOneAndUpdate(
+        await SeoPage.findOneAndUpdate(
             filter,
             { $set: payload },
             { upsert: true, new: true }
         );
-        console.log(`  ✓ Seeded pageKey "${updated.pageKey}" (${updated.slug})`);
-        seededCount++;
+        updatedCount++;
     }
 
-    console.log(`\n✅ Seeding complete. Processed ${seededCount} pages.`);
+    console.log(`\n✅ SEO update complete. Upserted ${updatedCount} pages in database.`);
     await mongoose.disconnect();
     console.log('🔌 Disconnected from MongoDB');
     process.exit(0);
 }
 
-seed().catch(err => {
-    console.error('❌ Seeding failed:', err);
+updateSeo().catch(err => {
+    console.error('❌ SEO update failed:', err);
     process.exit(1);
 });
