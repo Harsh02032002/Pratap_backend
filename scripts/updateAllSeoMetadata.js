@@ -846,6 +846,75 @@ const allSeoEntries = [
   { pageKey: 'co-living-in-madhapur-hyderabad', pageName: 'Co-Living in Madhapur Hyderabad', slug: 'co-living-in-madhapur-hyderabad', metaTitle: 'Co-living in Madhapur Hyderabad | Roomhy.com', metaDescription: 'Find the best co-living in madhapur hyderabad with furnished rooms, modern amenities and convenient locations. Explore verified options on Roomhy.com.', robots: 'index, follow', isIndexed: true, sitemapPriority: 0.85, sitemapChangefreq: 'weekly' }
 ];
 
+const staticKeywordsMap = {
+  'home': 'PG, Hostels, Co-living, Student Housing, PG in India, hostels in India, coliving spaces, room rent, shared accommodation, student PG, zero brokerage PG, rental rooms',
+  'about': 'about Roomhy, student housing platform, broker free PG platform, roomhy story, student living India, verified PG portal, coliving company India, rental housing platform, zero brokerage accommodation, student PG finder',
+  'contact': 'Roomhy contact number, Roomhy customer care, student housing support, PG booking support, Roomhy helpline, roomhy office address, hostel inquiry, PG customer care, contact roomhy, student stay support',
+  'list-property': 'list PG for free, list hostel online, property owner listing, rent PG to students, list coliving space, free property listing site, student accommodation listing, rent room to students, PG owner portal, list room online',
+  'login': 'Roomhy login, PG tenant login, student housing login, owner dashboard login, roomhy portal login, PG booking login, sign in roomhy, landlord login, hostel management login, roomhy account',
+  'register': 'Roomhy registration, sign up roomhy, create PG account, tenant signup, student housing registration, owner registration, register on roomhy, PG booking register, coliving signup, join roomhy',
+  'blogs': 'student housing blog, PG tips and guide, hostel vs PG guide, student living tips, Kota PG guide, rent breakdown blog, student accommodation tips, coliving guide, roommate advice, college living guide',
+  'privacy': 'Roomhy privacy policy, user data protection, privacy terms, roomhy terms, student data security, booking privacy policy, user agreement privacy, data privacy policy, portal terms',
+  'terms': 'Roomhy terms and conditions, user agreement, PG booking rules, cancellation policy, refund terms, platform usage terms, rental agreement terms, tenant guidelines, owner rules, roomhy legal',
+
+  'pg-main': 'PG in India, paying guest, student PG, boys PG, girls PG, luxury PG, single room PG, double sharing PG, PG with food, broker free PG, verified PG, student accommodation',
+  'hostels-main': 'hostels in India, student hostels, boys hostel, girls hostel, budget hostels, working professional hostel, AC hostel, hostel with food, student stay, low cost hostel, verified hostels, secure hostel',
+  'co-living-main': 'coliving in India, coliving spaces, shared living spaces, luxury coliving, student coliving, coliving with food, furnished coliving rooms, modern coliving, community living, shared apartments, premium coliving, broker free coliving',
+
+  'properties-in-kota': 'PG in Kota, hostels in Kota, student accommodation Kota, rooms in Kota, flats in Kota, boys PG Kota, girls hostel Kota, Allen coaching PG Kota, Landmark City PG, Talwandi Kota PG, Vigyan Nagar PG, broker free Kota PG',
+  'properties-in-jaipur': 'PG in Jaipur, hostels in Jaipur, flats in Jaipur, student rooms Jaipur, boys PG Jaipur, girls PG Jaipur, coliving Jaipur, Malviya Nagar PG, Vaishali Nagar PG, Mansarovar Jaipur PG, student accommodation Jaipur, rental flats Jaipur',
+  'properties-in-delhi': 'PG in Delhi, hostels in Delhi, flats in Delhi, student rooms Delhi, boys PG Delhi, girls PG Delhi, DU student PG, North Campus PG, South Campus PG, Laxmi Nagar PG, Kamla Nagar PG, coliving Delhi',
+  'properties-in-indore': 'PG in Indore, hostels in Indore, flats in Indore, student accommodation Indore, boys PG Indore, girls PG Indore, Bhawarkua PG, Vijay Nagar Indore PG, coliving Indore, rental rooms Indore, student flats Indore, broker free Indore PG',
+  'properties-in-bhopal': 'PG in Bhopal, hostels in Bhopal, flats in Bhopal, student rooms Bhopal, boys PG Bhopal, girls PG Bhopal, MP Nagar Bhopal PG, Arera Colony PG, coliving Bhopal, student accommodation Bhopal, rental flats Bhopal, rooms in Bhopal',
+  'properties-in-nagpur': 'PG in Nagpur, hostels in Nagpur, flats in Nagpur, student accommodation Nagpur, boys PG Nagpur, girls PG Nagpur, Dharampeth PG, Ramdaspeth PG, coliving Nagpur, rental rooms Nagpur, student flats Nagpur, broker free Nagpur PG',
+  'properties-in-sikar': 'PG in Sikar, hostels in Sikar, student rooms Sikar, Piprali Road PG Sikar, coaching PG Sikar, boys PG Sikar, girls hostel Sikar, student accommodation Sikar, Station Road Sikar PG, rooms in Sikar, budget hostel Sikar, broker free Sikar PG',
+  'properties-in-bangalore': 'PG in Bangalore, coliving Bangalore, hostels in Bangalore, flats in Bangalore, boys PG Bangalore, girls PG Bangalore, Koramangala PG, BTM Layout PG, HSR Layout PG, Electronic City PG, student accommodation Bangalore, IT coliving Bangalore',
+  'properties-in-pune': 'PG in Pune, coliving Pune, hostels in Pune, flats in Pune, boys PG Pune, girls PG Pune, Hinjewadi PG, Kothrud PG, Viman Nagar PG, Wakad PG, student accommodation Pune, IT professional coliving Pune',
+  'properties-in-hyderabad': 'PG in Hyderabad, coliving Hyderabad, hostels in Hyderabad, flats in Hyderabad, boys PG Hyderabad, girls PG Hyderabad, Gachibowli PG, HITEC City coliving, Madhapur PG, Kukatpally PG, student accommodation Hyderabad, IT coliving Hyderabad',
+
+  'pg-cities': 'PG cities in India, best cities for PG, student PG cities, PG in Kota, PG in Delhi, PG in Bangalore, PG in Pune, PG in Jaipur, PG in Indore, PG in Hyderabad, student housing cities, top PG locations',
+  'pg-localities': 'PG localities in India, top student localities, best PG areas, Talwandi Kota PG, Koramangala PG, North Campus PG, Bhawarkua Indore PG, Piprali Road PG, Hinjewadi Pune PG, student areas India, top coaching PG localities, coliving localities',
+  'hostels-cities': 'hostel cities in India, best cities for hostels, student hostels India, hostels in Kota, hostels in Delhi, hostels in Jaipur, hostels in Indore, hostels in Sikar, hostels in Bangalore, budget hostel cities, student accommodation cities, top hostel locations',
+  'hostels-localities': 'hostel localities in India, best student hostel areas, top coaching hostel areas, Talwandi hostels, Landmark City hostels, Piprali Road hostels, Kamla Nagar hostels, Vijay Nagar hostels, student hostel hubs, affordable hostel localities, girls hostel areas, boys hostel areas',
+  'co-living-cities': 'coliving cities in India, best cities for coliving, coliving Bangalore, coliving Pune, coliving Hyderabad, coliving Delhi, coliving Jaipur, coliving Indore, top shared living cities, IT coliving cities, modern coliving hubs, student coliving cities',
+  'co-living-localities': 'coliving localities in India, best coliving areas, Koramangala coliving, HSR Layout coliving, Gachibowli coliving, Hinjewadi coliving, Viman Nagar coliving, Malviya Nagar coliving, shared living localities, premium coliving areas, student coliving hubs, tech park coliving'
+};
+
+function generateLocalityKeywords(slug, pageName) {
+    if (!slug) return '';
+    const knownCities = ['kota', 'jaipur', 'delhi', 'indore', 'bhopal', 'nagpur', 'sikar', 'bangalore', 'pune', 'hyderabad'];
+    const lowerSlug = slug.toLowerCase();
+    const cityKey = knownCities.find(c => lowerSlug.endsWith('-' + c));
+    if (!cityKey) return '';
+
+    const city = cityKey.charAt(0).toUpperCase() + cityKey.slice(1);
+    let areaSlug = '';
+    let type = '';
+
+    if (lowerSlug.startsWith('pg-in-')) {
+        type = 'pg';
+        areaSlug = lowerSlug.slice(6, lowerSlug.length - cityKey.length - 1);
+    } else if (lowerSlug.startsWith('hostels-in-')) {
+        type = 'hostels';
+        areaSlug = lowerSlug.slice(11, lowerSlug.length - cityKey.length - 1);
+    } else if (lowerSlug.startsWith('co-living-in-')) {
+        type = 'coliving';
+        areaSlug = lowerSlug.slice(13, lowerSlug.length - cityKey.length - 1);
+    }
+
+    if (!areaSlug) return '';
+    const area = areaSlug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+    if (type === 'pg') {
+        return `PG in ${area} ${city}, best PG in ${area} ${city}, PG in ${area}, paying guest in ${area} ${city}, student PG in ${area}, boys PG in ${area}, girls PG in ${area}, single room PG ${area}, PG in ${area} with food, affordable PG in ${area} ${city}, verified PG in ${area}, broker free PG in ${area}`;
+    } else if (type === 'hostels') {
+        return `Hostels in ${area} ${city}, best hostels in ${area} ${city}, hostel in ${area}, student hostel in ${area} ${city}, boys hostel in ${area}, girls hostel in ${area}, affordable hostel in ${area}, hostel in ${area} with food, single room hostel in ${area}, verified hostels in ${area}, student accommodation in ${area}, broker free hostel in ${area}`;
+    } else if (type === 'coliving') {
+        return `Co-living in ${area} ${city}, best coliving in ${area} ${city}, co living space in ${area}, coliving in ${area} ${city}, shared accommodation in ${area}, student co living in ${area}, affordable co living in ${area}, luxury coliving ${area} ${city}, furnished coliving in ${area}, coliving spaces in ${area}, coliving with food in ${area}, shared living ${area} ${city}`;
+    }
+    return '';
+}
+
 async function updateSeo() {
     const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/roomhy';
     console.log(`🔗 Connecting to MongoDB: ${mongoUri.substring(0, 50)}...`);
@@ -861,8 +930,10 @@ async function updateSeo() {
     let updatedCount = 0;
     for (const data of allSeoEntries) {
         const canonicalUrl = `https://roomhy.com/${data.slug}`.replace(/\/+$/, '');
+        const metaKeywords = data.metaKeywords || staticKeywordsMap[data.pageKey] || generateLocalityKeywords(data.slug, data.pageName);
         const payload = {
             ...data,
+            metaKeywords,
             canonicalUrl: data.canonicalUrl || canonicalUrl,
             openGraphTitle: data.metaTitle,
             openGraphDescription: data.metaDescription,
