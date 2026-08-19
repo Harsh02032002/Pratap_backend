@@ -42,12 +42,12 @@ const paymentTransactionSchema = new mongoose.Schema({
   withdrawn_at:  { type: Date, default: null },
 
   // ─── BOOKING REFERENCE ────────────────────────────────────────────────────
-  booking_id:     { type: String, required: true, index: true },
-  property_id:    { type: String, required: true, index: true },
+  booking_id:     { type: String, default: 'N/A', index: true },
+  property_id:    { type: String, default: 'N/A', index: true },
   property_name:  { type: String, default: '' },
-  tenant_id:      { type: String, required: true, index: true },
+  tenant_id:      { type: String, default: 'N/A', index: true },
   tenant_name:    { type: String, default: '' },
-  owner_id:       { type: String, required: true, index: true },
+  owner_id:       { type: String, default: 'N/A', index: true },
   owner_name:     { type: String, default: '' },
   move_in_date:   { type: Date, default: null },     // From booking — used by cron
 
@@ -99,6 +99,18 @@ paymentTransactionSchema.index({ wallet_status: 1, move_in_date: 1 }); // for cr
 
 paymentTransactionSchema.pre('save', function(next) {
   this.updated_at = Date.now();
+  if (!this.property_id || typeof this.property_id !== 'string' || !this.property_id.trim()) {
+    this.property_id = 'N/A';
+  }
+  if (!this.booking_id || typeof this.booking_id !== 'string' || !this.booking_id.trim()) {
+    this.booking_id = 'N/A';
+  }
+  if (!this.tenant_id || typeof this.tenant_id !== 'string' || !this.tenant_id.trim()) {
+    this.tenant_id = 'N/A';
+  }
+  if (!this.owner_id || typeof this.owner_id !== 'string' || !this.owner_id.trim()) {
+    this.owner_id = 'N/A';
+  }
   if (!this.razorpay_payment_id) {
     this.razorpay_payment_id = 'cf_' + (this._id || new mongoose.Types.ObjectId());
   }

@@ -128,7 +128,7 @@ exports.handlePaymentWebhook = async (req, res) => {
               
               await PaymentTransaction.create({
                 booking_id:            String(booking?._id || rentInvoice?._id || rentRecord?._id || extractedId || `booking_${Date.now()}`),
-                property_id:           String(booking?.property_id || rentInvoice?.propertyId || rentRecord?.propertyId || 'N/A'),
+                property_id:           (booking?.property_id || booking?.propertyId || rentInvoice?.propertyId || rentRecord?.propertyId || 'N/A').toString().trim() || 'N/A',
                 property_name:         String(booking?.property_name || rentInvoice?.propertyName || rentRecord?.propertyName || ''),
                 tenant_id:             String(tenantLoginId || booking?.user_id || booking?.email || 'unknown'),
                 tenant_name:           String(booking?.name || rentInvoice?.tenantName || rentRecord?.tenantName || ''),
