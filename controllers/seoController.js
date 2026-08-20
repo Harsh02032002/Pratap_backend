@@ -172,7 +172,9 @@ exports.getSeoMetadata = async (req, res) => {
             seoRecord = await SeoPage.findOne({ pageKey, entityId: null });
         }
 
-            // Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
+        // E. Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
+        if (!seoRecord && (slug || url)) {
+            const cleanedSlug = cleanPath(slug || url);
             const parts = cleanedSlug.split('/');
             const knownCities = [
                 'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
@@ -232,18 +234,6 @@ exports.getSeoMetadata = async (req, res) => {
                     }
                 });
             }
-
-            return res.status(200).json({
-                success: true,
-                data: {
-                    metaTitle: '',
-                    metaDescription: '',
-                    metaKeywords: '',
-                    canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
-                    robots: 'index, follow',
-                    isIndexed: true
-                }
-            });
         }
 
         // D. Perform dynamic placeholder rendering (template variables)
