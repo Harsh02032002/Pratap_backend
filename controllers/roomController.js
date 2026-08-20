@@ -3,6 +3,7 @@ const Room = require('../models/Room');
 const Property = require('../models/Property');
 const Notification = require('../models/Notification');
 const User = require('../models/user');
+const Tenant = require('../models/Tenant');
 
 // Owner adds a room to their property. Room is created with status 'inactive'.
 exports.sendPaymentLink = async (req, res) => {
@@ -16,7 +17,6 @@ exports.sendPaymentLink = async (req, res) => {
     const room = await Room.findById(roomId).lean();
     if (!room) return res.status(404).json({ success: false, message: 'Room not found' });
     // Attempt to locate tenant assigned to this room
-    const Tenant = require('../models/Tenant');
     let tenant = null;
     if (Array.isArray(room.bedAssignments) && room.bedAssignments.length) {
       const occupied = room.bedAssignments.find(b => b && b.tenantId);
@@ -243,7 +243,6 @@ if (rooms.length === 0) {
 }
 
         if (unassigned === 'true') {
-            const Tenant = require('../models/Tenant');
             const tenants = await Tenant.find({
                 property: new mongoose.Types.ObjectId(propertyId),
                 status: { $in: ['active', 'pending'] }
@@ -282,8 +281,8 @@ if (rooms.length === 0) {
                 
                 return true;
             });
+        }
         // Dynamically populate bed assignments & status from active/pending tenants
-        const Tenant = require('../models/Tenant');
         const activeTenants = await Tenant.find({
             property: new mongoose.Types.ObjectId(propertyId),
             status: { $in: ['active', 'pending'] },
@@ -750,7 +749,6 @@ exports.getAllRooms = async (req, res) => {
             .sort({ createdAt: -1 })
             .lean();
 
-        const Tenant = require('../models/Tenant');
         const activeTenantsAll = await Tenant.find({
             status: { $in: ['active', 'pending'] },
             isDeleted: { $ne: true }
