@@ -550,7 +550,7 @@ async function listPaymentsHandler(req, res) {
     const payments = await RentPayment.find(paymentQuery)
       .sort({ paymentDate: -1 })
       .limit(limit)
-      .populate('tenantId', 'name roomNo phone email propertyId')
+      .populate('tenantId', 'name roomNo phone email propertyId digitalCheckin')
       .populate('invoiceId', 'billingMonth invoiceNumber rentAmount advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
@@ -573,7 +573,7 @@ async function listPaymentsHandler(req, res) {
       billingMonth: p.invoiceId?.billingMonth || '',
       invoiceNumber: p.invoiceId?.invoiceNumber || '',
       rentAmount: p.invoiceId?.rentAmount || p.amount,
-      advanceChargeAmount: p.invoiceId?.advanceChargeAmount || 0,
+      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || Number(p.tenantId?.digitalCheckin?.agreementDetails?.advanceCharge || 0) || 0,
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
