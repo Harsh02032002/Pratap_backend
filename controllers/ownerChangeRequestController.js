@@ -44,8 +44,11 @@ exports.submitRequest = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
 
+        const proofUrl  = bankProofUrl  || requestedChanges?.checkinBankProof     || requestedChanges?.bankProofUrl  || '';
+        const proofName = bankProofName || requestedChanges?.checkinBankProofName || requestedChanges?.bankProofName || '';
+
         // Validate: bank_details change request MUST include a bank proof document
-        if (requestType === 'bank_details' && !bankProofUrl) {
+        if (requestType === 'bank_details' && !proofUrl) {
             return res.status(400).json({
                 success: false,
                 message: 'A bank proof document is required when updating bank details. Please upload one first.'
@@ -86,8 +89,8 @@ exports.submitRequest = async (req, res) => {
             requestType,
             requestedChanges,
             currentValues,
-            bankProofUrl:  bankProofUrl  || '',
-            bankProofName: bankProofName || '',
+            bankProofUrl:  proofUrl,
+            bankProofName: proofName,
         });
 
         await request.save();
