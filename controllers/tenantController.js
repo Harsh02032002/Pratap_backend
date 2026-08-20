@@ -306,9 +306,20 @@ exports.assignTenant = async (req, res) => {
         // Find Room record if exists
         let roomObj = null;
         if (property && roomNo) {
+            const cleanRoomNo = String(roomNo).trim();
+            const escRoomNo = cleanRoomNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const roomConditions = [
+                { title: { $regex: `^${escRoomNo}$`, $options: 'i' } },
+                { title: { $regex: `^room\\s*${escRoomNo}$`, $options: 'i' } },
+                { roomNo: { $regex: `^${escRoomNo}$`, $options: 'i' } },
+                { number: { $regex: `^${escRoomNo}$`, $options: 'i' } }
+            ];
+            if (mongoose.Types.ObjectId.isValid(cleanRoomNo)) {
+                roomConditions.push({ _id: cleanRoomNo });
+            }
             roomObj = await Room.findOne({
                 property: property._id,
-                title: { $regex: `^${String(roomNo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+                $or: roomConditions
             });
 
             if (roomObj && normalizedBedNo) {
