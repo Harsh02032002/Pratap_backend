@@ -51,6 +51,7 @@ function cleanPath(urlStr) {
 exports.getSeoMetadata = async (req, res) => {
     try {
         const { url, slug, pageKey, entityType, entityId, ...context } = req.query;
+        const cleanedSlug = cleanPath(slug || url || '');
 
         // 1. Check for database-driven redirects (URL history or alias mapping)
         const targetUrl = url || slug || '';
@@ -84,7 +85,6 @@ exports.getSeoMetadata = async (req, res) => {
 
         // B. Match by clean slug/url path if no record found yet
         if (!seoRecord && (slug || url)) {
-            const cleanedSlug = cleanPath(slug || url);
             seoRecord = await SeoPage.findOne({ 
                 $or: [
                     { slug: cleanedSlug },
@@ -95,7 +95,6 @@ exports.getSeoMetadata = async (req, res) => {
 
         // C. Check if slug/url is an SEO URL pattern: /{type}-in-{location}
         if (!seoRecord && (slug || url)) {
-            const cleanedSlug = cleanPath(slug || url);
             const seoPatternMatch = cleanedSlug.match(/^(properties|pg|hostels|hostel|co-living|coliving|apartments|apartment)-in-(.+)$/i);
             
             if (seoPatternMatch) {
@@ -174,7 +173,6 @@ exports.getSeoMetadata = async (req, res) => {
 
         // E. Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
         if (!seoRecord && (slug || url)) {
-            const cleanedSlug = cleanPath(slug || url);
             const parts = cleanedSlug.split('/');
             const knownCities = [
                 'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
