@@ -196,11 +196,14 @@ app.get('/sitemap.xml', seoController.generateSitemapXml);
 
 // Optimized Database Connection
 const mongoOptions = {
-    serverSelectionTimeoutMS: 30000,
-    connectTimeoutMS: 30000,
-    socketTimeoutMS: 30000,
+    serverSelectionTimeoutMS: 15000,
+    connectTimeoutMS: 15000,
+    socketTimeoutMS: 45000,
     family: 4, // Force IPv4 to avoid DNS resolution delays
-    waitQueueTimeoutMS: 30000,
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    maxIdleTimeMS: 30000,
+    waitQueueTimeoutMS: 15000,
     heartbeatFrequencyMS: 10000,
     retryWrites: true,
     w: 'majority'
@@ -233,13 +236,14 @@ mongoose.connect(mongoUri, mongoOptions)
         startServer();
     });
 
-// Database connection middleware to ensure connection on every request (crucial for Serverless Vercel)
+// Database connection middleware to ensure connection on every request without creating duplicate pools
 app.use(async (req, res, next) => {
-    if (mongoose.connection.readyState !== 1) {
-        console.log('🔌 Mongoose not connected, connecting now...');
+    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+    if (mongoose.connection.readyState === 0) {
+        console.log('🔌 Mongoose disconnected, attempting reconnection...');
         try {
             await mongoose.connect(mongoUri, mongoOptions);
-            console.log('✅ MongoDB Connected (via request middleware)');
+            console.log('✅ MongoDB Reconnected (via request middleware)');
         } catch (err) {
             console.error('❌ MongoDB connection error in middleware:', err.message);
             return res.status(500).json({
@@ -247,6 +251,11 @@ app.use(async (req, res, next) => {
                 message: 'Database connection failed'
             });
         }
+    } else if (mongoose.connection.readyState !== 1) {
+        return res.status(500).json({
+            success: false,
+            message: 'Database is reconnecting, please try again shortly.'
+        });
     }
     next();
 });
@@ -363,12 +372,23 @@ async function fixFalselyApprovedOwners() {
     }
 }
 
+let startupJobsRan = false;
+async function runStartupJobs() {
+    if (startupJobsRan) return;
+    startupJobsRan = true;
+    try {
+        await seedSuperAdminIfMissing();
+        await fixFalselyVerifiedTenants();
+        await syncCompletedDigitalCheckinTenants();
+        await fixFalselyApprovedOwners();
+    } catch (err) {
+        console.warn('⚠️ Error executing startup tasks:', err.message);
+    }
+}
+
 mongoose.connection.on('connected', () => {
     console.log('✅ Mongoose connected');
-    seedSuperAdminIfMissing();
-    fixFalselyVerifiedTenants();
-    syncCompletedDigitalCheckinTenants();
-    fixFalselyApprovedOwners();
+    runStartupJobs();
     if (!escalationJobStarted) {
         escalationJobStarted = true;
         startEscalationJob();
