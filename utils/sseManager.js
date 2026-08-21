@@ -1,12 +1,14 @@
 const clients = new Set();
 
 exports.addClient = (req, res, ownerLoginId) => {
+    const origin = req.headers.origin || 'http://localhost:5174';
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*' // If needed based on your CORS policy
+        'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Credentials': 'true'
     });
 
     // initial payload to keep connection alive immediately

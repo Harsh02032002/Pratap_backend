@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Tenant = require('../models/Tenant');
 const User = require('../models/user');
 const Property = require('../models/Property');
@@ -358,7 +359,6 @@ exports.assignTenant = async (req, res) => {
         // inside one transaction: if Tenant.create (or anything after User.create)
         // throws, the User insert rolls back too, so a failed attempt never leaves
         // behind an orphaned User blocking retries via the unique phone index.
-        const mongoose = require('mongoose');
         const session = await mongoose.startSession();
         let user, tenant, alternateProofRequest = null;
         const useAlternateProof = Boolean(noAadhaar && alternateProofFile && alternateProofType);

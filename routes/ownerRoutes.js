@@ -105,6 +105,106 @@ router.get('/', protect, applyEmployeeScope, ownerController.getAllOwners);
 // 2b. Request new owner (Employee Action)
 router.post('/request', auditTrail('owners'), ownerController.requestOwner);
 
+// Owner subscription / trial status check (placed before /:loginId to prevent route collision)
+// GET /api/owners/subscription-status?loginId=OWN001
+router.get('/subscription-status', async (req, res) => {
+  try {
+    const loginId = String(req.query.loginId || '').trim();
+    if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
+
+    const SystemSettings = require('../models/SystemSettings');
+    const User = require('../models/user');
+    const escaped = loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(`^${escaped}$`, 'i');
+
+    let owner = await Owner.findOne({
+      $or: [
+        { loginId: rx },
+        { email: loginId.toLowerCase() },
+        { phone: loginId },
+        { 'profile.phone': loginId }
+      ],
+      isDeleted: { $ne: true }
+    })
+      .select('loginId name createdAt subscription')
+      .lean();
+
+    if (!owner) {
+      // Fallback: check User collection for owner role
+      const userDoc = await User.findOne({
+        $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
+        role: 'owner'
+      }).select('loginId name createdAt subscription').lean();
+
+      if (userDoc) {
+        owner = userDoc;
+      }
+    }
+
+    const settings = await SystemSettings.findOne().lean();
+
+    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+    const trialDays = settings?.ownerTrialDays ?? 1;
+    const price = settings?.ownerSubscriptionPrice ?? null;
+    const currency = settings?.ownerSubscriptionCurrency || 'INR';
+
+    const now = new Date();
+    const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
+    let endDate = owner.subscription?.trialEndDate;
+    if (!endDate && trialDays) {
+      endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
+    }
+
+    const isSubscribed = owner.subscription?.isSubscribed || false;
+    const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
+
+    // Subscribed check
+    if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
+      return res.json({
+        success: true,
+        status: 'subscribed',
+        trialExpired: false,
+        daysRemaining: null,
+        trialEndDate: subscriptionExpiry,
+        price,
+        currency
+      });
+    }
+
+    // Trial not configured
+    if (!endDate) {
+      return res.json({
+        success: true,
+        status: 'trial_unconfigured',
+        trialExpired: false,
+        daysRemaining: null,
+        trialEndDate: null,
+        price,
+        currency
+      });
+    }
+
+    const msRemaining = new Date(endDate).getTime() - now.getTime();
+    const trialExpired = msRemaining <= 0;
+    const daysRemaining = trialExpired ? 0 : Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+
+    return res.json({
+      success: true,
+      status: trialExpired ? 'expired' : 'trial_active',
+      trialExpired,
+      daysRemaining,
+      trialEndDate: endDate,
+      trialStartDate: startDate,
+      price,
+      currency
+    });
+  } catch (err) {
+    console.error('❌ subscription-status error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // 2c. Approve owner request (Super Admin Action)
 router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
@@ -740,105 +840,7 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail
     }
 });
 
-// Owner subscription / trial status check
-// GET /api/owners/subscription-status?loginId=OWN001
-router.get('/subscription-status', async (req, res) => {
-  try {
-    const loginId = String(req.query.loginId || '').trim();
-    if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
 
-    const SystemSettings = require('../models/SystemSettings');
-    const User = require('../models/User');
-    const escaped = loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const rx = new RegExp(`^${escaped}$`, 'i');
-
-    let owner = await Owner.findOne({
-      $or: [
-        { loginId: rx },
-        { email: loginId.toLowerCase() },
-        { phone: loginId },
-        { 'profile.phone': loginId }
-      ],
-      isDeleted: { $ne: true }
-    })
-      .select('loginId name createdAt subscription')
-      .lean();
-
-    if (!owner) {
-      // Fallback: check User collection for owner role
-      const userDoc = await User.findOne({
-        $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
-        role: 'owner'
-      }).select('loginId name createdAt subscription').lean();
-
-      if (userDoc) {
-        owner = userDoc;
-      }
-    }
-
-    const settings = await SystemSettings.findOne().lean();
-
-    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
-
-    const trialDays = settings?.ownerTrialDays ?? 1;
-    const price = settings?.ownerSubscriptionPrice ?? null;
-    const currency = settings?.ownerSubscriptionCurrency || 'INR';
-
-    const now = new Date();
-    const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
-    let endDate = owner.subscription?.trialEndDate;
-    if (!endDate && trialDays) {
-      endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
-    }
-
-    const isSubscribed = owner.subscription?.isSubscribed || false;
-    const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
-
-    // Subscribed check
-    if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
-      return res.json({
-        success: true,
-        status: 'subscribed',
-        trialExpired: false,
-        daysRemaining: null,
-        trialEndDate: subscriptionExpiry,
-        price,
-        currency
-      });
-    }
-
-    // Trial not configured
-    if (!endDate) {
-      return res.json({
-        success: true,
-        status: 'trial_unconfigured',
-        trialExpired: false,
-        daysRemaining: null,
-        trialEndDate: null,
-        price,
-        currency
-      });
-    }
-
-    const msRemaining = new Date(endDate).getTime() - now.getTime();
-    const trialExpired = msRemaining <= 0;
-    const daysRemaining = trialExpired ? 0 : Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
-
-    return res.json({
-      success: true,
-      status: trialExpired ? 'expired' : 'trial_active',
-      trialExpired,
-      daysRemaining,
-      trialEndDate: endDate,
-      trialStartDate: startDate,
-      price,
-      currency
-    });
-  } catch (err) {
-    console.error('❌ subscription-status error:', err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
 
 // POST /api/owners/create-subscription-order — Create Cashfree order for owner subscription
 router.post('/create-subscription-order', async (req, res) => {
