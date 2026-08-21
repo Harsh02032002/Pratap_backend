@@ -30,13 +30,16 @@ try {
 
 console.log('🚀 Starting server...');
 
-// DNS Fix for MongoDB Atlas SRV lookups
-const currentServers = dns.getServers();
-if (currentServers && currentServers.includes("127.0.0.1")) {
-  console.warn(
-    "Local DNS server 127.0.0.1 detected — switching to public DNS for SRV lookups",
-  );
-  dns.setServers(["8.8.8.8", "8.8.4.4"]);
+// DNS Fix for MongoDB Atlas SRV lookups on Linux VPS (systemd-resolved uses 127.0.0.53)
+try {
+    const currentServers = dns.getServers();
+    console.log('🌐 Current DNS Servers:', currentServers);
+    if (!currentServers || currentServers.length === 0 || currentServers.some(s => s.startsWith('127.') || s === '::1')) {
+        console.warn('⚠️ Local/stub DNS resolver detected — setting Google/Cloudflare public DNS for Atlas SRV lookups');
+        dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+    }
+} catch (dnsErr) {
+    console.warn('⚠️ Could not override DNS servers:', dnsErr.message);
 }
 
 // Always load env from this folder, regardless of where the process was started.
@@ -196,14 +199,13 @@ app.get('/sitemap.xml', seoController.generateSitemapXml);
 
 // Optimized Database Connection
 const mongoOptions = {
-    serverSelectionTimeoutMS: 15000,
-    connectTimeoutMS: 15000,
+    serverSelectionTimeoutMS: 30000,
+    connectTimeoutMS: 30000,
     socketTimeoutMS: 45000,
-    family: 4, // Force IPv4 to avoid DNS resolution delays
     maxPoolSize: 10,
     minPoolSize: 2,
     maxIdleTimeMS: 30000,
-    waitQueueTimeoutMS: 15000,
+    waitQueueTimeoutMS: 30000,
     heartbeatFrequencyMS: 10000,
     retryWrites: true,
     w: 'majority'
