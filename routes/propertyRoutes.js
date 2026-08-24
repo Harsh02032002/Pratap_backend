@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const propertyController = require('../controllers/propertyController');
 const Property = require('../models/Property');
 const ApprovedProperty = require('../models/ApprovedProperty');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, optionalProtect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
 const { formLimiter } = require('../middleware/security');
 
@@ -14,13 +14,16 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 router.get('/', applyEmployeeScope, propertyController.getAllProperties);
 
 // Add/Create new property with auto-geocoding
-router.post('/add', protect, formLimiter, auditTrail('properties'), propertyController.addProperty);
+router.post('/add', optionalProtect, formLimiter, auditTrail('properties'), propertyController.addProperty);
 
 // Get single property by ID
 router.get('/:id', propertyController.getPropertyById);
 
-// Update property with new fields (amenities, benefits, views)
-router.put('/:id', formLimiter, auditTrail('properties'), propertyController.updateProperty);
+// Update property with new fields (amenities, benefits, views).
+// Superadmin-only: this is the route that sets/clears status: 'blocked', so it
+// must never be reachable by an owner — they go through /owner-edit-request
+// below instead, which is reviewed before anything goes live.
+router.put('/:id', protect, authorize('superadmin'), formLimiter, auditTrail('properties'), propertyController.updateProperty);
 
 // Delete property
 router.delete('/:id', auditTrail('properties'), propertyController.deleteProperty);
@@ -194,8 +197,10 @@ router.post('/:id/click', async (req, res) => {
   }
 });
 
-// Owner submits edit request (saved as pendingChanges, not applied live)
-router.put('/:id/owner-edit-request', formLimiter, propertyController.ownerEditRequest);
+// Owner submits edit request (saved as pendingChanges, not applied live).
+// Ownership and blocked-status are enforced inside the controller, since it
+// needs to compare req.user against the specific property being edited.
+router.put('/:id/owner-edit-request', protect, formLimiter, propertyController.ownerEditRequest);
 
 // Superadmin approves owner pending changes (applies to live property)
 router.put('/:id/approve-changes', formLimiter, auditTrail('properties'), propertyController.approveOwnerChanges);

@@ -18,11 +18,6 @@ exports.healOwnerProperties = async (loginId) => {
         const normalizedLoginId = String(loginId || '').trim().toUpperCase();
         if (!normalizedLoginId) return;
 
-        if (healedOwners.has(normalizedLoginId)) {
-            return;
-        }
-        healedOwners.add(normalizedLoginId);
-
         const mongoose = require('mongoose');
         const Owner = mongoose.models.Owner || require('../models/Owner');
         const Property = mongoose.models.Property || require('../models/Property');
@@ -368,26 +363,108 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
 // Get properties for an owner
 exports.getOwnerProperties = async (req, res) => {
     try {
-        const ownerLoginId = req.params.loginId;
-        await exports.healOwnerProperties(ownerLoginId);
-        const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } });
+        const rawLoginId = req.params.loginId;
+        const ownerLoginId = String(rawLoginId || '').trim().toUpperCase();
+        await exports.healOwnerProperties(ownerLoginId).catch(err => console.error('Heal error:', err));
+
+        const mongoose = require('mongoose');
+        const Owner = mongoose.models.Owner || require('../models/Owner');
+        const Property = mongoose.models.Property || require('../models/Property');
+        const ApprovedProperty = mongoose.models.ApprovedProperty || require('../models/ApprovedProperty');
+
+        const ownerDoc = await Owner.findOne({
+            $or: [
+                { loginId: ownerLoginId },
+                { loginId: rawLoginId }
+            ]
+        }).lean();
+
+        const ownerEmails = [ownerLoginId, ownerDoc?.email, ownerDoc?.profile?.email, ownerDoc?.checkinEmail]
+            .filter(Boolean).map(e => String(e).toLowerCase());
+        const ownerPhones = [ownerDoc?.phone, ownerDoc?.profile?.phone, ownerDoc?.checkinPhone]
+            .filter(Boolean).map(p => String(p).replace(/\D/g, '')).filter(p => p.length >= 10);
+
+        const matchOr = [
+            { ownerLoginId: ownerLoginId },
+            { ownerLoginId: rawLoginId },
+            { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') }
+        ];
+
+        if (ownerDoc?._id) {
+            matchOr.push({ owner: ownerDoc._id });
+        }
+
+        if (ownerEmails.length > 0) {
+            matchOr.push({ 'email': { $in: ownerEmails } });
+            matchOr.push({ 'contact.email': { $in: ownerEmails } });
+        }
+        if (ownerPhones.length > 0) {
+            ownerPhones.forEach(ph => {
+                const last10 = ph.slice(-10);
+                matchOr.push({ 'ownerPhone': new RegExp(last10 + '$') });
+                matchOr.push({ 'contact.number': new RegExp(last10 + '$') });
+                matchOr.push({ 'phone': new RegExp(last10 + '$') });
+            });
+        }
+
+        let properties = await Property.find({
+            $or: matchOr,
+            isDeleted: { $ne: true }
+        }).lean();
+
+        // Also merge items from ApprovedProperty if not already in properties list
+        const approvedProps = await ApprovedProperty.find({
+            $or: [
+                { 'generatedCredentials.loginId': ownerLoginId },
+                { 'generatedCredentials.loginId': new RegExp('^' + ownerLoginId + '$', 'i') },
+                { ownerLoginId: ownerLoginId },
+                { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') },
+                ...matchOr
+            ]
+        }).lean();
+
+        const existingIds = new Set(properties.map(p => p._id ? p._id.toString() : ''));
+        for (const ap of approvedProps) {
+          const apId = ap._id ? ap._id.toString() : '';
+          const propIdStr = ap.propertyId ? ap.propertyId.toString() : '';
+          if (apId && !existingIds.has(apId) && !existingIds.has(propIdStr)) {
+            const mapped = {
+              _id: ap._id,
+              title: ap.propertyInfo?.name || ap.title || 'Property',
+              city: ap.propertyInfo?.city || ap.city || '',
+              locality: ap.propertyInfo?.area || ap.locality || '',
+              address: ap.propertyInfo?.address || ap.address || '',
+              monthlyRent: ap.propertyInfo?.rent || ap.monthlyRent || 0,
+              propertyType: ap.propertyInfo?.propertyType || ap.propertyType || 'pg',
+              status: ap.status || 'active',
+              images: ap.images || ap.photos || [],
+              ownerLoginId: ownerLoginId,
+              ...ap
+            };
+            properties.push(mapped);
+          }
+        }
 
         const syncedProperties = [];
         for (const prop of properties) {
-            // Use existing stored occupancy fields; avoid blocking sync on each request.
-            // Trigger async sync in background to keep data fresh without delaying response.
-            exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
-            const propObj = prop.toObject ? prop.toObject() : prop;
-            propObj.roomCount = prop.roomCount ?? propObj.roomCount;
-            propObj.bedCount = prop.bedCount ?? propObj.bedCount;
-            propObj.occupiedBeds = prop.occupiedBeds ?? propObj.occupiedBeds;
-            propObj.occupiedRooms = prop.occupiedRooms ?? propObj.occupiedRooms;
-            propObj.vacantRooms = prop.vacantRooms ?? propObj.vacantRooms;
-            propObj.vacantBeds = prop.vacantBeds ?? propObj.vacantBeds;
-            syncedProperties.push(propObj);
+            if (prop._id) {
+                exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
+            }
+            syncedProperties.push({
+                ...prop,
+                title: prop.title || prop.name || 'Property',
+                status: prop.status || 'pending_approval',
+                roomCount: prop.roomCount ?? 0,
+                bedCount: prop.bedCount ?? 0,
+                occupiedBeds: prop.occupiedBeds ?? 0,
+                occupiedRooms: prop.occupiedRooms ?? 0,
+                vacantRooms: prop.vacantRooms ?? 0,
+                vacantBeds: prop.vacantBeds ?? 0
+            });
         }
         res.json({ properties: syncedProperties });
     } catch (err) {
+        console.error('Error fetching owner properties:', err);
         res.status(500).json({ message: err.message });
     }
 };
@@ -597,19 +674,16 @@ exports.getAllOwners = async (req, res) => {
 
         const enrichedOwners = owners.map(o => {
             const checkin = checkinMap[o.loginId];
-            const kycComplete = ['verified', 'submitted'].includes(o.kyc?.status) ||
+            const isPendingApproval = Boolean(o.isEmployeeSubmitted && o.status === 'pending_approval');
+            const kycComplete = Boolean(
+                ['verified', 'submitted', 'completed'].includes(o.kycStatus) ||
+                ['verified', 'submitted', 'completed'].includes(o.kyc?.status) ||
                 checkin?.ownerKyc?.otpVerified ||
                 checkin?.ownerKyc?.digilockerVerified ||
-                checkin?.ownerFinalVerified;
-            const shouldBeActive = o.isActive === true || kycComplete;
-
-            // Self-heal owners stuck inactive after completing digital check-in
-            if (shouldBeActive && o.isActive !== true) {
-                Owner.updateOne(
-                    { loginId: o.loginId },
-                    { $set: { isActive: true, 'kyc.status': 'verified', 'kyc.verifiedAt': o.kyc?.verifiedAt || new Date() } }
-                ).catch(() => { });
-            }
+                checkin?.ownerFinalVerified ||
+                o.checkinAadhaarNumber
+            );
+            const shouldBeActive = isPendingApproval ? false : (o.isActive === true);
 
             return {
                 ...o,
@@ -697,7 +771,14 @@ exports.updateOwnerKyc = async (req, res) => {
             return res.status(400).json({ message: 'Invalid status' });
         }
 
-        const owner = await Owner.findOne({ $or: [{ _id: id }, { loginId: id }] });
+        const mongoose = require('mongoose');
+        const param = String(id || '').trim();
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
+
+        const owner = await Owner.findOne(query);
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
 
         owner.kyc = owner.kyc || {};
@@ -711,16 +792,6 @@ exports.updateOwnerKyc = async (req, res) => {
         }
 
         await owner.save();
-
-        // Send Notification to Owner (assuming Notification model exists)
-        // Note: recipient needs to be the User _id associated if decoupled, 
-        // but often Owner model implies a User. Adjust recipient as needed.
-        // For now, we assume a notification system integration:
-        // await Notification.create({
-        //    recipient: owner.userId, // field linking to User model
-        //    type: 'kyc_update',
-        //    message: `Your KYC has been ${status}.`
-        // });
 
         res.json({ success: true, message: `Owner KYC ${status}`, owner });
     } catch (err) {
@@ -746,6 +817,8 @@ exports.requestOwner = async (req, res) => {
             phone,
             locationCode,
             isActive: false,
+            status: 'pending_approval',
+            isEmployeeSubmitted: true,
             kyc: {
                 status: 'requested'
             }
@@ -765,44 +838,84 @@ exports.requestOwner = async (req, res) => {
 exports.approveOwner = async (req, res) => {
     try {
         const { loginId } = req.params;
-        const { password } = req.body;
+        const password = req.body.password || 'Roomhy@123';
 
-        if (!password) {
-            return res.status(400).json({ message: 'Password is required for approval' });
-        }
+        const mongoose = require('mongoose');
+        const param = String(loginId || '').trim();
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId 
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
 
-        const owner = await Owner.findOne({ loginId });
+        const owner = await Owner.findOne(query);
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
 
-        if (owner.kyc?.status !== 'requested') {
-            return res.status(400).json({ message: 'Owner is not in requested status' });
+        // Verify KYC submission before approval
+        const hasKyc = Boolean(
+            owner.kycStatus === 'verified' ||
+            (owner.kyc?.status && owner.kyc.status !== 'pending' && owner.kyc.status !== 'requested') ||
+            owner.checkinSubmittedAt ||
+            owner.checkinAadhaarNumber ||
+            owner.kyc?.aadhaarNumber ||
+            owner.checkinOwnerPhoto
+        );
+
+        if (!hasKyc && req.body.overrideKyc !== true) {
+            return res.status(400).json({ success: false, message: 'KYC submission is required before approving this owner account.' });
         }
 
-        // Set credentials
+        // Set credentials and activate owner
         owner.credentials = { password, firstTime: true };
         owner.checkinPassword = password;
         owner.kyc = owner.kyc || {};
-        owner.kyc.status = 'sent'; // Indicate link sent
+        owner.kyc.status = 'verified';
+        owner.kycStatus = 'verified';
         owner.isActive = true;
+        owner.status = 'approved';
         await owner.save();
 
-        // Send email
+        // Sync User model if exists
+        try {
+            const User = require('../models/user');
+            await User.updateOne(
+                { $or: [{ loginId: owner.loginId }, { email: owner.email }] },
+                { $set: { isActive: true, status: 'active', requirePasswordReset: false } }
+            );
+        } catch (uErr) {
+            console.warn('Sync User on owner approve warning:', uErr.message);
+        }
+
+        // Send credentials email
         if (owner.email) {
             try {
                 const mailer = require('../utils/mailer');
-                const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
-                const area = owner.locationCode || owner.area || '';
+                const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
+                const loginLink = `${APP_URL}/propertyowner/ownerlogin`;
 
-                const kycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(password)}`;
+                const subject = "Welcome to Roomhy — Your Property Owner Login Credentials";
+                const html = `
+                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 12px; padding: 24px; background: #ffffff;">
+                    <h2 style="color: #0f172a; margin-top: 0;">Congratulations! Your Roomhy Owner Account is Approved</h2>
+                    <p style="color: #475569; font-size: 14px;">Dear ${owner.name || 'Property Owner'},</p>
+                    <p style="color: #475569; font-size: 14px;">Your Property Owner account on Roomhy has been approved by Superadmin. You can now log in to manage your properties, rooms, and view tenant rent collections.</p>
+                    <div style="background: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #cbd5e1; margin: 20px 0;">
+                      <p style="margin: 4px 0; font-size: 14px;"><strong>Login ID:</strong> <code style="color: #2563eb; font-weight: bold;">${owner.loginId}</code></p>
+                      <p style="margin: 4px 0; font-size: 14px;"><strong>Password:</strong> <code style="color: #2563eb; font-weight: bold;">${password}</code></p>
+                    </div>
+                    <div style="text-align: center; margin-top: 24px;">
+                      <a href="${loginLink}" style="display: inline-block; background: #0f172a; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 14px;">Log In to Owner Portal</a>
+                    </div>
+                  </div>
+                `;
 
-                await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'Roomhy Asset Portal', kycLink);
-                console.log(`✉️ Direct KYC link sent to ${owner.email} for newly approved Owner ${owner.loginId}`);
+                await mailer.sendMail(owner.email, subject, '', html);
+                console.log(`✉️ Credentials email sent to ${owner.email} for approved Owner ${owner.loginId}`);
             } catch (mailErr) {
-                console.warn('❌ Failed to send direct KYC email for approved Owner:', mailErr.message);
+                console.warn('❌ Failed to send credentials email for approved Owner:', mailErr.message);
             }
         }
 
-        res.json({ success: true, message: 'Owner request approved and link sent.', owner });
+        res.json({ success: true, message: 'Owner request approved and credentials sent to email.', owner });
     } catch (err) {
         console.error('❌ Approve Owner error:', err.message);
         res.status(500).json({ error: err.message });

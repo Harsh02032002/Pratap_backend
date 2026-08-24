@@ -493,14 +493,23 @@ router.get('/pending', protect, authorize('superadmin'), async (req, res) => {
 // ============================================================
 router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
     try {
-        const { visitId, status, isLiveOnWebsite, loginId, tempPassword } = req.body;
-        console.log('?? [visits/approve] Received request:', { visitId, status, isLiveOnWebsite });
+        const { visitId, status, isLiveOnWebsite, loginId, tempPassword, tier } = req.body;
+        console.log('?? [visits/approve] Received request:', { visitId, status, isLiveOnWebsite, tier });
 
         if (!visitId) {
             console.error('? [visits/approve] Missing visitId in request body');
             return res.status(400).json({
                 success: false,
                 message: 'Missing visitId'
+            });
+        }
+
+        // Tier must be assigned before a property is published, mirroring the
+        // KYC gate below — the UI already disables Approve until both are set.
+        if (!tier) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot approve. Select a property tier before publishing.'
             });
         }
 
@@ -653,6 +662,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                 area: ownerArea || '',
                 propertyType: visit.propertyType || '',
                 monthlyRent: Number(visit.monthlyRent || 0),
+                tier,
                 ...occupancy,
                 ownerName,
                 ownerEmail: ownerEmailFromVisit,
@@ -670,6 +680,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             ownerProperty.area = ownerArea || ownerProperty.area || '';
             ownerProperty.propertyType = visit.propertyType || ownerProperty.propertyType || '';
             ownerProperty.monthlyRent = Number(visit.monthlyRent || ownerProperty.monthlyRent || 0);
+            ownerProperty.tier = tier || ownerProperty.tier || '';
             ownerProperty.roomCount = occupancy.roomCount || ownerProperty.roomCount || 0;
             ownerProperty.bedCount = occupancy.bedCount || ownerProperty.bedCount || 0;
             ownerProperty.vacantRooms = occupancy.vacantRooms;
@@ -693,6 +704,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             const ApprovedProperty = require('../models/ApprovedProperty');
             const propData = {
                 visitId: visit._id || visit.visitId,
+                tier,
                 propertyInfo: {
                     name: visit.propertyName || (visit.propertyInfo && visit.propertyInfo.name) || 'Property',
                     address: visit.address || (visit.propertyInfo && visit.propertyInfo.address) || '',

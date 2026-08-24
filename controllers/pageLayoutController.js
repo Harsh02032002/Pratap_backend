@@ -136,11 +136,21 @@ const defaultLayouts = {
         }
       },
       {
+        id: 'about-story',
+        name: 'About Story & Purpose',
+        type: 'about-story',
+        visible: true,
+        order: 1,
+        content: {
+          intro: 'At Roomhy, we believe finding the right place to stay should be simple and stress-free.'
+        }
+      },
+      {
         id: 'vision',
         name: 'Our Vision',
         type: 'vision',
         visible: true,
-        order: 1,
+        order: 2,
         content: {
           title: 'Our Vision',
           list: [
@@ -155,7 +165,7 @@ const defaultLayouts = {
         name: 'Our Mission',
         type: 'mission',
         visible: true,
-        order: 2,
+        order: 3,
         content: {
           title: 'Our Mission',
           list: [
@@ -170,7 +180,7 @@ const defaultLayouts = {
         name: 'Our Values',
         type: 'values',
         visible: true,
-        order: 3,
+        order: 4,
         content: {
           title: 'Our Values',
           list: [
@@ -186,7 +196,7 @@ const defaultLayouts = {
         name: 'Operational Stats',
         type: 'stats',
         visible: true,
-        order: 4,
+        order: 5,
         content: {
           cities: '5+',
           residences: '75+',
@@ -199,7 +209,7 @@ const defaultLayouts = {
         name: 'Leadership Team',
         type: 'team',
         visible: true,
-        order: 5,
+        order: 6,
         content: {
           title: 'Our Leadership',
           subtitle: 'The Minds Behind Roomhy',
@@ -232,7 +242,7 @@ const defaultLayouts = {
         visible: true,
         order: 1,
         content: {
-          email: 'hello@roomhy.com',
+          email: 'team@roomhy.com',
           phone: '+91 99830 05030',
           address: '22, Krishna Nagar, Rangbari Road, Kota, Rajasthan - 324005'
         }
@@ -581,10 +591,10 @@ const defaultLayouts = {
 exports.getPageLayout = async (req, res) => {
   try {
     const { pageKey } = req.params;
-    
+
     let layout = await PageLayout.findOne({ pageKey });
     const defaultLayout = defaultLayouts[pageKey];
-    
+
     if (!layout) {
       if (!defaultLayout) {
         return res.status(404).json({
@@ -592,19 +602,19 @@ exports.getPageLayout = async (req, res) => {
           message: `Layout not defined for page: ${pageKey}`
         });
       }
-      
+
       layout = new PageLayout({
         pageKey,
         sections: defaultLayout.sections,
         updatedBy: 'system'
       });
-      
+
       await layout.save();
     } else if (defaultLayout) {
       // Auto-heal/sync database layouts with code configuration defaults
       let modified = false;
       const dbSections = [...layout.sections];
-      
+
       for (const defSec of defaultLayout.sections) {
         const dbSecIdx = dbSections.findIndex(s => s.id === defSec.id);
         if (dbSecIdx === -1) {
@@ -612,8 +622,12 @@ exports.getPageLayout = async (req, res) => {
           dbSections.push(defSec);
           modified = true;
         } else {
-          // Merge content keys
           const dbSec = dbSections[dbSecIdx];
+          if (dbSec.order !== defSec.order) {
+            dbSec.order = defSec.order;
+            modified = true;
+          }
+          // Merge content keys
           const mergedContent = { ...defSec.content, ...dbSec.content };
           if (JSON.stringify(mergedContent) !== JSON.stringify(dbSec.content)) {
             dbSec.content = mergedContent;
@@ -621,13 +635,13 @@ exports.getPageLayout = async (req, res) => {
           }
         }
       }
-      
+
       if (modified) {
         layout.sections = dbSections.sort((a, b) => a.order - b.order);
         await PageLayout.updateOne({ pageKey }, { $set: { sections: layout.sections } });
       }
     }
-    
+
     return res.status(200).json({
       success: true,
       data: layout
@@ -646,25 +660,25 @@ exports.updatePageLayout = async (req, res) => {
   try {
     const { pageKey } = req.params;
     const { sections } = req.body;
-    
+
     if (!Array.isArray(sections)) {
       return res.status(400).json({
         success: false,
         message: 'sections array is required'
       });
     }
-    
+
     const updated = await PageLayout.findOneAndUpdate(
       { pageKey },
-      { 
-        $set: { 
+      {
+        $set: {
           sections,
           updatedBy: req.user?.email || 'superadmin'
-        } 
+        }
       },
       { new: true, upsert: true }
     );
-    
+
     return res.status(200).json({
       success: true,
       message: 'Page layout updated successfully',

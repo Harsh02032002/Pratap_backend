@@ -51,6 +51,7 @@ function cleanPath(urlStr) {
 exports.getSeoMetadata = async (req, res) => {
     try {
         const { url, slug, pageKey, entityType, entityId, ...context } = req.query;
+        const cleanedSlug = cleanPath(slug || url || '');
 
         // 1. Check for database-driven redirects (URL history or alias mapping)
         const targetUrl = url || slug || '';
@@ -84,7 +85,6 @@ exports.getSeoMetadata = async (req, res) => {
 
         // B. Match by clean slug/url path if no record found yet
         if (!seoRecord && (slug || url)) {
-            const cleanedSlug = cleanPath(slug || url);
             seoRecord = await SeoPage.findOne({ 
                 $or: [
                     { slug: cleanedSlug },
@@ -93,28 +93,161 @@ exports.getSeoMetadata = async (req, res) => {
             });
         }
 
-        // C. Match by pageKey (fallback template or static page key)
-        if (!seoRecord && pageKey) {
+        // C. Check if slug/url is an SEO URL pattern: /{type}-in-{location}
+        if (!seoRecord && (slug || url)) {
+            const seoPatternMatch = cleanedSlug.match(/^(properties|pg|hostels|hostel|co-living|coliving|apartments|apartment)-in-(.+)$/i);
+            
+            if (seoPatternMatch) {
+                const rawType = seoPatternMatch[1].toLowerCase();
+                const rawLocation = seoPatternMatch[2]; // e.g. "kota", "talwandi-kota", "mp-nagar-bhopal"
+                
+                let propertyType = 'PG';
+                if (rawType.startsWith('properties')) propertyType = 'Properties';
+                else if (rawType.startsWith('hostel')) propertyType = 'Hostel';
+                else if (rawType.includes('coliving') || rawType.includes('co-living')) propertyType = 'Co-living';
+                else if (rawType.startsWith('apartment')) propertyType = 'Apartment';
+
+                // Match against known cities list for accurate multi-word area resolution
+                const knownCities = [
+                    'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
+                    'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'nagpur', 'chennai',
+                    'ahmedabad', 'lucknow', 'chandigarh', 'noida', 'gurugram'
+                ];
+
+                let city = context.city || '';
+                let area = context.area || '';
+
+                if (!city || !area) {
+                    const matchedCityKey = knownCities.find(c => rawLocation.endsWith('-' + c) || rawLocation === c);
+                    if (matchedCityKey) {
+                        city = matchedCityKey.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        if (rawLocation !== matchedCityKey) {
+                            const areaPart = rawLocation.slice(0, rawLocation.length - matchedCityKey.length - 1);
+                            area = areaPart.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        }
+                    } else {
+                        const parts = rawLocation.split('-');
+                        if (parts.length >= 2) {
+                            city = parts[parts.length - 1].charAt(0).toUpperCase() + parts[parts.length - 1].slice(1);
+                            area = parts.slice(0, parts.length - 1).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                        } else if (parts.length === 1) {
+                            city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                        }
+                    }
+                }
+
+                const generatedH1 = `${rawType.startsWith('properties') ? 'Properties in' : propertyType + ' in'} ${area ? area + ', ' : ''}${city}`;
+                let generatedTitle = `Best ${propertyType} in ${area ? area + ' ' : ''}${city} | Boys & Girls | Roomhy`;
+                let generatedDesc = `Find the best ${propertyType.toLowerCase()} in ${area ? area + ', ' : ''}${city} for boys and girls. Enjoy fully furnished rooms with food, Wi-Fi, 24/7 security, and 0% brokerage on Roomhy.`;
+
+                if (rawType.startsWith('properties')) {
+                    generatedTitle = `Top PGs, Hostels & Flats in ${area ? area + ' ' : ''}${city} | Roomhy.com`;
+                    generatedDesc = `Find top verified student PGs, hostels, and flats in ${area ? area + ', ' : ''}${city} with zero brokerage, modern amenities, and prime stays on Roomhy.com.`;
+                }
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `dynamic-${cleanedSlug}`,
+                        pageName: generatedH1,
+                        slug: cleanedSlug,
+                        city,
+                        area,
+                        propertyType,
+                        metaTitle: generatedTitle,
+                        metaDescription: generatedDesc,
+                        metaKeywords: `PG in ${area || city}, hostels in ${area || city}, student accommodation ${city}, rooms in ${area || city}, flats in ${area || city}`,
+                        h1: generatedH1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+        }
+
+        // D. Match by pageKey (fallback template or static page key)
+        if (!seoRecord && pageKey && !['pg-main', 'hostels-main', 'co-living-main'].includes(pageKey)) {
             seoRecord = await SeoPage.findOne({ pageKey, entityId: null });
         }
 
-        // If absolutely no record is found, return empty data
+        // E. Check if this is a general city or area route (e.g. "kota", "jaipur/malviya-nagar")
+        if (!seoRecord && (slug || url)) {
+            const parts = cleanedSlug.split('/');
+            const knownCities = [
+                'bangalore', 'bengaluru', 'bhopal', 'indore', 'delhi', 'new-delhi',
+                'jaipur', 'kota', 'sikar', 'mumbai', 'pune', 'hyderabad', 'nagpur',
+                'chennai', 'ahmedabad', 'lucknow', 'chandigarh', 'noida', 'gurugram'
+            ];
+
+            if (parts.length === 1 && knownCities.includes(parts[0].toLowerCase())) {
+                const city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                const title = `Rental Properties in ${city} | Roomhy`;
+                const desc = `Browse all verified PGs, Hostels, Co-living spaces, and Apartments for rent in ${city} with zero brokerage on Roomhy.`;
+                const h1 = `Properties in ${city}`;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `city-general-${parts[0]}`,
+                        pageName: h1,
+                        slug: cleanedSlug,
+                        city,
+                        area: '',
+                        propertyType: 'All',
+                        metaTitle: title,
+                        metaDescription: desc,
+                        metaKeywords: `properties in ${city}, pg in ${city}, hostels in ${city}, flats for rent in ${city}`,
+                        h1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+
+            if (parts.length === 2 && knownCities.includes(parts[0].toLowerCase())) {
+                const city = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+                const area = parts[1].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                const title = `Rental Properties in ${area}, ${city} | Roomhy`;
+                const desc = `Browse all verified PGs, Hostels, Co-living spaces, and Apartments for rent in ${area}, ${city} with zero brokerage on Roomhy.`;
+                const h1 = `Properties in ${area}, ${city}`;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        pageKey: `area-general-${parts[0]}-${parts[1]}`,
+                        pageName: h1,
+                        slug: cleanedSlug,
+                        city,
+                        area,
+                        propertyType: 'All',
+                        metaTitle: title,
+                        metaDescription: desc,
+                        metaKeywords: `properties in ${area} ${city}, pg in ${area}, hostels in ${area} ${city}`,
+                        h1,
+                        canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
+                        robots: 'index, follow',
+                        isIndexed: true
+                    }
+                });
+            }
+        }
+
+        // D. Perform dynamic placeholder rendering (template variables)
         if (!seoRecord) {
             return res.status(200).json({
                 success: true,
                 data: {
-                    metaTitle: '',
-                    metaDescription: '',
-                    metaKeywords: '',
-                    canonicalUrl: '',
+                    metaTitle: 'Roomhy - Premium Broker-Free Student & Professional Living',
+                    metaDescription: 'Find and book verified broker-free PGs, Hostels, and Co-living spaces across top cities in India.',
+                    canonicalUrl: `https://roomhy.com/${cleanedSlug}`,
                     robots: 'index, follow',
                     isIndexed: true
                 }
             });
         }
-
-        // D. Perform dynamic placeholder rendering (template variables)
-        const seoObj = seoRecord.toObject();
+        const seoObj = typeof seoRecord.toObject === 'function' ? seoRecord.toObject() : (seoRecord || {});
         const renderFields = [
             'metaTitle', 'metaDescription', 'metaKeywords', 'h1', 'seoContent',
             'openGraphTitle', 'openGraphDescription', 'twitterTitle', 'twitterDescription'
@@ -146,18 +279,77 @@ exports.getSeoMetadata = async (req, res) => {
     }
 };
 
+/**
+ * GENERATE DYNAMIC XML SITEMAP
+ */
+exports.generateSitemapXml = async (req, res) => {
+    try {
+        const pages = await SeoPage.find({ isIndexed: { $ne: false } }).lean();
+
+        let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+        xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
+
+        const defaultUrls = [
+            { loc: 'https://roomhy.com/', priority: '1.0', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/properties', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/hostels', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/co-living', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/apartments', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/about-us', priority: '0.7', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/contact-us', priority: '0.7', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/list-property', priority: '0.8', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/faq', priority: '0.6', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/pg-in-kota', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-jaipur', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-delhi', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-indore', priority: '0.8', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-talwandi-kota', priority: '0.85', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/pg-in-vigyan-nagar-kota', priority: '0.85', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/pg-in-landmark-city-kota', priority: '0.85', changefreq: 'weekly' }
+        ];
+
+        const addedUrls = new Set();
+        defaultUrls.forEach(item => {
+            addedUrls.add(item.loc);
+            xml += `  <url>\n    <loc>${item.loc}</loc>\n    <changefreq>${item.changefreq}</changefreq>\n    <priority>${item.priority}</priority>\n  </url>\n`;
+        });
+
+        pages.forEach(p => {
+            if (p.robots && p.robots.toLowerCase().includes('noindex')) return;
+
+            const path = (p.slug || '').replace(/^\/+/, '');
+            const url = p.canonicalUrl || `https://roomhy.com/${path}`;
+
+            if (url && !addedUrls.has(url)) {
+                addedUrls.add(url);
+                xml += `  <url>\n    <loc>${url}</loc>\n    <changefreq>${p.sitemapChangefreq || 'weekly'}</changefreq>\n    <priority>${p.sitemapPriority || 0.8}</priority>\n  </url>\n`;
+            }
+        });
+
+        xml += `</urlset>`;
+
+        res.header('Content-Type', 'application/xml');
+        return res.status(200).send(xml);
+    } catch (err) {
+        console.error('Error generating XML sitemap:', err);
+        return res.status(500).send('Error generating sitemap');
+    }
+};
+
 const defaultSeoPages = [
-  { pageKey: 'home', pageName: 'Home Page', slug: '', metaTitle: 'Roomhy - Premium Broker-Free Student & Professional Living', metaDescription: 'Find and book premium broker-free PGs, Hostels, and Co-living spaces across major cities in India. Zero brokerage, live bidding.', metaKeywords: 'pg, hostels, co-living, roomhy, student housing, broker free pg, hostel booking', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'about', pageName: 'About Us', slug: 'about-us', metaTitle: 'About Roomhy - Our Story & Mission', metaDescription: 'Roomhy is India\'s first student-centric property bidding platform. Broker-free, verified listings with live bidding for students.', metaKeywords: 'about roomhy, student housing company, roomhy story, property bidding india', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'contact', pageName: 'Contact Us', slug: 'contact-us', metaTitle: 'Contact Roomhy - Get in Touch', metaDescription: 'Get in touch with the Roomhy team for support, booking help, property listing, or any inquiries. We respond in 24 hours.', metaKeywords: 'contact roomhy, roomhy support, roomhy email, roomhy phone', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'list-property', pageName: 'List Your Property', slug: 'website/list', metaTitle: 'List Your Property on Roomhy - Zero Commission', metaDescription: 'List your PG, hostel, or co-living space on Roomhy for free. Get direct verified student inquiries with zero commission charged.', metaKeywords: 'list pg, list hostel, property owner roomhy, zero commission, add listing roomhy', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'faq', pageName: 'How Roomhy Works', slug: 'website/how-it-works', metaTitle: 'How Roomhy Works - FAQ & Guide', metaDescription: 'Learn how to find, bid, and book verified student accommodations on Roomhy in just a few easy steps. Zero brokerage guaranteed.', metaKeywords: 'how roomhy works, roomhy faq, student booking guide, how to bid, roomhy help', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'privacy', pageName: 'Privacy Policy', slug: 'website/privacy-policy', metaTitle: 'Privacy Policy - Roomhy', metaDescription: 'Read Roomhy\'s privacy policy to understand how we collect, store, and protect your personal data and booking information.', metaKeywords: 'roomhy privacy policy, data protection, user data roomhy', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'terms', pageName: 'Terms & Conditions', slug: 'website/terms-and-conditions', metaTitle: 'Terms & Conditions - Roomhy Platform', metaDescription: 'Read the terms and conditions governing the use of Roomhy\'s booking, bidding, and listing services on our platform.', metaKeywords: 'roomhy terms, terms and conditions roomhy, user agreement', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'login', pageName: 'Login - Sign In', slug: 'website/login', metaTitle: 'Sign In to Roomhy - Student & Owner Portal', metaDescription: 'Log in to your Roomhy account to bid on PGs, manage your bookings, chat with property owners, and more.', metaKeywords: 'roomhy login, sign in roomhy, student login, owner login', robots: 'noindex, nofollow', isIndexed: false },
-  { pageKey: 'register', pageName: 'Register - Sign Up', slug: 'website/register', metaTitle: 'Create Your Roomhy Account - Sign Up Free', metaDescription: 'Register on Roomhy for free to start bidding on verified PGs and hostels. Quick signup, no credit card required.', metaKeywords: 'roomhy signup, create account roomhy, student register, pg booking account', robots: 'noindex, nofollow', isIndexed: false },
-  { pageKey: 'our-property', pageName: 'Browse Properties', slug: 'website/ourproperty', metaTitle: 'Browse PGs, Hostels & Co-living Spaces - Roomhy', metaDescription: 'Explore hundreds of verified PGs, hostels, and co-living spaces across major Indian cities. Filter by city, type, and price.', metaKeywords: 'pg listing, hostel listing, co-living india, student accommodation, book pg online', robots: 'index, follow', isIndexed: true },
-  { pageKey: 'property-details', pageName: 'Property Details', slug: 'website/property-details', metaTitle: '{propertyName} - Roomhy', metaDescription: 'View details, images, amenities, pricing, and availability for {propertyName} on Roomhy. Bid now, zero brokerage.', metaKeywords: 'pg details, hostel rooms, co-living rooms, roomhy property, book room', robots: 'index, follow', isIndexed: true }
+  { pageKey: 'home', pageName: 'Home', slug: '', metaTitle: 'Top PGs, Hostels & Co-living in India | Roomhy.com', metaDescription: 'Discover 100% verified student PGs, hostels, and flats across India. Enjoy zero brokerage, fully furnished rooms, homemade meals, and easy budget bidding.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'about', pageName: 'About Us', slug: 'about-us', metaTitle: 'About Us | Zero Brokerage Student Stays | Roomhy.com', metaDescription: "Learn about Roomhy.com's mission to provide 100% verified, broker-free student and professional living across India with transparent budget bidding.", robots: 'index, follow', isIndexed: true },
+  { pageKey: 'contact', pageName: 'Contact Us', slug: 'contact-us', metaTitle: 'Contact Us | 24/7 Support & Help | Roomhy.com', metaDescription: 'Get in touch with the Roomhy.com support team. Contact us for booking assistance, owner listings, cancellations, refunds, or general queries.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'list-property', pageName: 'List Property', slug: 'list-property', metaTitle: 'List Your Property for Free | Hostels & PGs | Roomhy.com', metaDescription: 'List your PG, hostel, co-living space, or apartment on Roomhy.com for free. Connect directly with verified student tenants and maximize your occupancy.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'faq', pageName: 'How Roomhy Works', slug: 'faq', metaTitle: 'How Roomhy Works - FAQ & Guide | Roomhy.com', metaDescription: 'Learn how to find, bid, and book verified student accommodations on Roomhy in just a few easy steps. Zero brokerage guaranteed.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'privacy', pageName: 'Privacy Policy', slug: 'privacy-policy', metaTitle: 'Privacy Policy | User Data Protection | Roomhy.com', metaDescription: "Read Roomhy.com's privacy policy to understand how we collect, use, and protect your personal data, booking details, and browsing information securely.", robots: 'index, follow', isIndexed: true },
+  { pageKey: 'terms', pageName: 'Terms and Conditions', slug: 'terms-and-conditions', metaTitle: 'Terms and Conditions | User Agreement | Roomhy.com', metaDescription: "Review Roomhy.com's terms and conditions covering platform usage, booking rules, bidding policies, payments, and tenant-owner guidelines.", robots: 'index, follow', isIndexed: true },
+  { pageKey: 'login', pageName: 'Login', slug: 'login', metaTitle: 'Login to Your Account | Tenant & Owner | Roomhy.com', metaDescription: 'Login to your Roomhy.com account to manage bookings, track live bids, connect directly with property owners, or access your owner dashboard.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'register', pageName: 'Register', slug: 'register', metaTitle: 'Create an Account | Sign Up on Roomhy.com', metaDescription: 'Sign up on Roomhy.com to discover verified student stays, place live bids on your budget, and connect directly with verified property owners.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'blogs', pageName: 'Blogs', slug: 'blogs', metaTitle: 'Student Housing Guides, Tips & Insights | Roomhy.com Blog', metaDescription: 'Read helpful guides, city living tips, rent breakdowns, and student housing advice on the Roomhy.com blog to make your next move effortless.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'our-property', pageName: 'Browse Properties', slug: 'properties', metaTitle: 'Browse PGs, Hostels & Co-living Spaces | Roomhy.com', metaDescription: 'Explore hundreds of verified PGs, hostels, and co-living spaces across major Indian cities. Filter by city, type, and price.', robots: 'index, follow', isIndexed: true },
+  { pageKey: 'property-details', pageName: 'Property Details', slug: 'property-details', metaTitle: '{propertyName} | Roomhy.com', metaDescription: 'View details, images, amenities, pricing, and availability for {propertyName} on Roomhy.com. Zero brokerage.', robots: 'index, follow', isIndexed: true }
 ];
 
 const websitePageKeys = ['home', 'about', 'contact', 'list-property', 'faq', 'privacy', 'terms', 'login', 'register', 'our-property', 'property-details'];
@@ -168,7 +360,7 @@ const websitePageKeys = ['home', 'about', 'contact', 'list-property', 'faq', 'pr
 exports.getPages = async (req, res) => {
     try {
         // Return ALL pages from database, including dynamic pages created by admin
-        let pages = await SeoPage.find({}).sort({ createdAt: 1 });
+        let pages = await SeoPage.find({}).sort({ createdAt: 1 }).lean();
         
         // Seed default pages if missing
         const existingKeys = pages.map(p => p.pageKey);

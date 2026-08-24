@@ -83,7 +83,7 @@ router.post('/create', async (req, res) => {
         }).lean();
 
         if (!existingWelcome) {
-            const intro = `Chat opened for ${propertyName || 'property'} between ${ownerName || normalizedOwnerId} and ${userName || userEmail || normalizedUserId} (booking ${bookingId})`;
+            const intro = `Chat opened for ${propertyName || 'property'} between ${ownerName || normalizedOwnerId} and ${userName || userEmail || normalizedUserId}`;
             await Promise.all([
                 ChatMessage.create({
                     room_id: normalizedOwnerId,

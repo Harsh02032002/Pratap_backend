@@ -57,6 +57,9 @@ const supportTicketSchema = new mongoose.Schema({
   owner_id: { type: String, default: null, index: true },
   owner_name: { type: String, default: null },
   complaint_id: { type: String, default: null }, // link to TenantComplaint / OwnerComplaint
+  city: { type: String, default: null, index: true },
+  area: { type: String, default: null, index: true },
+  location_code: { type: String, default: null },
 
   // ─── TICKET DETAILS ───────────────────────────────────────────────────────
   subject: { type: String, required: true, trim: true },

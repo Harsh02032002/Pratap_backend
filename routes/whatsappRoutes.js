@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { formLimiter } = require('../middleware/security');
 const {
     normalizePhoneNumber,
@@ -9,11 +10,14 @@ const Tenant = require('../models/Tenant');
 const router = express.Router();
 
 // POST /api/whatsapp/broadcast
-// Body: { ownerLoginId, ownerName, message, recipientGroup }
+// Body: { ownerLoginId, ownerName, message, recipientGroup, propertyId? }
 // recipientGroup: "all" | "pending-dues" | "upcoming-moveins"
+// propertyId: optional — when set, scopes the broadcast to that property's
+// tenants only, so a multi-property owner never messages another property's
+// tenants while viewing/broadcasting from a specific one.
 router.post('/broadcast', formLimiter, async (req, res) => {
     try {
-        const { ownerLoginId, ownerName, message, recipientGroup = 'all' } = req.body || {};
+        const { ownerLoginId, ownerName, message, recipientGroup = 'all', propertyId } = req.body || {};
 
         if (!ownerLoginId || !message || !ownerName) {
             return res.status(400).json({ success: false, message: 'ownerLoginId, ownerName, and message are required' });
@@ -23,6 +27,9 @@ router.post('/broadcast', formLimiter, async (req, res) => {
 
         // Build tenant filter based on group
         let filter = { ownerLoginId: normalizedOwnerId, status: 'active' };
+        if (propertyId && propertyId !== 'all' && mongoose.isValidObjectId(propertyId)) {
+            filter.property = propertyId;
+        }
         if (recipientGroup === 'pending-dues') {
             filter.dueBalance = { $gt: 0 };
         } else if (recipientGroup === 'upcoming-moveins') {

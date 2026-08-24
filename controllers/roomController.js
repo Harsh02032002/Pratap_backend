@@ -3,6 +3,7 @@ const Room = require('../models/Room');
 const Property = require('../models/Property');
 const Notification = require('../models/Notification');
 const User = require('../models/user');
+const Tenant = require('../models/Tenant');
 
 // Owner adds a room to their property. Room is created with status 'inactive'.
 exports.sendPaymentLink = async (req, res) => {
@@ -16,7 +17,6 @@ exports.sendPaymentLink = async (req, res) => {
     const room = await Room.findById(roomId).lean();
     if (!room) return res.status(404).json({ success: false, message: 'Room not found' });
     // Attempt to locate tenant assigned to this room
-    const Tenant = require('../models/Tenant');
     let tenant = null;
     if (Array.isArray(room.bedAssignments) && room.bedAssignments.length) {
       const occupied = room.bedAssignments.find(b => b && b.tenantId);
@@ -243,38 +243,83 @@ if (rooms.length === 0) {
 }
 
         if (unassigned === 'true') {
-            const Tenant = require('../models/Tenant');
             const tenants = await Tenant.find({
                 property: new mongoose.Types.ObjectId(propertyId),
                 status: { $in: ['active', 'pending'] }
-            }).select('roomNo room').lean();
+            }).select('roomNo room bedNo').lean();
             
-            // Count tenants per room
-            const tenantCountByRoomNo = {};
-            const tenantCountByRoomId = {};
+            // Track occupied beds per room
+            const occupiedBedsByRoom = {};
             
             tenants.forEach(t => {
-                if (t.room) {
-                    const rId = t.room.toString();
-                    tenantCountByRoomId[rId] = (tenantCountByRoomId[rId] || 0) + 1;
+                const roomKey = t.room ? t.room.toString() : String(t.roomNo || '').trim().toLowerCase();
+                if (!occupiedBedsByRoom[roomKey]) {
+                    occupiedBedsByRoom[roomKey] = new Set();
                 }
-                if (t.roomNo) {
-                    const rNo = String(t.roomNo).trim().toLowerCase();
-                    tenantCountByRoomNo[rNo] = (tenantCountByRoomNo[rNo] || 0) + 1;
+                if (t.bedNo) {
+                    occupiedBedsByRoom[roomKey].add(String(t.bedNo).trim());
                 }
             });
             
             rooms = rooms.filter(room => {
-                const countById = tenantCountByRoomId[room._id.toString()] || 0;
-                const countByNo = tenantCountByRoomNo[String(room.title).trim().toLowerCase()] || 0;
-                const activeCount = Math.max(countById, countByNo);
-                const capacity = Array.isArray(room.beds)
-                    ? (room.beds.length || Number(room.capacity || room.totalBeds) || 1)
-                    : (Number(room.beds || room.capacity || room.totalBeds) || 1);
-                return activeCount < capacity;
+                const roomKey = room._id.toString();
+                const occupiedBeds = occupiedBedsByRoom[roomKey] || new Set();
+                const capacity = Number(room.beds || room.capacity || room.totalBeds) || 1;
+                
+                // Hide room if all beds are occupied
+                if (occupiedBeds.size >= capacity) {
+                    return false;
+                }
+                
+                // Add available beds info to room object
+                room.availableBeds = [];
+                for (let i = 1; i <= capacity; i++) {
+                    if (!occupiedBeds.has(String(i))) {
+                        room.availableBeds.push(i);
+                    }
+                }
+                
+                return true;
             });
         }
-        
+        // Dynamically populate bed assignments & status from active/pending tenants
+        const activeTenants = await Tenant.find({
+            property: new mongoose.Types.ObjectId(propertyId),
+            status: { $in: ['active', 'pending'] },
+            isDeleted: { $ne: true }
+        }).select('_id name loginId room roomNo bedNo createdAt').lean();
+
+        rooms.forEach(room => {
+            const capacity = Number(room.beds || room.capacity || room.totalBeds) || 1;
+            if (!Array.isArray(room.bedAssignments)) room.bedAssignments = [];
+            while (room.bedAssignments.length < capacity) {
+                room.bedAssignments.push({});
+            }
+
+            const roomTenants = activeTenants.filter(t => {
+                if (t.room && t.room.toString() === String(room._id)) return true;
+                const tRoomNo = String(t.roomNo || '').trim().toLowerCase();
+                const rTitle = String(room.title || room.number || room.roomNo || '').trim().toLowerCase();
+                if (!tRoomNo || !rTitle) return false;
+                return tRoomNo === rTitle || tRoomNo === `room ${rTitle}` || `room ${tRoomNo}` === rTitle;
+            });
+
+            roomTenants.forEach(t => {
+                const bIndex = Math.max(0, (Number(t.bedNo || 1) - 1));
+                if (bIndex < capacity) {
+                    room.bedAssignments[bIndex] = {
+                        tenantId: t._id,
+                        tenantName: t.name,
+                        tenantLoginId: t.loginId,
+                        assignedAt: t.createdAt || new Date()
+                    };
+                }
+            });
+
+            const occupiedCount = room.bedAssignments.filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length;
+            room.isAvailable = occupiedCount < capacity;
+        });
+
         const total = await Room.countDocuments(query);
         console.log(`Found ${rooms.length} rooms for property ${propertyId}`);
         res.json({ success: true, rooms, total });
@@ -721,9 +766,53 @@ exports.getAllRooms = async (req, res) => {
             .sort({ createdAt: -1 })
             .lean();
 
+        const activeTenantsAll = await Tenant.find({
+            status: { $in: ['active', 'pending'] },
+            isDeleted: { $ne: true }
+        }).select('_id name loginId property room roomNo bedNo createdAt').lean();
+
+        // Helper to populate room bedAssignments
+        const populateRoomAssignments = (rList) => {
+            rList.forEach(room => {
+                const capacity = Number(room.beds || room.capacity || room.totalBeds) || 1;
+                if (!Array.isArray(room.bedAssignments)) room.bedAssignments = [];
+                while (room.bedAssignments.length < capacity) {
+                    room.bedAssignments.push({});
+                }
+
+                const propIdStr = room.property?._id ? room.property._id.toString() : (room.property ? room.property.toString() : '');
+                const roomTenants = activeTenantsAll.filter(t => {
+                    if (t.property && propIdStr && t.property.toString() !== propIdStr) return false;
+                    if (t.room && t.room.toString() === String(room._id)) return true;
+                    const tRoomNo = String(t.roomNo || '').trim().toLowerCase();
+                    const rTitle = String(room.title || room.number || room.roomNo || '').trim().toLowerCase();
+                    if (!tRoomNo || !rTitle) return false;
+                    return tRoomNo === rTitle || tRoomNo === `room ${rTitle}` || `room ${tRoomNo}` === rTitle;
+                });
+
+                roomTenants.forEach(t => {
+                    const bIndex = Math.max(0, (Number(t.bedNo || 1) - 1));
+                    if (bIndex < capacity) {
+                        room.bedAssignments[bIndex] = {
+                            tenantId: t._id,
+                            tenantName: t.name,
+                            tenantLoginId: t.loginId,
+                            assignedAt: t.createdAt || new Date()
+                        };
+                    }
+                });
+
+                const occupiedCount = room.bedAssignments.filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length;
+                room.isAvailable = occupiedCount < capacity;
+            });
+        };
+
+        populateRoomAssignments(rooms);
+
         // Calculate statistics across active rooms (scoped for employees)
         const activeRoomQuery = applyRoomScope(req, { isDeleted: { $ne: true } });
         const allActiveRooms = await Room.find(activeRoomQuery).lean();
+        populateRoomAssignments(allActiveRooms);
         
         let totalRoomsCount = allActiveRooms.length;
         let vacantRoomsCount = 0;
@@ -731,13 +820,12 @@ exports.getAllRooms = async (req, res) => {
         let maintenanceRoomsCount = 0;
 
         allActiveRooms.forEach(room => {
-            if (!room.isAvailable || room.status === 'inactive') {
+            if (room.status === 'inactive') {
                 maintenanceRoomsCount++;
             } else {
                 const bedsCount = Number(room.beds || 1);
-                // Count bed assignments
                 const assignedCount = Array.isArray(room.bedAssignments)
-                    ? room.bedAssignments.filter(b => b && b.tenantId).length
+                    ? room.bedAssignments.filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length
                     : 0;
                 if (assignedCount >= bedsCount) {
                     occupiedRoomsCount++;

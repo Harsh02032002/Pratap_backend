@@ -10,6 +10,8 @@ const ApprovedPropertySchema = new mongoose.Schema({
     propertyId: { type: String },
     enquiry_id: { type: String },
     propertyCategory: { type: String },
+    // Mirrors Property.tier so the public website can read it directly.
+    tier: { type: String, default: '' },
     state: { type: String },
     pincode: { type: String },
     landmark: { type: String },
@@ -57,7 +59,7 @@ const ApprovedPropertySchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['approved', 'live', 'offline'],
+        enum: ['approved', 'live', 'offline', 'active', 'inactive', 'blocked', 'pending_approval', 'Approved', 'Active', 'Live', 'Offline'],
         default: 'approved',
         index: true
     },

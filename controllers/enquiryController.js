@@ -11,6 +11,25 @@ exports.createEnquiry = async (req, res) => {
     }
     const enquiry = await Enquiry.create(payload);
 
+    const User = require('../models/user');
+    const locationStr = payload.location || payload.city || payload.area || '';
+    if (locationStr) {
+      const areaEmp = await User.findOne({
+        role: { $in: ['employee', 'areamanager'] },
+        $or: [
+          { city: new RegExp(locationStr, 'i') },
+          { assignedArea: new RegExp(locationStr, 'i') },
+          { locationCode: new RegExp(locationStr, 'i') }
+        ]
+      }).lean();
+      if (areaEmp) {
+        enquiry.assignedStaff = areaEmp.name || areaEmp.loginId;
+        enquiry.assignedStaffId = areaEmp.loginId;
+        await enquiry.save();
+        console.log(`📍 Auto-assigned enquiry ${enquiry._id} to Area Employee: ${areaEmp.name} (${areaEmp.loginId})`);
+      }
+    }
+
     try {
       await notifySuperadmin({
         type: 'new_enquiry',
@@ -66,45 +85,94 @@ exports.listEnquiries = async (req, res) => {
     const { ownerLoginId } = req.params;
     const normalizedOwnerId = String(ownerLoginId || '').toUpperCase();
 
-    // 1. Fetch enquiries from Enquiry collection
-    const enquiries = await Enquiry.find({ ownerLoginId }).sort({ ts: -1 }).lean();
+    // 1. Fetch enquiries from Enquiry collection (case-insensitive ownerLoginId match)
+    const enquiries = await Enquiry.find({
+      $or: [
+        { ownerLoginId: normalizedOwnerId },
+        { ownerLoginId: ownerLoginId },
+        { ownerLoginId: new RegExp(`^${normalizedOwnerId}$`, 'i') }
+      ]
+    }).sort({ ts: -1 }).lean();
 
-    // 2. Fetch booking requests from BookingRequest collection (matching owner_id OR owner's properties)
+    // 2. Fetch owner's properties from BOTH Property and ApprovedProperty collections
+    const Property = require('../models/Property');
     const BookingRequest = require('../models/BookingRequest');
     const ApprovedProperty = require('../models/ApprovedProperty');
 
     let propIds = [];
     let propVisitIds = [];
     let propNames = [];
+    let ownerCities = [];
 
     try {
-      const ownerProps = await ApprovedProperty.find({
-        $or: [
-          { ownerLoginId: normalizedOwnerId },
-          { 'generatedCredentials.loginId': normalizedOwnerId },
-          { owner_id: normalizedOwnerId },
-          { owner: normalizedOwnerId },
-          { ownerLoginId: ownerLoginId },
-          { owner_id: ownerLoginId }
-        ]
-      }).select('_id visitId propertyName title').lean();
+      const [regularProps, approvedProps] = await Promise.all([
+        Property.find({
+          $or: [
+            { ownerLoginId: normalizedOwnerId },
+            { ownerLoginId: ownerLoginId },
+            { ownerLoginId: new RegExp(`^${normalizedOwnerId}$`, 'i') },
+            { owner_id: normalizedOwnerId },
+            { owner_id: ownerLoginId }
+          ]
+        }).select('_id visitId title propertyName city locality').lean(),
+        ApprovedProperty.find({
+          $or: [
+            { ownerLoginId: normalizedOwnerId },
+            { 'generatedCredentials.loginId': normalizedOwnerId },
+            { owner_id: normalizedOwnerId },
+            { owner: normalizedOwnerId },
+            { ownerLoginId: ownerLoginId },
+            { owner_id: ownerLoginId }
+          ]
+        }).select('_id visitId propertyName title propertyInfo.city').lean()
+      ]);
 
-      propIds = ownerProps.map(p => String(p._id));
-      propVisitIds = ownerProps.map(p => p.visitId).filter(Boolean);
-      propNames = ownerProps.map(p => p.propertyName || p.title).filter(Boolean);
+      const allProps = [...regularProps, ...approvedProps];
+      propIds = allProps.map(p => String(p._id));
+      propVisitIds = allProps.map(p => p.visitId).filter(Boolean);
+      propNames = allProps.map(p => p.propertyName || p.title || p.propertyInfo?.name).filter(Boolean);
+      ownerCities = allProps.map(p => p.city || p.propertyInfo?.city).filter(Boolean).map(c => String(c).toLowerCase().trim());
     } catch (_) {}
 
     const bookingQuery = {
       $or: [
         { owner_id: normalizedOwnerId },
         { owner_id: ownerLoginId },
+        { owner_id: new RegExp(`^${normalizedOwnerId}$`, 'i') },
         { owner_ids: { $in: [normalizedOwnerId, ownerLoginId] } }
       ]
     };
 
     if (propIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propIds } });
     if (propVisitIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propVisitIds } });
-    if (propNames.length > 0) bookingQuery.$or.push({ property_name: { $in: propNames } });
+    if (propNames.length > 0) {
+      propNames.forEach(name => {
+        if (name) bookingQuery.$or.push({ property_name: new RegExp(String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+      });
+    }
+
+    // Include open city bids ONLY if they have no property assigned to any other owner.
+    // This prevents showing bids from "Roomhy Premium PG - 1" to owner of "Property01" etc.
+    if (ownerCities.length > 0) {
+      ownerCities.forEach(city => {
+        bookingQuery.$or.push({
+          $and: [
+            { request_type: 'bid' },
+            { $or: [{ city: new RegExp(city, 'i') }, { 'filter_criteria.city': new RegExp(city, 'i') }] },
+            // Only truly open bids — no specific property assigned to another owner
+            { $or: [
+              { property_id: { $in: propIds } },     // bid is for this owner's property
+              { property_id: { $exists: false } },    // bid has no property
+              { property_id: null },                  // bid has no property
+              { property_id: '' },                    // bid has no property
+              { owner_id: { $in: [normalizedOwnerId, ownerLoginId] } } // bid is assigned to this owner
+            ]}
+          ]
+        });
+      });
+    }
+    // Note: removed the broad fallback { request_type: 'bid' } that was pulling ALL bids when no city
+
 
     const bookingRequests = await BookingRequest.find(bookingQuery).sort({ created_at: -1 }).lean();
 
@@ -272,19 +340,41 @@ exports.updateEnquiry = async (req, res) => {
               )
             ]);
 
-            // Send welcome message to tenant's room
+            // Send welcome message to both tenant's and owner's chat rooms
             const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
-            await ChatMessage.create({
-              room_id: normalizedUserId,
-              sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
-              sender_name: ownerName,
-              sender_role: 'property_owner',
-              message: welcomeMsg,
-              message_type: 'text',
-              created_at: new Date(),
-              updated_at: new Date()
-            });
-            console.log('✅ Welcome message sent to tenant in room:', normalizedUserId);
+            await Promise.all([
+              ChatMessage.create({
+                room_id: normalizedUserId,
+                sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
+                sender_name: ownerName,
+                sender_role: 'property_owner',
+                message: welcomeMsg,
+                message_type: 'text',
+                created_at: new Date(),
+                updated_at: new Date()
+              }),
+              ChatMessage.create({
+                room_id: normalizedOwnerId,
+                sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
+                sender_name: ownerName,
+                sender_role: 'property_owner',
+                message: welcomeMsg,
+                message_type: 'text',
+                created_at: new Date(),
+                updated_at: new Date()
+              })
+            ]);
+
+            // Dispatch WhatsApp notification to tenant
+            const { sendTextMessage } = require('../utils/whatsappBot');
+            const tenantPhone = bookingReq.phone || bookingReq.user_phone || bookingReq.studentPhone || '';
+            if (tenantPhone) {
+              sendTextMessage(tenantPhone, welcomeMsg).catch(waErr => {
+                console.warn('⚠️ WhatsApp notification error:', waErr.message);
+              });
+            }
+
+            console.log('✅ Welcome message sent to tenant and owner in rooms:', normalizedUserId, normalizedOwnerId);
           }
         } catch (chatErr) {
           console.error('⚠️ Failed to send welcome message:', chatErr.message);

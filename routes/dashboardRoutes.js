@@ -177,6 +177,11 @@ router.get('/:ownerId', async (req, res) => {
         if (!loginId) {
             return res.status(400).json({ success: false, message: 'ownerId is required' });
         }
+        // Optional property scope — same query-param contract as the other
+        // owner-scoped endpoints (complaints, rooms, tenants).
+        const propertyId = req.query.propertyId && req.query.propertyId !== 'all'
+            ? String(req.query.propertyId)
+            : null;
 
         // ── PHASE 1: Run heal ONCE (fire-and-forget — never blocks the response) ──
         ownerController.healOwnerProperties(loginId).catch(err =>
@@ -202,7 +207,7 @@ router.get('/:ownerId', async (req, res) => {
                 .lean(),
 
             // 3. Enquiries — limit to 100 newest for dashboard
-            Enquiry.find({ ownerLoginId: loginRegex })
+            Enquiry.find({ ownerLoginId: loginRegex, ...(propertyId ? { propertyId } : {}) })
                 .sort({ ts: -1 })
                 .limit(100)
                 .lean(),
@@ -214,18 +219,24 @@ router.get('/:ownerId', async (req, res) => {
                 .lean(),
 
             // 5. Complaints — exact match (index hit), limit 50
-            Complaint.find({ ownerLoginId: loginRegex })
+            Complaint.find({ ownerLoginId: loginRegex, ...(propertyId ? { propertyId } : {}) })
                 .sort({ createdAt: -1 })
                 .limit(50)
                 .lean(),
 
             // 6. PaymentTransactions for rent calculation
-            PaymentTransaction.find({ owner_id: loginRegex })
+            PaymentTransaction.find({ owner_id: loginRegex, ...(propertyId ? { property_id: propertyId } : {}) })
                 .select('owner_amount')
                 .lean(),
         ]);
 
-        const propertyIds = properties.map(p => p._id);
+        // Scope to the single selected property when provided (still validated
+        // against this owner's own properties list, never trusts the query param
+        // directly).
+        const scopedProperties = propertyId
+            ? properties.filter(p => String(p._id) === propertyId)
+            : properties;
+        const propertyIds = scopedProperties.map(p => p._id);
 
         // ── PHASE 3: Derive IDs then run remaining parallel fetches ───────────────
         const [rooms, tenants, ownerDoc2, rentPaymentsForOwner] = await Promise.all([
@@ -256,7 +267,7 @@ router.get('/:ownerId', async (req, res) => {
         let rentPayments = [];
         const resolvedOwner = ownerDoc2 || ownerDoc;
         if (resolvedOwner?._id) {
-            rentPayments = await RentPayment.find({ ownerId: resolvedOwner._id })
+            rentPayments = await RentPayment.find({ ownerId: resolvedOwner._id, ...(propertyId ? { propertyId } : {}) })
                 .select('amount')
                 .lean();
         }

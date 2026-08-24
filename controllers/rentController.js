@@ -461,11 +461,16 @@ exports.recordPaymentByTenant = async (req, res) => {
     // ── Auto-create PaymentTransaction for admin commission split ──────────
     // This makes the Financial Ledger show commission earned from monthly rent payments.
     try {
-      if (rent.paymentMethod === 'razorpay' || rent.razorpayPaymentId) {
+      const isOnlinePay = ['razorpay', 'cashfree', 'cashfree_pg', 'online'].includes(rent.paymentMethod) || rent.razorpayPaymentId || rent.cashfreePaymentId || rent.cashfreeOrderId;
+      if (isOnlinePay) {
         // Check if a transaction for this payment_id already exists
-        const existingTx = rent.razorpayPaymentId
-          ? await PaymentTransaction.findOne({ razorpay_payment_id: rent.razorpayPaymentId })
-          : null;
+        const payId = rent.cashfreePaymentId || rent.razorpayPaymentId || null;
+        const cfOrdId = rent.cashfreeOrderId || rent.cf_order_id || null;
+        const queryConds = [];
+        if (payId) queryConds.push({ razorpay_payment_id: payId }, { cf_payment_id: payId });
+        if (cfOrdId) queryConds.push({ cf_order_id: cfOrdId });
+
+        const existingTx = queryConds.length > 0 ? await PaymentTransaction.findOne({ $or: queryConds }) : null;
 
         if (!existingTx) {
           let settings = await SystemSettings.findOne({});
@@ -482,10 +487,14 @@ exports.recordPaymentByTenant = async (req, res) => {
             : null;
 
           await PaymentTransaction.create({
-            razorpay_payment_id: rent.razorpayPaymentId || `RENT-${Date.now()}`,
+            razorpay_payment_id: rent.razorpayPaymentId || payId || `RENT-${Date.now()}`,
+            cf_payment_id: rent.cashfreePaymentId || payId || null,
+            cf_order_id: rent.cashfreeOrderId || cfOrdId || null,
             razorpay_order_id: rent.razorpayOrderId || null,
             razorpay_signature: rent.razorpaySignature || null,
             status: 'Verified',
+            wallet_status: 'held',
+            held_at: new Date(),
             booking_id: String(rent._id),
             property_id: String(tenantProfile?.property || ''),
             property_name: tenantProfile?.propertyTitle || '',
@@ -500,7 +509,7 @@ exports.recordPaymentByTenant = async (req, res) => {
             gst_amount: gstAmt,
             owner_amount: ownerAmt,
             payout_status: 'Pending',
-            payment_method: 'razorpay',
+            payment_method: rent.paymentMethod || 'cashfree',
             payment_date: new Date(),
             notes: `Monthly rent payment - ${rent.collectionMonth || new Date().toISOString().slice(0, 7)}`,
           });

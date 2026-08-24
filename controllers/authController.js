@@ -77,8 +77,8 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         let user = null;
 
         try {
+            // Search ALL roles — no restriction
             user = await User.findOne({ email: email.toLowerCase() });
-
             if (user) {
                 console.log('[ForgotPassword] Found user in User collection:', user.email, 'role:', user.role);
             }
@@ -723,53 +723,156 @@ exports.login = async (req, res) => {
         
         // Determine identifier type
         const isEmail = normalizedIdentifier.includes('@');
-        const isPhone = /^\d{10}$/.test(normalizedIdentifier); // 10 digit phone
-        const isLoginId = /^roomhy/i.test(normalizedIdentifier);
+        const cleanDigits = normalizedIdentifier.replace(/\D/g, '');
+        const phone10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
+        const isPhone = phone10.length === 10;
+        const isLoginId = /^roomhy/i.test(normalizedIdentifier) || /^\d{3,6}$/.test(normalizedIdentifier);
         
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
         
         // Build comprehensive query based on identifier - use precise matching to avoid wrong user login
         let user = null;
         
-        console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone}, isLoginId: ${isLoginId}`);
+        console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone} (${phone10}), isLoginId: ${isLoginId}`);
         
         if (isEmail) {
-            // If identifier is email, only search by email
+            // If identifier is email, search by email
             user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
-            console.log(`[LOGIN DEBUG] Email search result:`, user ? { loginId: user.loginId, role: user.role, email: user.email } : 'No user found');
         } else if (isPhone) {
-            // If identifier is phone, only search by phone. Guard against legacy
-            // duplicate phone numbers (pre-unique-index data) resolving to the
-            // wrong account — refuse rather than pick one arbitrarily.
-            const phoneMatches = await User.find({ phone: normalizedIdentifier }).limit(2);
+            // If identifier is phone, search all common stored formats, then
+            // guard against legacy duplicate phone numbers (pre-unique-index
+            // data) resolving to the wrong account — refuse rather than pick
+            // one arbitrarily.
+            const phoneMatches = await User.find({
+                $or: [
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `91${phone10}` },
+                    { phone: `0${phone10}` }
+                ]
+            }).limit(2);
             if (phoneMatches.length > 1) {
                 return res.status(409).json({ message: 'Multiple accounts share this phone number. Please login using your Login ID.' });
             }
             user = phoneMatches[0] || null;
             console.log(`[LOGIN DEBUG] Phone search result:`, user ? { loginId: user.loginId, role: user.role, phone: user.phone } : 'No user found');
         } else if (isLoginId) {
-            // If identifier looks like loginId, only search by loginId
+            // If identifier looks like loginId, search by loginId
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
-            if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
-            }
-            if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier });
-            }
-            console.log(`[LOGIN DEBUG] LoginId search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier });
         } else {
-            // Fallback: try all fields but prioritize exact matches
+            // Fallback: try all fields
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
+            if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+            if (!user) user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
             if (!user) {
-                user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
+                user = await User.findOne({
+                    $or: [
+                        { phone: normalizedIdentifier },
+                        { phone: phone10 },
+                        { phone: `+91${phone10}` },
+                        { phone: `0${phone10}` }
+                    ]
+                });
             }
-            if (!user) {
-                user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+        }
+
+        // Fallback for Tenants: Search Tenant collection directly by loginId, email, or phone
+        if (!user) {
+            const tenantOr = [
+                { email: normalizedIdentifier.toLowerCase() }
+            ];
+            if (isPhone && phone10) {
+                tenantOr.push(
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `0${phone10}` }
+                );
             }
-            if (!user) {
-                user = await User.findOne({ phone: normalizedIdentifier });
+            if (isLoginId) {
+                tenantOr.push(
+                    { loginId: normalizedIdentifier.toUpperCase() },
+                    { loginId: normalizedIdentifier.toLowerCase() }
+                );
             }
-            console.log(`[LOGIN DEBUG] Fallback search result:`, user ? { loginId: user.loginId, role: user.role } : 'No user found');
+            const tenantDoc = await Tenant.findOne({ $or: tenantOr }).lean();
+            if (tenantDoc) {
+                user = await User.findOne({
+                    $or: [
+                        { loginId: tenantDoc.loginId },
+                        { email: tenantDoc.email },
+                        { phone: tenantDoc.phone }
+                    ]
+                });
+                if (!user && tenantDoc.isActive !== false && !tenantDoc.isDeleted) {
+                    try {
+                        user = await User.create({
+                            name: tenantDoc.name || 'Tenant',
+                            email: tenantDoc.email || normalizedIdentifier.toLowerCase(),
+                            phone: tenantDoc.phone || phone10,
+                            password: tenantDoc.tempPassword || password,
+                            role: 'tenant',
+                            loginId: tenantDoc.loginId,
+                            isActive: tenantDoc.isActive !== false,
+                            status: tenantDoc.status || 'active'
+                        });
+                    } catch (createErr) {
+                        user = await User.findOne({ loginId: tenantDoc.loginId });
+                    }
+                }
+            }
+        }
+
+        // Fallback for Owners: Search Owner collection directly by loginId, email, or phone
+        if (!user) {
+            const ownerOr = [
+                { loginId: normalizedIdentifier.toUpperCase() },
+                { loginId: `ROOMHY${normalizedIdentifier}` },
+                { loginId: new RegExp(`${normalizedIdentifier}$`, 'i') },
+                { loginId: normalizedIdentifier.toLowerCase() },
+                { email: normalizedIdentifier.toLowerCase() }
+            ];
+            if (isPhone && phone10) {
+                ownerOr.push(
+                    { phone: normalizedIdentifier },
+                    { phone: phone10 },
+                    { phone: `+91${phone10}` },
+                    { phone: `0${phone10}` },
+                    { 'profile.phone': phone10 },
+                    { 'profile.phone': `+91${phone10}` },
+                    { checkinPhone: phone10 },
+                    { checkinPhone: `+91${phone10}` }
+                );
+            }
+            const ownerDoc = await Owner.findOne({ $or: ownerOr }).lean();
+            if (ownerDoc) {
+                user = await User.findOne({
+                    $or: [
+                        { loginId: ownerDoc.loginId },
+                        { email: ownerDoc.email },
+                        { phone: ownerDoc.phone }
+                    ]
+                });
+                if (!user && ownerDoc.isActive !== false) {
+                    try {
+                        user = await User.create({
+                            name: ownerDoc.name || ownerDoc.profile?.name || 'Property Owner',
+                            email: ownerDoc.email || ownerDoc.profile?.email || `${ownerDoc.loginId.toLowerCase()}@roomhy.com`,
+                            phone: ownerDoc.phone || ownerDoc.profile?.phone || phone10,
+                            password: ownerDoc.credentials?.password || ownerDoc.checkinPassword || password,
+                            role: 'owner',
+                            loginId: ownerDoc.loginId,
+                            isActive: ownerDoc.isActive !== false,
+                            status: ownerDoc.status || 'approved'
+                        });
+                    } catch (createErr) {
+                        user = await User.findOne({ loginId: ownerDoc.loginId });
+                    }
+                }
+            }
         }
 
         // Fallback: If not in User collection, check KYCVerification (website signups)
@@ -815,7 +918,22 @@ exports.login = async (req, res) => {
                 user.isActive = true;
                 user.status = 'active';
             }
-            if (!isDemoAccount && user.isActive === false) {
+
+            // Auto-heal owner User model if user is an owner with valid credentials or KYC
+            if (user.role === 'owner' && user.isActive === false) {
+                user.isActive = true;
+                user.status = 'active';
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+            }
+
+            // Auto-heal tenant User model if user is a tenant with valid credentials
+            if (user.role === 'tenant' && user.isActive === false) {
+                user.isActive = true;
+                user.status = 'active';
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+            }
+
+            if (!isDemoAccount && user.role !== 'owner' && user.role !== 'tenant' && user.isActive === false) {
                 return res.status(403).json({ message: 'Account disabled' });
             }
 
@@ -854,45 +972,64 @@ exports.login = async (req, res) => {
                 }
             }
 
+            // Owners can login using email, loginId, or phone
+            isMatch = await user.matchPassword(password);
+            
+            // Plain-text password fallback for legacy records or Owner credentials
+            if (!isMatch && user.password && String(user.password) === String(password)) {
+                isMatch = true;
+                user.password = password; // Will be re-hashed by pre-save hook
+                await user.save().catch(() => {});
+            }
+
+            let ownerDocForPass = null;
+            if (user.role === 'owner') {
+                ownerDocForPass = await Owner.findOne({ loginId: user.loginId }).lean();
+                if (!isMatch && ownerDocForPass) {
+                    const ownerPass = ownerDocForPass.credentials?.password || ownerDocForPass.checkinPassword;
+                    if (ownerPass && String(ownerPass).trim() === String(password).trim()) {
+                        isMatch = true;
+                        user.password = password;
+                        await user.save().catch(() => {});
+                    }
+                }
+            }
+
             // Check if owner is inactive/deleted/deactivated
             if (user.role === 'owner') {
-                let owner = await Owner.findOne({
+                let owner = ownerDocForPass || await Owner.findOne({
                     $or: [
                         { loginId: user.loginId },
                         { email: user.email },
                         { phone: user.phone }
                     ]
-                });
+                }).lean();
+
                 const isDemo = user.loginId === 'ROOMHY0000';
+                const isKycVerified = Boolean(
+                    isMatch ||
+                    owner?.kycStatus === 'verified' ||
+                    (owner?.kyc?.status && owner.kyc.status === 'verified') ||
+                    owner?.checkinSubmittedAt ||
+                    owner?.checkinAadhaarNumber ||
+                    owner?.kyc?.aadharNumber ||
+                    owner?.kyc?.aadhaarNumber
+                );
+
                 if (!owner) {
-                    owner = await Owner.create({
-                        loginId: user.loginId,
-                        name: user.name || 'Owner',
-                        email: user.email || '',
-                        phone: user.phone || '',
-                        status: 'active',
-                        isActive: true,
-                        isDeleted: false
-                    });
+                    return res.status(403).json({ message: 'Owner record not found.' });
                 } else if (isDemo && (owner.isActive === false || owner.isDeleted)) {
                     // Auto-heal demo owner record
                     await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, isDeleted: false, status: 'active' } });
-                } else if (owner.status !== 'active' || owner.isActive === false || owner.isDeleted) {
-                    owner.status = 'active';
-                    owner.isActive = true;
-                    owner.isDeleted = false;
-                    await owner.save();
+                } else if (isKycVerified && (owner.isActive === false || owner.status === 'pending_approval')) {
+                    // Auto-heal / activate owner whose KYC is completed or credentials matched
+                    await Owner.updateOne({ _id: owner._id }, { $set: { isActive: true, status: 'approved', 'kyc.status': 'verified', kycStatus: 'verified' } });
+                    await User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } });
+                    user.isActive = true;
+                    user.status = 'active';
+                } else if (!isDemo && !isKycVerified && (owner.isActive === false || owner.status === 'pending_approval')) {
+                    return res.status(403).json({ message: 'Your owner account KYC is pending. Please complete KYC using the link sent to your email.' });
                 }
-            }
-
-            // Owners can login using email, loginId, or phone
-            isMatch = await user.matchPassword(password);
-            
-            // Plain-text password fallback for legacy records
-            if (!isMatch && user.password && String(user.password) === String(password)) {
-                isMatch = true;
-                user.password = password; // Will be re-hashed by pre-save hook
-                await user.save().catch(() => {});
             }
             
             if (isMatch) {
@@ -914,14 +1051,13 @@ exports.login = async (req, res) => {
                     }
                 }
 
-                // Do not force password reset for tenants on login, auto-clear requirePasswordReset
-                if (user.role === 'tenant') {
-                    reqReset = false;
-                    if (user.requirePasswordReset) {
-                        user.requirePasswordReset = false;
-                        await User.updateOne({ _id: user._id }, { $set: { requirePasswordReset: false } });
-                    }
-                }
+                // Tenants are created with requirePasswordReset: true (see
+                // tenantController.js assignTenant) so their first login with
+                // the emailed temp password must go through the same forced
+                // reset as owners/employees/managers — reqReset already holds
+                // user.requirePasswordReset from above, so no tenant-specific
+                // override here. setTenantPassword() is what correctly clears
+                // the flag once the tenant actually sets their own password.
 
                 if (reqReset) {
                     return res.status(200).json({

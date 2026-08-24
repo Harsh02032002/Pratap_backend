@@ -6,6 +6,7 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 
 // Resolved metadata endpoint (used by client-side hooks, SSR, sitemaps, etc.)
 router.get('/metadata', seoController.getSeoMetadata);
+router.get('/sitemap.xml', seoController.generateSitemapXml);
 
 // ─── SEO Pages CRUD ────────────────────────────────────────────────────────────
 router.get('/pages', seoController.getPages);

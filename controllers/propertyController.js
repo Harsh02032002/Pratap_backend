@@ -69,6 +69,7 @@ const syncToApprovedProperty = async (property) => {
             propertyId: property.propertyId || property._id.toString(),
             enquiry_id: property.enquiry_id || property._id.toString(),
             propertyCategory: property.propertyCategory || "",
+            tier: property.tier || "",
             state: property.state || "",
             pincode: property.pincode || "",
             landmark: property.landmark || "",
@@ -143,20 +144,54 @@ exports.addProperty = async (req, res) => {
       }
     }
 
-    // Staff members or requests explicitly marked active (e.g. Superadmin wizard) create active/published properties. Owner requests default to pending_approval.
-    const isStaff = (req.user && ['superadmin', 'admin', 'employee', 'manager', 'areamanager'].includes(req.user.role)) || req.body.status === 'active';
+    // Only superadmin/admin can directly make a property active/live.
+    // Employees and area managers submit properties for admin approval.
+    const isSuperAdmin = req.user && ['superadmin', 'admin'].includes(req.user.role);
+    const isEmployeeOrManager = req.user && ['employee', 'manager', 'areamanager'].includes(req.user.role);
+    const isStaff = isSuperAdmin || req.body.status === 'active';
     
-    if (isStaff) {
+    if (isSuperAdmin || req.body.status === 'active') {
         propertyData.status = req.body.status || 'active'; 
         propertyData.isPublished = propertyData.status === 'active';
         propertyData.isLiveOnWebsite = propertyData.status === 'active';
     } else {
+        // employee, areamanager, owner — all go to pending_approval
         propertyData.status = 'pending_approval';
         propertyData.isPublished = false;
         propertyData.isLiveOnWebsite = false;
+        if (isEmployeeOrManager) {
+            propertyData.isEmployeeSubmitted = true;
+            propertyData.submittedByRole = req.user.role;
+            propertyData.submittedByLoginId = req.user.loginId || '';
+        }
+    }
+
+    // Auto-assign to area employee for pending properties
+    let autoAssignedTo = null;
+    let autoAssignedToName = null;
+    if (propertyData.status === 'pending_approval' && (propertyData.city || propertyData.area || propertyData.locationCode)) {
+      try {
+        const Employee = require('../models/Employee');
+        const areaEmployee = await Employee.findOne({
+          $or: [
+            { city: propertyData.city, area: propertyData.area },
+            { city: propertyData.city, areaCode: propertyData.area },
+            { locationCode: propertyData.locationCode || propertyData.area }
+          ],
+          role: { $in: ['employee', 'manager', 'areamanager'] }
+        }).select('name loginId role').lean();
+        if (areaEmployee) {
+          autoAssignedTo = areaEmployee.loginId;
+          autoAssignedToName = areaEmployee.name;
+        }
+      } catch (_) {}
     }
 
     const property = new Property(propertyData);
+    if (autoAssignedTo) {
+      property.assignedTo = autoAssignedTo;
+      property.assignedToName = autoAssignedToName;
+    }
     await property.save();
 
     // Notify superadmins if it requires approval
@@ -188,6 +223,26 @@ exports.addProperty = async (req, res) => {
     // Clear cached listings so the new property shows up immediately
     clearCache('/api/approved-properties');
     clearCache('/api/properties');
+    // Send assignment notification if auto-assigned
+    if (autoAssignedTo && !isStaff) {
+      try {
+        await Notification.create({
+          toRole: 'employee',
+          toLoginId: autoAssignedTo,
+          from: req.user?.loginId || 'system',
+          type: 'property_assigned',
+          message: `New property "${property.title}" assigned to you for verification (${property.city || ''} ${property.area || ''})`,
+          meta: {
+            propertyId: property._id.toString(),
+            propertyTitle: property.title,
+            city: property.city || '',
+            area: property.area || ''
+          }
+        });
+      } catch (notifyErr) {
+        console.warn('Property assignment notification failed:', notifyErr.message);
+      }
+    }
 
     res.status(201).json({
       success: true,
@@ -352,6 +407,10 @@ exports.updateProperty = async (req, res) => {
 // =====================================================================
 // OWNER EDIT REQUEST — saves changes as pendingChanges (no live update)
 // =====================================================================
+// Roles that manage properties on behalf of any owner (mirrors authorize('superadmin')'s
+// expansion in authMiddleware.js) — exempt from the ownership check below.
+const PROPERTY_ADMIN_ROLES = new Set(['superadmin', 'admin', 'employee', 'areamanager', 'manager']);
+
 exports.ownerEditRequest = async (req, res) => {
   try {
     const propId = req.params.id;
@@ -359,6 +418,20 @@ exports.ownerEditRequest = async (req, res) => {
 
     const property = await Property.findById(propId);
     if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
+
+    // Only the property's own owner (or an admin-family role) may request
+    // edits — never trust the ownerLoginId in the request body for this,
+    // it's only used below for the notification text.
+    if (!PROPERTY_ADMIN_ROLES.has(req.user.role) &&
+        String(property.ownerLoginId || '').toUpperCase() !== String(req.user.loginId || '').toUpperCase()) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to edit this property.' });
+    }
+
+    // A blocked property was rejected by admin review — it cannot be edited
+    // back into shape by the owner; they must contact support instead.
+    if (property.status === 'blocked') {
+      return res.status(403).json({ success: false, message: 'This property has been blocked and cannot be edited. Please contact support.' });
+    }
 
     // Save changes in pendingChanges — DO NOT update live fields
     property.pendingChanges = {
@@ -718,21 +791,55 @@ exports.assignPropertyVerification = async (req, res) => {
         if (!property) {
             return res.status(404).json({ success: false, message: "Property not found" });
         }
+
+        // Auto-assign to employee of same city/area if no employee specified
+        let assignedEmployeeId = employeeId;
+        let assignedEmployeeName = employeeName;
+
+        if (!assignedEmployeeId) {
+            // Find employee matching property's city/area
+            const propertyCity = property.city || property.locationCode || '';
+            const propertyArea = property.locality || property.area || '';
+            
+            const matchingEmployee = await Employee.findOne({
+                isActive: true,
+                isDeleted: false,
+                $or: [
+                    { city: propertyCity },
+                    { locationCode: propertyCity },
+                    { area: propertyArea },
+                    { areaCode: propertyArea }
+                ]
+            });
+
+            if (matchingEmployee) {
+                assignedEmployeeId = matchingEmployee._id;
+                assignedEmployeeName = matchingEmployee.name;
+            } else {
+                // No employee found for this area
+                return res.json({ 
+                    success: false, 
+                    message: "No employee of that area, you can assign",
+                    autoAssignFailed: true,
+                    property 
+                });
+            }
+        }
         
         // If it's a new property pending approval (status === 'pending_approval')
         if (property.status === 'pending_approval') {
-            property.assignedTo = employeeId;
-            property.assignedToName = employeeName;
+            property.assignedTo = assignedEmployeeId;
+            property.assignedToName = assignedEmployeeName;
         } else if (property.pendingChanges && property.pendingChanges.status === 'pending') {
             // If it's an edit request
-            property.pendingChanges.assignedTo = employeeId;
-            property.pendingChanges.assignedToName = employeeName;
+            property.pendingChanges.assignedTo = assignedEmployeeId;
+            property.pendingChanges.assignedToName = assignedEmployeeName;
         } else {
             return res.status(400).json({ success: false, message: "Property has no pending creation or edit request to assign" });
         }
 
         await property.save();
-        res.json({ success: true, message: `Property verification assigned to ${employeeName}`, property });
+        res.json({ success: true, message: `Property verification assigned to ${assignedEmployeeName}`, property });
     } catch (err) {
         console.error("Error assigning property verification:", err);
         res.status(500).json({ success: false, message: err.message });

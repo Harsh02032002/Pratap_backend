@@ -742,4 +742,98 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin', 'areamanage
     }
 });
 
+// ─── Staff Documents API ──────────────────────────────────────────────────────
+
+/**
+ * GET /api/employees/all-with-docs
+ * Fetch all employees with their document summary for the superadmin Documents page
+ */
+router.get('/all-with-docs', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
+    try {
+        const employees = await Employee.find({ isDeleted: { $ne: true } })
+            .select('name loginId role customRole employeeType city area isActive photoDataUrl documents createdAt')
+            .sort({ createdAt: -1 });
+        return res.status(200).json({ success: true, data: employees });
+    } catch (err) {
+        console.error('Fetch employees with docs error:', err);
+        return res.status(500).json({ error: 'Failed to fetch employees', details: err.message });
+    }
+});
+
+/**
+ * POST /api/employees/:id/documents
+ * Add a document to a staff member
+ * Body: { type, number, fileUrl, fileName }
+ */
+router.post('/:id/documents', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
+    try {
+        const { type, number, fileUrl, fileName } = req.body;
+        if (!type) return res.status(400).json({ error: 'Document type is required' });
+
+        const employee = await Employee.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+        if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+        const newDoc = { type, number: number || '', fileUrl: fileUrl || '', fileName: fileName || '', status: 'Pending', uploadedAt: new Date() };
+        employee.documents.push(newDoc);
+        await employee.save();
+
+        return res.status(200).json({ success: true, message: 'Document added', data: employee.documents });
+    } catch (err) {
+        console.error('Add document error:', err);
+        return res.status(500).json({ error: 'Failed to add document', details: err.message });
+    }
+});
+
+/**
+ * PATCH /api/employees/:id/documents/:docId/status
+ * Update a document status (Verified / Rejected)
+ * Body: { status, rejectionReason? }
+ */
+router.patch('/:id/documents/:docId/status', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
+    try {
+        const { status, rejectionReason } = req.body;
+        if (!['Verified', 'Rejected', 'Pending'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status. Must be Verified, Rejected, or Pending.' });
+        }
+
+        const employee = await Employee.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+        if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+        const doc = employee.documents.id(req.params.docId);
+        if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+        doc.status = status;
+        if (status === 'Verified') doc.verifiedAt = new Date();
+        if (status === 'Rejected') doc.rejectionReason = rejectionReason || '';
+        await employee.save();
+
+        return res.status(200).json({ success: true, message: `Document ${status}`, data: employee.documents });
+    } catch (err) {
+        console.error('Update document status error:', err);
+        return res.status(500).json({ error: 'Failed to update document status', details: err.message });
+    }
+});
+
+/**
+ * DELETE /api/employees/:id/documents/:docId
+ * Remove a document from a staff member
+ */
+router.delete('/:id/documents/:docId', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
+    try {
+        const employee = await Employee.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+        if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+        const doc = employee.documents.id(req.params.docId);
+        if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+        doc.deleteOne();
+        await employee.save();
+
+        return res.status(200).json({ success: true, message: 'Document removed', data: employee.documents });
+    } catch (err) {
+        console.error('Delete document error:', err);
+        return res.status(500).json({ error: 'Failed to delete document', details: err.message });
+    }
+});
+
 module.exports = router;

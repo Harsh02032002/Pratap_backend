@@ -22,6 +22,32 @@ const Notification       = require('../models/Notification');
 const SystemSettings     = require('../models/SystemSettings');
 const cfPay = require('../services/cashfreePaymentService');
 
+// The public onboarding page historically sent its signed payment-link JWT in
+// `bookingId`. Resolve it before it is used in a Cashfree order ID; JWTs are
+// considerably longer than Cashfree's 130-character order_id limit.
+async function resolveBookingReference(bookingId) {
+  const reference = String(bookingId || '').trim();
+  if (!reference.includes('.')) return reference;
+
+  const jwt = require('jsonwebtoken');
+  let decoded;
+  try {
+    decoded = jwt.verify(reference, process.env.JWT_SECRET);
+  } catch (err) {
+    const error = new Error('Invalid or expired onboarding payment link');
+    error.statusCode = err.name === 'TokenExpiredError' ? 410 : 401;
+    throw error;
+  }
+
+  if (decoded?.purpose !== 'onboarding_payment' || !mongoose.Types.ObjectId.isValid(decoded.rentRecordId)) {
+    const error = new Error('Invalid onboarding payment link');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return String(decoded.rentRecordId);
+}
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 async function getCommissionSettings() {
@@ -51,11 +77,13 @@ function calcBreakdown(amount, commissionPct, gstPct) {
  */
 exports.createOrder = async (req, res) => {
   try {
-    const { bookingId, amount, customerInfo = {} } = req.body;
+    const { bookingId: requestedBookingId, amount, customerInfo = {} } = req.body;
 
-    if (!bookingId || !amount) {
+    if (!requestedBookingId || !amount) {
       return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
     }
+
+    const bookingId = await resolveBookingReference(requestedBookingId);
 
     let booking = null;
     const isValidObjectId = mongoose.Types.ObjectId.isValid(bookingId);
@@ -117,7 +145,10 @@ exports.createOrder = async (req, res) => {
       };
     }
 
-    const orderId = `RMH_${bookingId}_${Date.now()}`;
+    // Generate short order_id to stay within Cashfree's 130 character limit
+    const timestamp = Date.now();
+    const shortId = bookingId.slice(0, 20); // Use first 20 chars of bookingId
+    const orderId = `RMH_${shortId}_${timestamp}`;
 
     const orderResult = await cfPay.createOrder({
       orderId,
@@ -145,13 +176,13 @@ exports.createOrder = async (req, res) => {
     await PaymentTransaction.create({
       cf_order_id:           orderResult.cf_order_id,
       cf_order_token:        orderResult.order_token,
-      booking_id:            bookingId,
-      property_id:           booking.property_id,
-      property_name:         booking.property_name || '',
-      tenant_id:             booking.user_id,
-      tenant_name:           booking.name || '',
-      owner_id:              booking.owner_id,
-      owner_name:            booking.owner_name || '',
+      booking_id:            bookingId || 'N/A',
+      property_id:           (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
+      property_name:         booking.property_name || booking.propertyName || booking.propertyTitle || '',
+      tenant_id:             booking.user_id || booking.tenantId || 'tenant_user',
+      tenant_name:           booking.name || booking.tenantName || '',
+      owner_id:              booking.owner_id || booking.ownerId || 'OWNER',
+      owner_name:            booking.owner_name || booking.ownerName || '',
       move_in_date:          booking.check_in_date || booking.checkInDate || null,
       booking_amount:        amount,
       commission_percentage: settings.commission,
@@ -160,6 +191,7 @@ exports.createOrder = async (req, res) => {
       gst_amount:            gstAmount,
       owner_amount:          ownerAmount,
       status:                'Created',
+      payout_status:         'Pending',
       wallet_status:         'pending',
       payment_method:        'cashfree',
     });
@@ -175,7 +207,7 @@ exports.createOrder = async (req, res) => {
 
   } catch (err) {
     console.error('[CashfreePaymentCtrl] createOrder error:', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message });
   }
 };
 
@@ -239,12 +271,12 @@ exports.createPaymentLink = async (req, res) => {
           gst_percentage:     settings.gst,
           gst_amount:         gstAmount,
           owner_amount:       ownerAmount,
-          property_id:        booking.property_id,
-          property_name:      booking.property_name || '',
-          tenant_id:          booking.user_id,
-          tenant_name:        booking.name || '',
-          owner_id:           booking.owner_id,
-          owner_name:         booking.owner_name || '',
+          property_id:        (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
+          property_name:      booking.property_name || booking.propertyName || booking.propertyTitle || '',
+          tenant_id:          booking.user_id || booking.tenantId || 'tenant_user',
+          tenant_name:        booking.name || booking.tenantName || '',
+          owner_id:           booking.owner_id || booking.ownerId || 'OWNER',
+          owner_name:         booking.owner_name || booking.ownerName || '',
           move_in_date:       booking.check_in_date || booking.checkInDate || null,
           payment_method:     'cashfree',
         },
@@ -380,11 +412,11 @@ exports.handleWebhook = async (req, res) => {
         });
       }
 
-      // Update Owner heldBalance (skip for cash payments)
+      // Update Owner wallet balance directly (no hold)
       if (!isCashPayment && tx.owner_id) {
         await Owner.findOneAndUpdate(
           { loginId: tx.owner_id },
-          { $inc: { heldBalance: tx.owner_amount, walletBalance: 0 } }
+          { $inc: { walletBalance: tx.owner_amount, availableBalance: tx.owner_amount } }
         );
 
         // Notify owner
@@ -395,7 +427,7 @@ exports.handleWebhook = async (req, res) => {
             from:      'system',
             type:      'payment_received',
             title:     '💰 Payment Received',
-            message:   `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is held until move-in date.`,
+            message:   `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is now available in your wallet.`,
             meta:      { bookingId: tx.booking_id, amount: tx.owner_amount }
           });
         } catch (notifErr) {
@@ -463,7 +495,7 @@ exports.getPaymentStatus = async (req, res) => {
     if (isPaid && tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
       await PaymentTransaction.updateOne(
         { _id: tx._id },
-        { $set: { status: 'Verified', wallet_status: 'held', held_at: new Date() } }
+        { $set: { status: 'Verified', payout_status: 'Pending', wallet_status: 'held', held_at: new Date() } }
       ).catch(() => {});
     }
 
@@ -526,11 +558,11 @@ exports.initiateRefund = async (req, res) => {
     tx.wallet_status = 'skipped';
     await tx.save();
 
-    // Reverse owner held balance if applicable
+    // Reverse owner wallet balance if applicable
     if (tx.owner_id) {
       await Owner.findOneAndUpdate(
         { loginId: tx.owner_id },
-        { $inc: { heldBalance: -tx.owner_amount } }
+        { $inc: { walletBalance: -tx.owner_amount, availableBalance: -tx.owner_amount } }
       );
     }
 

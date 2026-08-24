@@ -279,7 +279,7 @@ async function ensureChatRoomsForBooking({ bookingId, ownerId, ownerName, userId
         )
     ]);
 
-    const intro = `Chat opened for ${propertyName || 'property'} between ${ownerName || normalizedOwnerId} and ${userName || userEmail || normalizedUserId} (booking ${bookingId})`;
+    const intro = `Chat opened for ${propertyName || 'property'} between ${ownerName || normalizedOwnerId} and ${userName || userEmail || normalizedUserId}`;
     const existingIntro = await ChatMessage.findOne({
         room_id: normalizedOwnerId,
         sender_login_id: 'system',

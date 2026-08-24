@@ -10,10 +10,17 @@ const SeoPageSchema = new mongoose.Schema(
         entityType: { type: String, trim: true, index: true, default: null },
         entityId: { type: String, trim: true, index: true, default: null },
         
+        // Structured Location & Property Type Metadata for SEO Landing Pages
+        city: { type: String, trim: true, default: '' },
+        area: { type: String, trim: true, default: '' },
+        propertyType: { type: String, trim: true, default: '' },
+        
         // Core Metadata
         metaTitle: { type: String, trim: true, default: '' },
         metaDescription: { type: String, trim: true, default: '' },
         metaKeywords: { type: String, trim: true, default: '' },
+        primaryKeyword: { type: String, trim: true, default: '' },
+        secondaryKeywords: { type: [String], default: [] },
         
         // Advanced SEO
         canonicalUrl: { type: String, trim: true, default: '' },

@@ -662,11 +662,19 @@ exports.unblockOwner = async (req, res) => {
     const Owner = require('../models/Owner');
     const User = require('../models/user');
     const AuditLog = require('../models/AuditLog');
+    const ChatViolation = require('../models/ChatViolation');
 
     const normalizedId = String(loginId).toUpperCase();
     await Promise.all([
-      Owner.updateOne({ loginId: normalizedId }, { isActive: true }),
-      User.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active' })
+      Owner.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active', blockedReason: null, chatRestrictedUntil: null }),
+      User.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active', chatRestrictedUntil: null }),
+      // Delete all violation records for this owner so attempt counter resets to 0
+      ChatViolation.deleteMany({
+        $or: [
+          { ownerId: normalizedId },
+          { participantLoginId: normalizedId }
+        ]
+      })
     ]);
 
     await AuditLog.create({
@@ -680,7 +688,7 @@ exports.unblockOwner = async (req, res) => {
       payload: { ownerLoginId: normalizedId }
     });
 
-    res.json({ success: true, message: `Owner ${normalizedId} unblocked successfully` });
+    res.json({ success: true, message: `Owner ${normalizedId} unblocked successfully and violation history cleared` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

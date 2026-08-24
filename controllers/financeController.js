@@ -207,13 +207,35 @@ exports.updateOwnerPayoutOption = async (req, res) => {
 exports.getPendingPayouts = async (req, res) => {
   try {
     const pending = await PaymentTransaction.find({ payout_status: { $in: ['Pending', 'Failed'] } })
-      .sort({ payment_date: 1 })
+      .sort({ payment_date: -1, createdAt: -1 })
       .lean();
-    res.json({ success: true, pending });
+
+    // Populate owner bank details for each pending transaction so the TransferModal can auto-fill them
+    const enriched = await Promise.all(
+      pending.map(async (tx) => {
+        // If bank details already stored on transaction, use them
+        if (tx.payout_account_number) return tx;
+        try {
+          const owner = await Owner.findOne({ loginId: tx.owner_id })
+            .select('checkinAccountHolderName checkinBankAccountNumber checkinIfscCode checkinBankName name profile accountNumber ifscCode bankName')
+            .lean();
+          if (owner) {
+            tx.payout_account_holder = owner.checkinAccountHolderName || owner.name || owner.profile?.name || '';
+            tx.payout_account_number = owner.checkinBankAccountNumber || owner.accountNumber || owner.profile?.accountNumber || '';
+            tx.payout_ifsc_code = owner.checkinIfscCode || owner.ifscCode || owner.profile?.ifscCode || '';
+            tx.payout_bank_name = owner.checkinBankName || owner.bankName || owner.profile?.bankName || '';
+          }
+        } catch (_) {}
+        return tx;
+      })
+    );
+
+    res.json({ success: true, pending: enriched });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 exports.processPayout = async (req, res) => {
   try {
@@ -883,3 +905,268 @@ exports.getPayoutAlerts = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+
+// ─── CATEGORY 9: MANUAL PAYMENT + WALLET (Cashfree-free flow) ───────────────
+
+/**
+ * POST /api/finance/manual-payment
+ * Admin records a cash/offline payment from a tenant.
+ */
+exports.recordManualPayment = async (req, res) => {
+  try {
+    const {
+      tenantId, tenantName,
+      ownerId, ownerName,
+      propertyId, propertyName,
+      amount, notes, adminId
+    } = req.body;
+
+    if (!ownerId || !amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'ownerId and a positive amount are required' });
+    }
+
+    const settings = await getSettings();
+    const commissionPct  = settings.commission_percentage || 10;
+    const gstPct         = settings.gst_percentage        || 18;
+    const bookingAmount  = Number(amount);
+    const commissionAmt  = Math.round(bookingAmount * commissionPct / 100);
+    const gstAmt         = Math.round(commissionAmt * gstPct / 100);
+    const ownerAmt       = bookingAmount - commissionAmt - gstAmt;
+
+    const syntheticId = 'manual_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+
+    const tx = await PaymentTransaction.create({
+      razorpay_payment_id:   syntheticId,
+      razorpay_order_id:     null,
+      status:                'Verified',
+      booking_id:            tenantId || syntheticId,
+      property_id:           propertyId || 'N/A',
+      property_name:         propertyName || '',
+      tenant_id:             tenantId || 'unknown',
+      tenant_name:           tenantName || '',
+      owner_id:              ownerId,
+      owner_name:            ownerName || '',
+      booking_amount:        bookingAmount,
+      commission_percentage: commissionPct,
+      commission_amount:     commissionAmt,
+      gst_percentage:        gstPct,
+      gst_amount:            gstAmt,
+      owner_amount:          ownerAmt,
+      payout_status:         'Pending',
+      payment_method:        'manual',
+      notes:                 notes || '',
+    });
+
+    settings.revenueBalance = (settings.revenueBalance || 0) + commissionAmt + gstAmt;
+    await settings.save();
+
+    return res.status(201).json({
+      success: true,
+      message: `₹${bookingAmount.toLocaleString('en-IN')} recorded. Admin wallet credited ₹${(commissionAmt + gstAmt).toLocaleString('en-IN')}.`,
+      transaction: tx,
+      breakdown: { bookingAmount, commissionAmt, gstAmt, ownerAmt },
+    });
+  } catch (error) {
+    console.error('recordManualPayment error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * GET /api/finance/admin-wallet
+ */
+exports.getAdminWallet = async (req, res) => {
+  try {
+    const settings = await getSettings();
+
+    const [pendingAgg, paidAgg, totalAgg, commissionAgg] = await Promise.all([
+      PaymentTransaction.aggregate([
+        { $match: { payout_status: { $in: ['Pending', 'Failed'] } } },
+        { $group: { _id: null, total: { $sum: '$owner_amount' }, count: { $sum: 1 } } },
+      ]),
+      PaymentTransaction.aggregate([
+        { $match: { payout_status: 'Paid' } },
+        { $group: { _id: null, total: { $sum: '$owner_amount' }, count: { $sum: 1 } } },
+      ]),
+      PaymentTransaction.aggregate([
+        { $group: { _id: null, total: { $sum: '$booking_amount' }, count: { $sum: 1 } } },
+      ]),
+      PaymentTransaction.aggregate([
+        { $group: { _id: null, total: { $sum: '$commission_fee' } } },
+      ]),
+    ]);
+
+    const totalCollected = totalAgg[0]?.total || 0;
+    const pendingPayouts = pendingAgg[0]?.total || 0;
+    const paidPayouts = paidAgg[0]?.total || 0;
+    const rawComm = Math.abs(commissionAgg[0]?.total || 0);
+    const calculatedCommission = rawComm || Math.max(0, totalCollected - pendingPayouts - paidPayouts);
+
+    return res.json({
+      success: true,
+      wallet: {
+        adminBalance:    calculatedCommission,
+        totalCollected:  totalCollected,
+        pendingPayouts:  pendingPayouts,
+        pendingCount:    pendingAgg[0]?.count  || 0,
+        paidPayouts:     paidPayouts,
+        paidCount:       paidAgg[0]?.count     || 0,
+        totalTx:         totalAgg[0]?.count    || 0,
+      },
+    });
+  } catch (error) {
+    console.error('getAdminWallet error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/finance/manual-transfer
+ * Marks a single transaction as paid, auto-fetches owner bank details from DB.
+ */
+exports.manualTransferToOwner = async (req, res) => {
+  try {
+    const { transactionId, adminId, notes } = req.body;
+
+    if (!transactionId) {
+      return res.status(400).json({ success: false, message: 'transactionId is required' });
+    }
+
+    const tx = await PaymentTransaction.findById(transactionId);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found' });
+    if (tx.payout_status === 'Paid') {
+      return res.status(400).json({ success: false, message: 'Already paid out' });
+    }
+
+    const owner = await Owner.findOne({ loginId: tx.owner_id });
+    const accountHolder = owner?.checkinAccountHolderName || owner?.name || owner?.profile?.name || '';
+    const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
+    const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
+    const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
+
+    const ref = 'RHY-MAN-' + Math.floor(10000000 + Math.random() * 90000000);
+
+    tx.payout_status           = 'Paid';
+    tx.payout_date             = new Date();
+    tx.payout_reference        = ref;
+    tx.payout_initiated_by     = adminId || 'superadmin';
+    tx.payout_account_holder   = accountHolder;
+    tx.payout_account_number   = accountNumber;
+    tx.payout_ifsc_code        = ifscCode;
+    tx.payout_bank_name        = bankName;
+    tx.notes                   = notes || tx.notes || 'Manual transfer by admin';
+    await tx.save();
+
+    if (owner) {
+      owner.walletBalance    = (owner.walletBalance    || 0) + tx.owner_amount;
+      owner.withdrawnBalance = (owner.withdrawnBalance || 0) + tx.owner_amount;
+      await owner.save();
+    }
+
+    await PayoutLog.create({
+      transaction_id:  tx._id.toString(),
+      owner_id:        tx.owner_id,
+      owner_name:      tx.owner_name || owner?.name || '',
+      amount:          tx.owner_amount,
+      mode:            'bank',
+      status:          'processed',
+      is_sandbox:      false,
+      account_holder:  accountHolder,
+      account_number:  accountNumber,
+      ifsc_code:       ifscCode,
+      bank_name:       bankName,
+      payout_id:       ref,
+      initiated_by:    adminId || 'superadmin',
+    });
+
+    return res.json({
+      success: true,
+      message: `₹${tx.owner_amount.toLocaleString('en-IN')} transfer recorded for ${tx.owner_name || tx.owner_id}.`,
+      reference: ref,
+      bankUsed: { accountHolder, accountNumber, ifscCode, bankName },
+    });
+  } catch (error) {
+    console.error('manualTransferToOwner error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /api/finance/bulk-transfer
+ * Marks multiple pending transactions as paid in one click.
+ */
+exports.bulkManualTransfer = async (req, res) => {
+  try {
+    const { transactionIds, adminId } = req.body;
+
+    if (!Array.isArray(transactionIds) || transactionIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'transactionIds array is required' });
+    }
+
+    const results = { transferred: 0, alreadyPaid: 0, failed: 0, errors: [] };
+
+    for (const txId of transactionIds) {
+      try {
+        const tx = await PaymentTransaction.findById(txId);
+        if (!tx) { results.failed++; results.errors.push(`${txId}: not found`); continue; }
+        if (tx.payout_status === 'Paid') { results.alreadyPaid++; continue; }
+
+        const owner = await Owner.findOne({ loginId: tx.owner_id });
+        const accountHolder = owner?.checkinAccountHolderName || owner?.name || '';
+        const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
+        const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
+        const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
+        const ref = 'RHY-BULK-' + Math.floor(10000000 + Math.random() * 90000000);
+
+        tx.payout_status           = 'Paid';
+        tx.payout_date             = new Date();
+        tx.payout_reference        = ref;
+        tx.payout_initiated_by     = adminId || 'superadmin';
+        tx.payout_account_holder   = accountHolder;
+        tx.payout_account_number   = accountNumber;
+        tx.payout_ifsc_code        = ifscCode;
+        tx.payout_bank_name        = bankName;
+        tx.notes                   = 'Bulk transfer by admin';
+        await tx.save();
+
+        if (owner) {
+          owner.walletBalance    = (owner.walletBalance    || 0) + tx.owner_amount;
+          owner.withdrawnBalance = (owner.withdrawnBalance || 0) + tx.owner_amount;
+          await owner.save();
+        }
+
+        await PayoutLog.create({
+          transaction_id: tx._id.toString(),
+          owner_id:       tx.owner_id,
+          owner_name:     tx.owner_name || '',
+          amount:         tx.owner_amount,
+          mode:           'bank',
+          status:         'processed',
+          is_sandbox:     false,
+          account_holder: accountHolder,
+          account_number: accountNumber,
+          ifsc_code:      ifscCode,
+          bank_name:      bankName,
+          payout_id:      ref,
+          initiated_by:   adminId || 'superadmin',
+        });
+
+        results.transferred++;
+      } catch (e) {
+        results.failed++;
+        results.errors.push(`${txId}: ${e.message}`);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `Bulk transfer complete: ${results.transferred} transferred, ${results.alreadyPaid} already paid, ${results.failed} failed.`,
+      results,
+    });
+  } catch (error) {
+    console.error('bulkManualTransfer error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+

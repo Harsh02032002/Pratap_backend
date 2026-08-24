@@ -958,6 +958,13 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
             }
         });
 
+        // Recalculate securityDepositBalance if total or paid were updated
+        if (req.body.securityDepositTotal !== undefined || req.body.securityDepositPaid !== undefined) {
+            const tot = Number(tenant.securityDepositTotal || 0);
+            const paid = Number(tenant.securityDepositPaid || 0);
+            tenant.securityDepositBalance = Math.max(0, tot - paid);
+        }
+
         // Update emergencyContact fields
         if (req.body.additional) {
             const add = req.body.additional;

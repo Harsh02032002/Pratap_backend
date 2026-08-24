@@ -10,8 +10,4 @@ router.post('/owner/withdraw-instant', walletController.withdrawOwnerFundsInstan
 router.get('/admin/balance', walletController.getAdminWalletBalance);
 router.post('/admin/withdraw-instant', walletController.withdrawAdminEarningsInstant);
 
-// ─── AUTO-RELEASE HELD BALANCE TRIGGER ─────────────────────────────────────
-router.post('/release-held-now', walletController.triggerHeldRelease);
-router.get('/release-held-now', walletController.triggerHeldRelease);
-
 module.exports = router;

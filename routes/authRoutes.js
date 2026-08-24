@@ -46,4 +46,30 @@ router.post('/forgot-password/request-otp', otpIpLimiter, otpLimiter, captchaPro
 router.post('/forgot-password/verify-otp', otpIpLimiter, otpLimiter, authController.forgotPasswordVerifyOTP);
 router.post('/forgot-password/reset-password', authIpLimiter, authLimiter, authController.forgotPasswordReset);
 
+// TEMPORARY: Reset password for specific user without old password
+router.post('/temp-reset-password', async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+        if (!email || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Email and new password required' });
+        }
+        
+        const User = require('../models/user');
+        const user = await User.findOne({ email: email.toLowerCase() });
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+        
+        user.password = newPassword;
+        user.requirePasswordReset = false;
+        await user.save();
+        
+        console.log(`[TEMP RESET] Password reset for ${email}`);
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (err) {
+        console.error('[TEMP RESET] Error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = router;

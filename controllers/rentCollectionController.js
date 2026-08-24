@@ -1,4 +1,5 @@
 'use strict';
+const mongoose = require('mongoose');
 const RentInvoice = require('../models/RentInvoice');
 const RentPayment = require('../models/RentPayment');
 const PenaltyConfig = require('../models/PenaltyConfig');
@@ -255,7 +256,17 @@ async function getDashboard(req, res) {
     const ownerIds = [req.user._id];
     if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
 
+    // Same optional property scope as listInvoices — when a specific property
+    // is selected on the owner dashboard, every stat below (collected,
+    // outstanding, penalties, current-month row) is scoped to it. ownerFilter
+    // is reused both in plain queries (.countDocuments) and raw aggregate
+    // $match stages below, so the value must already be a real ObjectId —
+    // aggregate() does not auto-cast strings the way query methods do.
+    const propertyId = req.query.propertyId && req.query.propertyId !== 'all' && mongoose.isValidObjectId(req.query.propertyId)
+      ? new mongoose.Types.ObjectId(req.query.propertyId)
+      : null;
     const ownerFilter = { ownerId: { $in: ownerIds } };
+    if (propertyId) ownerFilter.propertyId = propertyId;
 
     const [all, paid, partial, pending, waived] = await Promise.all([
       RentInvoice.countDocuments(ownerFilter),
@@ -550,7 +561,7 @@ async function listPaymentsHandler(req, res) {
     const payments = await RentPayment.find(paymentQuery)
       .sort({ paymentDate: -1 })
       .limit(limit)
-      .populate('tenantId', 'name roomNo phone email propertyId')
+      .populate('tenantId', 'name roomNo phone email propertyId digitalCheckin')
       .populate('invoiceId', 'billingMonth invoiceNumber rentAmount advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
@@ -573,7 +584,7 @@ async function listPaymentsHandler(req, res) {
       billingMonth: p.invoiceId?.billingMonth || '',
       invoiceNumber: p.invoiceId?.invoiceNumber || '',
       rentAmount: p.invoiceId?.rentAmount || p.amount,
-      advanceChargeAmount: p.invoiceId?.advanceChargeAmount || 0,
+      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || Number(p.tenantId?.digitalCheckin?.agreementDetails?.advanceCharge || 0) || 0,
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
@@ -664,9 +675,14 @@ async function getMonthlySummary(req, res) {
     const ownerIds = [req.user._id];
     if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
 
+    const propertyId = req.query.propertyId && req.query.propertyId !== 'all' && mongoose.isValidObjectId(req.query.propertyId)
+      ? new mongoose.Types.ObjectId(req.query.propertyId)
+      : null;
     const keys = slots.map(s => s.key);
+    const matchStage = { ownerId: { $in: ownerIds }, billingMonth: { $in: keys } };
+    if (propertyId) matchStage.propertyId = propertyId;
     const rows = await RentInvoice.aggregate([
-      { $match: { ownerId: { $in: ownerIds }, billingMonth: { $in: keys } } },
+      { $match: matchStage },
       {
         $group: {
           _id: '$billingMonth',
@@ -696,13 +712,18 @@ async function getDailyPaymentSummary(req, res) {
   try {
     const ownerId = req.user._id;
     const { startDate, endDate } = req.query;
+    const propertyId = req.query.propertyId && req.query.propertyId !== 'all' && mongoose.isValidObjectId(req.query.propertyId)
+      ? new mongoose.Types.ObjectId(req.query.propertyId)
+      : null;
 
     const start = startDate ? new Date(startDate) : (() => { const d = new Date(); d.setDate(d.getDate() - 6); d.setHours(0, 0, 0, 0); return d; })();
     const end = endDate ? new Date(endDate) : new Date();
     end.setHours(23, 59, 59, 999);
 
+    const dailyMatch = { ownerId, paymentDate: { $gte: start, $lte: end } };
+    if (propertyId) dailyMatch.propertyId = propertyId;
     const rows = await RentPayment.aggregate([
-      { $match: { ownerId, paymentDate: { $gte: start, $lte: end } } },
+      { $match: dailyMatch },
       {
         $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$paymentDate' } },

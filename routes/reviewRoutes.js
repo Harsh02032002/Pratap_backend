@@ -317,45 +317,70 @@ router.post('/', protect, async (req, res) => {
         });
       }
     }
-    // ✅ GATE: Only active moved-in tenants or ex-tenants can submit reviews
+    // ✅ GATE: Only tenants who lived or are living in the property can submit reviews
     const Tenant = require('../models/Tenant');
+    const ApprovedProperty = require('../models/ApprovedProperty');
     const now = new Date();
 
-    // First: Check if they have an active or inactive Tenant record for this property
+    // Resolve ApprovedProperty._id → Property._id if needed
+    let actualPropertyId = propertyId;
+    try {
+      const approvedProp = await ApprovedProperty.findById(propertyId).select('propertyId').lean();
+      if (approvedProp?.propertyId) {
+        actualPropertyId = mongoose.Types.ObjectId(approvedProp.propertyId);
+      }
+    } catch (_) {}
+
+    // STRICT VALIDATION: Check if tenant has lived or is living in this property
     const tenantRecord = await Tenant.findOne({
-      property: propertyId,
       isDeleted: { $ne: true },
       $or: [
-        {
-          status: 'active',
-          moveInDate: { $lte: now }
-        },
-        {
-          status: 'inactive'
-        }
+        { property: actualPropertyId },
+        { property: propertyId }
       ],
       $or: [
         { email: email },
-        { user: userId }
+        { user: userId },
+        { loginId: req.user.loginId }
       ]
     }).lean();
 
     let resolvedBookingId = '';
     let resolvedTenantId = '';
     let resolvedOwnerId = '';
+    let hasLivedInProperty = false;
 
-    // Query BookingRequest to find the booking ID
+    if (tenantRecord) {
+      // Check if tenant has moved in (for active tenants)
+      if (tenantRecord.status === 'active') {
+        const hasMovedIn = !tenantRecord.moveInDate || new Date(tenantRecord.moveInDate) <= now;
+        if (hasMovedIn) {
+          hasLivedInProperty = true;
+        }
+      }
+      // For inactive tenants, they have lived there in the past
+      else if (tenantRecord.status === 'inactive') {
+        hasLivedInProperty = true;
+      }
+    }
+
+    // Query BookingRequest to find the booking ID (secondary check)
     const BookingRequest = require('../models/BookingRequest');
     const userBooking = await BookingRequest.findOne({
       $and: [
-        { property_id: propertyId },
-        { 
+        {
+          $or: [
+            { property_id: actualPropertyId },
+            { property_id: propertyId }
+          ]
+        },
+        {
           $or: [
             { user_id: String(userId) },
             { email: email }
           ]
         },
-        { 
+        {
           $or: [
             { booking_status: 'confirmed' },
             { status: 'confirmed' },
@@ -366,12 +391,11 @@ router.post('/', protect, async (req, res) => {
       ]
     });
 
-    // In development mode, bypass the strict moved-in tenant gate to make local testing easy.
-    const isDev = process.env.NODE_ENV === 'development' || !process.env.NODE_ENV;
-    if (!tenantRecord && !userBooking && !isDev) {
+    // STRICT: Only allow review if tenant has lived or is living in the property
+    if (!hasLivedInProperty && !userBooking) {
       return res.status(403).json({
         success: false,
-        message: 'Reviews can only be submitted by active tenants who have already moved in, or ex-tenants of this property.'
+        message: 'Reviews can only be submitted by tenants who have lived or are currently living in this property.'
       });
     }
 

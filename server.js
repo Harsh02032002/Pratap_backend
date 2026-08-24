@@ -30,13 +30,16 @@ try {
 
 console.log('🚀 Starting server...');
 
-// DNS Fix for MongoDB Atlas SRV lookups
-const currentServers = dns.getServers();
-if (currentServers && currentServers.includes("127.0.0.1")) {
-  console.warn(
-    "Local DNS server 127.0.0.1 detected — switching to public DNS for SRV lookups",
-  );
-  dns.setServers(["8.8.8.8", "8.8.4.4"]);
+// DNS Fix for MongoDB Atlas SRV lookups on Linux VPS (systemd-resolved uses 127.0.0.53)
+try {
+    const currentServers = dns.getServers();
+    console.log('🌐 Current DNS Servers:', currentServers);
+    if (!currentServers || currentServers.length === 0 || currentServers.some(s => s.startsWith('127.') || s === '::1')) {
+        console.warn('⚠️ Local/stub DNS resolver detected — setting Google/Cloudflare public DNS for Atlas SRV lookups');
+        dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+    }
+} catch (dnsErr) {
+    console.warn('⚠️ Could not override DNS servers:', dnsErr.message);
 }
 
 // Always load env from this folder, regardless of where the process was started.
@@ -127,8 +130,8 @@ app.use((req, res, next) => {
 app.use(compressionMiddleware);
 
 // Body Parsers
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // Security Hardening
 app.use(mongoSanitizeMiddleware);
@@ -159,12 +162,56 @@ app.use((req, res, next) => {
     next();
 });
 
+// ── HTTP 301 Redirect Middleware for Legacy SEO URLs (Server-Level) ─────────
+const SeoRedirect = require('./models/SeoRedirect');
+const seoController = require('./controllers/seoController');
+
+app.use(async (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    const reqPath = req.path;
+    if (reqPath.startsWith('/api/') || 
+        reqPath.startsWith('/assets/') || 
+        reqPath.startsWith('/images/') || 
+        reqPath.startsWith('/js/') || 
+        reqPath === '/sitemap.xml' ||
+        reqPath.includes('.')) {
+        return next();
+    }
+
+    try {
+        const cleanReqPath = reqPath.replace(/^\/+|\/+$/g, '').toLowerCase();
+        if (!cleanReqPath) return next();
+
+        const redirectMatch = await SeoRedirect.findOne({
+            $or: [
+                { oldUrl: cleanReqPath },
+                { oldUrl: '/' + cleanReqPath },
+                { oldUrl: reqPath }
+            ]
+        }).lean();
+
+        if (redirectMatch && redirectMatch.newUrl) {
+            const destination = redirectMatch.newUrl.startsWith('/') ? redirectMatch.newUrl : '/' + redirectMatch.newUrl;
+            console.log(`🔀 Server HTTP 301 Redirect: ${req.originalUrl} -> ${destination}`);
+            return res.redirect(redirectMatch.statusCode || 301, destination);
+        }
+    } catch (err) {
+        console.warn('⚠️ Redirect middleware error:', err.message);
+    }
+    next();
+});
+
+// Root XML Sitemap Route (Dynamic single source of truth from MongoDB)
+app.get('/sitemap.xml', seoController.generateSitemapXml);
+
 // Optimized Database Connection
 const mongoOptions = {
     serverSelectionTimeoutMS: 30000,
     connectTimeoutMS: 30000,
-    socketTimeoutMS: 30000,
-    family: 4, // Force IPv4 to avoid DNS resolution delays
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    maxIdleTimeMS: 30000,
     waitQueueTimeoutMS: 30000,
     heartbeatFrequencyMS: 10000,
     retryWrites: true,
@@ -198,13 +245,14 @@ mongoose.connect(mongoUri, mongoOptions)
         startServer();
     });
 
-// Database connection middleware to ensure connection on every request (crucial for Serverless Vercel)
+// Database connection middleware to ensure connection on every request without creating duplicate pools
 app.use(async (req, res, next) => {
-    if (mongoose.connection.readyState !== 1) {
-        console.log('🔌 Mongoose not connected, connecting now...');
+    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+    if (mongoose.connection.readyState === 0) {
+        console.log('🔌 Mongoose disconnected, attempting reconnection...');
         try {
             await mongoose.connect(mongoUri, mongoOptions);
-            console.log('✅ MongoDB Connected (via request middleware)');
+            console.log('✅ MongoDB Reconnected (via request middleware)');
         } catch (err) {
             console.error('❌ MongoDB connection error in middleware:', err.message);
             return res.status(500).json({
@@ -212,6 +260,11 @@ app.use(async (req, res, next) => {
                 message: 'Database connection failed'
             });
         }
+    } else if (mongoose.connection.readyState !== 1) {
+        return res.status(500).json({
+            success: false,
+            message: 'Database is reconnecting, please try again shortly.'
+        });
     }
     next();
 });
@@ -301,11 +354,50 @@ async function syncCompletedDigitalCheckinTenants() {
     }
 }
 
+async function fixFalselyApprovedOwners() {
+    try {
+        const Owner = require('./models/Owner');
+        const res = await Owner.updateMany(
+            {
+                isDeleted: { $ne: true },
+                status: { $ne: 'approved' },
+                $or: [
+                    { isEmployeeSubmitted: true },
+                    { createdByStaffId: { $exists: true, $ne: '' } },
+                    { addedByStaffId: { $exists: true, $ne: '' } }
+                ],
+                'kyc.verifiedAt': { $exists: false },
+                checkinAadhaarNumber: { $exists: false }
+            },
+            {
+                $set: { isActive: false, status: 'pending_approval', isEmployeeSubmitted: true }
+            }
+        );
+        if (res.modifiedCount > 0) {
+            console.log(`🔧 Corrected ${res.modifiedCount} falsely approved employee-submitted owner records back to pending_approval.`);
+        }
+    } catch (err) {
+        console.warn('⚠️ Fix falsely approved owners warning:', err.message);
+    }
+}
+
+let startupJobsRan = false;
+async function runStartupJobs() {
+    if (startupJobsRan) return;
+    startupJobsRan = true;
+    try {
+        await seedSuperAdminIfMissing();
+        await fixFalselyVerifiedTenants();
+        await syncCompletedDigitalCheckinTenants();
+        await fixFalselyApprovedOwners();
+    } catch (err) {
+        console.warn('⚠️ Error executing startup tasks:', err.message);
+    }
+}
+
 mongoose.connection.on('connected', () => {
     console.log('✅ Mongoose connected');
-    seedSuperAdminIfMissing();
-    fixFalselyVerifiedTenants();
-    syncCompletedDigitalCheckinTenants();
+    runStartupJobs();
     if (!escalationJobStarted) {
         escalationJobStarted = true;
         startEscalationJob();

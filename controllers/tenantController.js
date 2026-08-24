@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Tenant = require('../models/Tenant');
 const User = require('../models/user');
 const Property = require('../models/Property');
@@ -189,14 +190,17 @@ exports.assignTenant = async (req, res) => {
         const normalizedOwnerLoginId = String(ownerLoginId || '').toUpperCase();
         if (normalizedOwnerLoginId) {
             const ownerProfile = await Owner.findOne({ loginId: normalizedOwnerLoginId })
-                .select('checkinUpiId profile')
+                .select('checkinUpiId checkinBankAccountNumber profile')
                 .lean();
-            const ownerUpiId = String(ownerProfile?.checkinUpiId || ownerProfile?.profile?.upiId || '').trim();
-            if (!ownerUpiId) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Owner UPI details are missing. Please complete owner profile payment details before assigning a tenant.'
-                });
+            const ownerHasPaymentDetails = String(
+                ownerProfile?.checkinUpiId ||
+                ownerProfile?.checkinBankAccountNumber ||
+                ownerProfile?.profile?.upiId ||
+                ownerProfile?.profile?.accountNumber ||
+                ''
+            ).trim();
+            if (!ownerHasPaymentDetails) {
+                console.warn(`[assignTenant] Owner ${normalizedOwnerLoginId} payment details missing, proceeding with tenant onboarding.`);
             }
         }
 
@@ -315,9 +319,20 @@ exports.assignTenant = async (req, res) => {
         // Find Room record if exists
         let roomObj = null;
         if (property && roomNo) {
+            const cleanRoomNo = String(roomNo).trim();
+            const escRoomNo = cleanRoomNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const roomConditions = [
+                { title: { $regex: `^${escRoomNo}$`, $options: 'i' } },
+                { title: { $regex: `^room\\s*${escRoomNo}$`, $options: 'i' } },
+                { roomNo: { $regex: `^${escRoomNo}$`, $options: 'i' } },
+                { number: { $regex: `^${escRoomNo}$`, $options: 'i' } }
+            ];
+            if (mongoose.Types.ObjectId.isValid(cleanRoomNo)) {
+                roomConditions.push({ _id: cleanRoomNo });
+            }
             roomObj = await Room.findOne({
                 property: property._id,
-                title: { $regex: `^${String(roomNo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+                $or: roomConditions
             });
 
             if (roomObj && normalizedBedNo) {
@@ -356,7 +371,6 @@ exports.assignTenant = async (req, res) => {
         // inside one transaction: if Tenant.create (or anything after User.create)
         // throws, the User insert rolls back too, so a failed attempt never leaves
         // behind an orphaned User blocking retries via the unique phone index.
-        const mongoose = require('mongoose');
         const session = await mongoose.startSession();
         let user, tenant, alternateProofRequest = null;
         try {
@@ -627,6 +641,7 @@ exports.assignTenant = async (req, res) => {
         }
 
         // Send email to tenant with loginId and digital check-in link (NO PASSWORD - will be sent after payment)
+        // SKIP this for tenants without Aadhaar - they will get payment link after superadmin approves alternate proof
         const baseWebUrl = process.env.DIGITAL_CHECKIN_URL || process.env.APP_BASE_URL || process.env.APP_URL || process.env.FRONTEND_URL || 'https://app.roomhy.com';
         const tenantCheckinLink = `${baseWebUrl}/digital-checkin/tenantprofile?loginId=${encodeURIComponent(tenant.loginId)}`;
         // Alternate-proof tenants can never clear the Aadhaar OTP step, so the
@@ -770,6 +785,33 @@ exports.assignTenant = async (req, res) => {
             // Do NOT send password to owner yet - will be sent after payment completion
         } catch (err) {
             console.error('[MAIL ERROR] Failed to send tenant credentials:', err && err.message);
+        }
+
+        // ── noAadhaar: Create TenantKycRequest for Superadmin review ─────────
+        // When owner ticks "No Aadhaar" and uploads alternate proof (Voter ID,
+        // PAN, etc.) we create a pending KYC request so Superadmin can verify.
+        if (noAadhaar && alternateProofFile && alternateProofType) {
+            try {
+                const TenantKycRequest = require('../models/TenantKycRequest');
+                const effectiveOwnerLoginId = String(
+                    ownerLoginId ||
+                    property?.ownerLoginId ||
+                    ''
+                ).toUpperCase();
+
+                await TenantKycRequest.create({
+                    tenantId:     tenant._id,
+                    ownerLoginId: effectiveOwnerLoginId,
+                    tenantName:   tenant.name,
+                    proofType:    alternateProofType,  // e.g. 'Voter ID', 'PAN', 'Driving License'
+                    proofFileUrl: alternateProofFile,
+                    status:       'Pending',
+                });
+                console.log(`[KYC REQUEST] Created TenantKycRequest for ${tenant.loginId} — proofType: ${alternateProofType}`);
+            } catch (kycErr) {
+                // Non-fatal: tenant is already saved. Log and continue.
+                console.error('[KYC REQUEST ERROR] Failed to create TenantKycRequest:', kycErr.message);
+            }
         }
 
         // For testing we still return credentials in response
