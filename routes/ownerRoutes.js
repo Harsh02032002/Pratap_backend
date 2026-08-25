@@ -85,7 +85,7 @@ router.post('/', auditTrail('owners'), async (req, res) => {
             try {
                 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://admin.roomhy.com';
                 const area = owner.locationCode || owner.area || '';
-                generatedKycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}`;
+                generatedKycLink = `${DIGITAL_CHECKIN_URL}/digital-checkin/ownerprofile?loginId=${encodeURIComponent(owner.loginId)}&email=${encodeURIComponent(owner.email)}&area=${encodeURIComponent(area)}&password=${encodeURIComponent(req.body.checkinPassword || req.body.credentials?.password || '')}`;
 
                 // Send standalone KYC link email ONLY
                 await mailer.sendKycLinkEmail(owner.email, owner.name || 'Owner', 'RoomHy Asset Portal', generatedKycLink);

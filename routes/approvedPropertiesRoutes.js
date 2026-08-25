@@ -462,11 +462,9 @@ router.get('/public/approved', async (req, res) => {
 
 
 
-        // For now, return all approved properties (both live and offline) to test display
-
-        // Later we can filter by isLiveOnWebsite: true for production
-
+        // Only return live, active, approved properties that are marked live for website
         let rawProperties = await ApprovedProperty.find({
+            isLiveOnWebsite: { $ne: false },
             status: { $in: ['approved', 'live', 'active', 'Approved', 'Live', 'Active'] }
         })
         .select({
@@ -495,13 +493,19 @@ router.get('/public/approved', async (req, res) => {
         .sort({ approvedAt: -1 });
 
         if (!rawProperties || rawProperties.length === 0) {
-            rawProperties = await ApprovedProperty.find({}).sort({ approvedAt: -1 });
+            const Property = require('../models/Property');
+            rawProperties = await Property.find({
+                isPublished: true,
+                isLiveOnWebsite: { $ne: false },
+                status: { $in: ['active', 'approved'] }
+            }).lean();
         }
 
-        if (!rawProperties || rawProperties.length === 0) {
-            const Property = require('../models/Property');
-            rawProperties = await Property.find({ isPublished: true }).lean();
-        }
+        // Hard guarantee: exclude any property with isLiveOnWebsite === false or inactive status
+        rawProperties = (rawProperties || []).filter(p =>
+            p.isLiveOnWebsite !== false &&
+            !['inactive', 'blocked', 'rejected', 'deleted', 'offline'].includes(String(p.status).toLowerCase())
+        );
 
         const uniqueMap = new Map();
         rawProperties.forEach(p => {
@@ -510,6 +514,7 @@ router.get('/public/approved', async (req, res) => {
         });
         
         const properties = Array.from(uniqueMap.values());
+
 
 
 

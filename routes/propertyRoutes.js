@@ -211,4 +211,72 @@ router.put('/:id/reject-changes', formLimiter, auditTrail('properties'), propert
 // Superadmin assigns verification task to employee
 router.put('/:id/assign-verification', protect, authorize('superadmin'), propertyController.assignPropertyVerification);
 
+// ─── Toggle Website Visibility ────────────────────────────────────────────────
+// PUT /api/properties/:id/toggle-website
+// Works with MongoDB _id. Updates both Property and ApprovedProperty models.
+router.put('/:id/toggle-website', protect, authorize('superadmin'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ success: false, message: 'Invalid property ID' });
+        }
+
+        const property = await Property.findById(id);
+        if (!property) {
+            return res.status(404).json({ success: false, message: 'Property not found' });
+        }
+
+        const newValue = !property.isLiveOnWebsite;
+        property.isLiveOnWebsite = newValue;
+        property.status = newValue ? 'active' : 'inactive';
+        await property.save();
+
+        // Build search conditions for ApprovedProperty
+        const apOrConditions = [
+            { _id: isValidObjectId(id) ? id : null },
+            { propertyId: id },
+            { visitId: property.visitId || id }
+        ].filter(cond => Object.values(cond)[0]);
+
+        if (property.propertyId) {
+            apOrConditions.push({ propertyId: property.propertyId });
+        }
+        if (property.ownerLoginId) {
+            apOrConditions.push({ 'generatedCredentials.loginId': property.ownerLoginId });
+        }
+
+        if (apOrConditions.length > 0) {
+            await ApprovedProperty.updateMany(
+                { $or: apOrConditions },
+                {
+                    $set: {
+                        isLiveOnWebsite: newValue,
+                        status: newValue ? 'approved' : 'inactive'
+                    }
+                }
+            );
+        }
+
+        // Clear backend cache so public website endpoints update immediately
+        try {
+            const { clearCache } = require('../middleware/apiCache');
+            clearCache('/api/approved-properties');
+            clearCache('/api/properties');
+        } catch (e) {
+            console.warn('Cache clear error:', e.message);
+        }
+
+        console.log(`🌐 [toggle-website] Property ${id} (${property.title}) → isLiveOnWebsite: ${newValue}`);
+        res.json({
+            success: true,
+            message: `Property is now ${newValue ? 'LIVE on website ✅' : 'taken OFFLINE 🔴'}`,
+            isLiveOnWebsite: newValue
+        });
+    } catch (error) {
+        console.error('Error toggling website visibility:', error);
+        res.status(500).json({ success: false, message: 'Error toggling website visibility' });
+    }
+});
+
+
 module.exports = router;
