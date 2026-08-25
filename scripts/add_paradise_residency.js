@@ -96,10 +96,10 @@ async function apiPost(urlPath, body, token) {
 
 async function login() {
   log('Logging in as superadmin...');
-  let r = await apiPost('/api/auth/login', { loginId: ADMIN_EMAIL, password: ADMIN_PASSWORD }, null);
+  let r = await apiPost('/api/auth/login', { identifier: ADMIN_EMAIL, password: ADMIN_PASSWORD }, null);
   if (r.ok && r.data.token) { log('Logged in!'); return r.data.token; }
 
-  r = await apiPost('/api/auth/login', { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }, null);
+  r = await apiPost('/api/auth/login', { loginId: ADMIN_EMAIL, identifier: ADMIN_EMAIL, password: ADMIN_PASSWORD }, null);
   if (r.ok && r.data.token) { log('Logged in!'); return r.data.token; }
 
   console.error('Login failed:', JSON.stringify(r.data));
