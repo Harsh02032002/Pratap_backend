@@ -50,16 +50,16 @@ const PROPERTY = {
     }
   ],
   amenities: [
-    'WiFi',
-    'Power Backup',
-    '24x7 Water',
-    'CCTV',
-    'Security Guard',
-    'Study Table',
-    'Wardrobe',
-    'Bed with Mattress',
-    'Geyser',
-    'Attached Bathroom'
+    { name: 'WiFi', icon: 'wifi', category: 'basic' },
+    { name: 'Power Backup', icon: 'zap', category: 'basic' },
+    { name: '24x7 Water', icon: 'droplets', category: 'basic' },
+    { name: 'CCTV', icon: 'shield', category: 'basic' },
+    { name: 'Security Guard', icon: 'shield', category: 'basic' },
+    { name: 'Study Table', icon: 'home', category: 'basic' },
+    { name: 'Wardrobe', icon: 'home', category: 'basic' },
+    { name: 'Bed with Mattress', icon: 'bed', category: 'basic' },
+    { name: 'Geyser', icon: 'zap', category: 'basic' },
+    { name: 'Attached Bathroom', icon: 'home', category: 'basic' }
   ],
   policies: {
     smokingAllowed:  false,
