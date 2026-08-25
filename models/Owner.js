@@ -65,7 +65,7 @@ const ownerRoomInventorySchema = new mongoose.Schema(
 );
 
 const ownerSchema = new mongoose.Schema({
-    loginId: { type: String, required: true, unique: true },
+    loginId: { type: String, required: true, unique: true, trim: true, uppercase: true },
     // Top-level fields for backward compatibility
     name: String,
     email: String,

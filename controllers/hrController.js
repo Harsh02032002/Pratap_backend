@@ -2,6 +2,7 @@ const StaffAttendance = require('../models/StaffAttendance');
 const StaffSalary = require('../models/StaffSalary');
 const StaffShift = require('../models/StaffShift');
 const { ensureDailyAutoMarkAbsent } = require('../jobs/autoMarkAbsentJob');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 // --- Attendance ---
 exports.getAttendance = async (req, res) => {
@@ -13,7 +14,7 @@ exports.getAttendance = async (req, res) => {
         // a failure here must never block the read.
         try { await ensureDailyAutoMarkAbsent(); } catch (e) { console.warn('[AutoAbsent] on-demand run skipped:', e.message); }
         const records = await StaffAttendance.find({
-            ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
+            ownerLoginId: normalizeLoginId(ownerLoginId)
         }).populate('employeeId', 'name role').sort({ date: -1 });
         res.json({ success: true, data: records });
     } catch (err) {
@@ -78,7 +79,7 @@ exports.getSalaries = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
         const records = await StaffSalary.find({
-            ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
+            ownerLoginId: normalizeLoginId(ownerLoginId)
         }).populate('employeeId', 'name role').sort({ createdAt: -1 });
         res.json({ success: true, data: records });
     } catch (err) {
@@ -126,7 +127,7 @@ exports.getShifts = async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
         const records = await StaffShift.find({
-            ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
+            ownerLoginId: normalizeLoginId(ownerLoginId)
         }).populate('employeeId', 'name role');
         res.json({ success: true, data: records });
     } catch (err) {

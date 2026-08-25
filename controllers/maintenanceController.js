@@ -1,11 +1,10 @@
 const MaintenanceTask = require('../models/MaintenanceTask');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 exports.getOwnerTasks = async (req, res) => {
     try {
-        const { ownerLoginId } = req.params;
-        const tasks = await MaintenanceTask.find({
-            ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
-        }).sort({ createdAt: -1 });
+        const ownerLoginId = normalizeLoginId(req.params.ownerLoginId);
+        const tasks = await MaintenanceTask.find({ ownerLoginId }).sort({ createdAt: -1 });
         res.json({ success: true, tasks });
     } catch (err) {
         console.error("Get Owner Maintenance Tasks Error:", err);

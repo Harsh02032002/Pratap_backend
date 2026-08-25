@@ -202,15 +202,8 @@ exports.getRoomsByProperty = async (req, res) => {
           return res.status(400).json({ message: "Invalid Property ID format" });
         }
         
-        // We skip syncing occupancy during paginated fetches to improve speed
-        if (!limit) {
-            try {
-                const ownerController = require('./ownercontroller');
-                await ownerController.syncPropertyOccupancyData(propertyId);
-            } catch (syncErr) {
-                console.error(`❌ Error syncing occupancy during getRoomsByProperty for property ${propertyId}:`, syncErr.message);
-            }
-        }
+        // Read-only path. Occupancy counters are recalculated by room mutations
+        // and by the scheduled heal job — a GET must not write.
 
         const query = { property: new mongoose.Types.ObjectId(propertyId), isDeleted: { $ne: true } };
         let roomsQuery = Room.find(query).populate('property', 'title');
@@ -423,9 +416,8 @@ exports.getRoomsByOwner = async (req, res) => {
         const limit = parseInt(req.query.limit) || 0;
         const { propertyId } = req.query;
 
-        // Dynamically import ownerController to prevent circular dependency issues
-        const ownerController = require('./ownercontroller');
-        await ownerController.healOwnerProperties(normalizedOwnerId);
+        // Read-only path: owner↔property link repair runs in the scheduled job
+        // (jobs/ownerPropertyHealJob.js), never inside a GET handler.
 
         const propertyFilter = { ownerLoginId: normalizedOwnerId, isDeleted: { $ne: true } };
         if (propertyId) propertyFilter._id = propertyId;

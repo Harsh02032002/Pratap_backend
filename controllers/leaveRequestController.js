@@ -1,5 +1,6 @@
 const TenantLeaveRequest = require('../models/TenantLeaveRequest');
 const Tenant = require('../models/Tenant');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
@@ -107,7 +108,7 @@ exports.getOwnerLeaveRequests = async (req, res) => {
         const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
         const skip  = (page - 1) * limit;
 
-        const query = { ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') } };
+        const query = { ownerLoginId: normalizeLoginId(ownerLoginId) };
 
         const [requests, count] = await Promise.all([
             TenantLeaveRequest.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),

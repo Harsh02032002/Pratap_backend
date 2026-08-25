@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const maintenanceTaskSchema = new mongoose.Schema({
-    ownerLoginId: { type: String, required: true, index: true },
+    ownerLoginId: { type: String, required: true, index: true, trim: true, uppercase: true },
     title: { type: String, required: true },
     frequency: { type: String, enum: ['Daily', 'Weekly', 'Monthly', 'Quarterly', 'Bi-Annually', 'Yearly', 'One-time'], default: 'One-time' },
     scheduledDate: { type: String, required: true },

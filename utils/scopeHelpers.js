@@ -12,6 +12,36 @@
  */
 
 const mongoose = require('mongoose');
+const { normalizeLoginId, escapeRegex } = require('./normalizeId');
+
+/**
+ * Index-eligible candidate list for an identifier used in a scope filter.
+ *
+ * These filters are `$or` branches that decide what a staff member can see, so
+ * a branch that stops matching silently hides their data. The previous
+ * `new RegExp('^' + id + '$', 'i')` form matched any casing but could not use
+ * an index — and because an `$or` is only index-eligible when EVERY branch is,
+ * a single regex branch forced the whole query to a collection scan.
+ *
+ * Returning both the canonical (uppercase) form and the caller's literal input
+ * keeps the previous matching behaviour for the casings that actually occur,
+ * while `{ $in: [...] }` of plain strings stays index-eligible.
+ */
+const _idCandidates = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return [];
+  return [...new Set([normalizeLoginId(raw), raw])];
+};
+
+/** Same as _idCandidates but for a list of identifiers, flattened and deduped. */
+const _idListCandidates = (values) => {
+  if (!Array.isArray(values)) return [];
+  const out = new Set();
+  for (const value of values) {
+    for (const candidate of _idCandidates(value)) out.add(candidate);
+  }
+  return [...out];
+};
 
 /**
  * _toObjectIdArray(ids)
@@ -50,9 +80,9 @@ function _buildScopedPropertyOrClauses(scope) {
     orConditions.push({ property: { $in: rawAssigned } });
   }
   if (empLoginId) {
-    orConditions.push({ staffLoginId: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ createdBy: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ assignedToName: new RegExp(`^${empLoginId}$`, 'i') });
+    orConditions.push({ staffLoginId: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ createdBy: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ assignedToName: { $in: _idCandidates(empLoginId) } });
     if (mongoose.Types.ObjectId.isValid(empLoginId)) {
       orConditions.push({ assignedTo: new mongoose.Types.ObjectId(empLoginId) });
     }
@@ -70,7 +100,7 @@ function _buildScopedPropertyOrClauses(scope) {
     orConditions.push({ property_name: { $in: visitPropNames } });
   }
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orConditions.push({ ownerLoginId: { $in: ownerRegexes } });
     orConditions.push({ owner_id: { $in: ownerRegexes } });
     orConditions.push({ ownerId: { $in: ownerRegexes } });
@@ -171,7 +201,7 @@ function _buildScopedResourceOrClauses(scope, {
     }
   }
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     for (const field of ownerIdFields) {
       orClauses.push({ [field]: { $in: ownerRegexes } });
     }
@@ -208,9 +238,9 @@ function applyPropertyScope(req, baseFilter = {}) {
 
   // 2. Properties created by or assigned to this employee
   if (empLoginId) {
-    orConditions.push({ staffLoginId: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ createdBy: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ assignedToName: new RegExp(`^${empLoginId}$`, 'i') });
+    orConditions.push({ staffLoginId: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ createdBy: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ assignedToName: { $in: _idCandidates(empLoginId) } });
     if (mongoose.Types.ObjectId.isValid(empLoginId)) {
       orConditions.push({ assignedTo: new mongoose.Types.ObjectId(empLoginId) });
     }
@@ -228,7 +258,7 @@ function applyPropertyScope(req, baseFilter = {}) {
     orConditions.push({ title: { $in: visitPropNames } });
   }
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orConditions.push({ ownerLoginId: { $in: ownerRegexes } });
   }
 
@@ -281,14 +311,14 @@ function applyOwnerScope(req, baseFilter = {}) {
   }
 
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orConditions.push({ loginId: { $in: ownerRegexes } });
   }
 
   if (empLoginId) {
-    orConditions.push({ createdByStaffId: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ addedByStaffId: new RegExp(`^${empLoginId}$`, 'i') });
-    orConditions.push({ staffId: new RegExp(`^${empLoginId}$`, 'i') });
+    orConditions.push({ createdByStaffId: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ addedByStaffId: { $in: _idCandidates(empLoginId) } });
+    orConditions.push({ staffId: { $in: _idCandidates(empLoginId) } });
   }
 
   if (empIdStr) {
@@ -297,7 +327,10 @@ function applyOwnerScope(req, baseFilter = {}) {
   }
 
   if (scope.area || scope.areaCode || scope.city) {
-    const locPattern = new RegExp(`^${scope.area || scope.areaCode || scope.city}`, 'i');
+    // Intentional prefix search on a human-entered location name — kept as a
+    // regex. Escaped so metacharacters in the value cannot alter the match
+    // (matches the sibling helper's handling above).
+    const locPattern = new RegExp(`^${escapeRegex(scope.area || scope.areaCode || scope.city)}`, 'i');
     orConditions.push({ locationCode: locPattern });
     orConditions.push({ area: locPattern });
     orConditions.push({ city: locPattern });
@@ -341,7 +374,7 @@ function applyTenantScope(req, baseFilter = {}) {
   }
 
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orClauses.push({ ownerLoginId: { $in: ownerRegexes } });
   }
 
@@ -388,7 +421,7 @@ function applyBookingScope(req, baseFilter = {}) {
   }
 
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orClauses.push({ ownerLoginId: { $in: ownerRegexes } });
     orClauses.push({ owner_id: { $in: ownerRegexes } });
   }
@@ -588,7 +621,7 @@ function applyLeadScope(req, baseFilter = {}) {
   }
 
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = visitOwnerIds.map(id => new RegExp(`^${id}$`, 'i'));
+    const ownerRegexes = _idListCandidates(visitOwnerIds);
     orClauses.push({ owner_name: { $in: ownerRegexes } });
     orClauses.push({ ownerLoginId: { $in: ownerRegexes } });
   }

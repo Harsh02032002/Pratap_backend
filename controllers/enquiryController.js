@@ -1,5 +1,6 @@
 const Enquiry = require('../models/Enquiry');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 // Create a new enquiry
 exports.createEnquiry = async (req, res) => {
@@ -83,15 +84,16 @@ exports.createEnquiry = async (req, res) => {
 exports.listEnquiries = async (req, res) => {
   try {
     const { ownerLoginId } = req.params;
-    const normalizedOwnerId = String(ownerLoginId || '').toUpperCase();
+    const normalizedOwnerId = normalizeLoginId(String(ownerLoginId || ''));
+    // Both the canonical (uppercase) form and the caller's literal input, deduped.
+    // An $in of plain strings uses the ownerLoginId/owner_id indexes; the
+    // case-insensitive regex branch this replaces could not, and because an $or
+    // is only index-eligible when every branch is, it forced a full scan.
+    const ownerIdCandidates = [...new Set([normalizedOwnerId, ownerLoginId].filter(Boolean))];
 
-    // 1. Fetch enquiries from Enquiry collection (case-insensitive ownerLoginId match)
+    // 1. Fetch enquiries from Enquiry collection (indexed exact-match on ownerLoginId)
     const enquiries = await Enquiry.find({
-      $or: [
-        { ownerLoginId: normalizedOwnerId },
-        { ownerLoginId: ownerLoginId },
-        { ownerLoginId: new RegExp(`^${normalizedOwnerId}$`, 'i') }
-      ]
+      ownerLoginId: { $in: ownerIdCandidates }
     }).sort({ ts: -1 }).lean();
 
     // 2. Fetch owner's properties from BOTH Property and ApprovedProperty collections
@@ -108,11 +110,8 @@ exports.listEnquiries = async (req, res) => {
       const [regularProps, approvedProps] = await Promise.all([
         Property.find({
           $or: [
-            { ownerLoginId: normalizedOwnerId },
-            { ownerLoginId: ownerLoginId },
-            { ownerLoginId: new RegExp(`^${normalizedOwnerId}$`, 'i') },
-            { owner_id: normalizedOwnerId },
-            { owner_id: ownerLoginId }
+            { ownerLoginId: { $in: ownerIdCandidates } },
+            { owner_id: { $in: ownerIdCandidates } }
           ]
         }).select('_id visitId title propertyName city locality').lean(),
         ApprovedProperty.find({
@@ -136,10 +135,8 @@ exports.listEnquiries = async (req, res) => {
 
     const bookingQuery = {
       $or: [
-        { owner_id: normalizedOwnerId },
-        { owner_id: ownerLoginId },
-        { owner_id: new RegExp(`^${normalizedOwnerId}$`, 'i') },
-        { owner_ids: { $in: [normalizedOwnerId, ownerLoginId] } }
+        { owner_id:  { $in: ownerIdCandidates } },
+        { owner_ids: { $in: ownerIdCandidates } }
       ]
     };
 
