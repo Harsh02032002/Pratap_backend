@@ -14,7 +14,6 @@ const {
   recordPayment,
   waivePenalty,
   getEffectiveConfig,
-  autoHealMoveInInvoices,
 } = require('../services/invoiceService');
 const { queueNotification, dispatchNotification, sendReminderEmailDirect } = require('../services/notificationService');
 const { calculatePenalties, generatePreviewBreakdown } = require('../engine/penaltyEngine');
@@ -251,7 +250,9 @@ async function waivePenaltyHandler(req, res) {
 async function getDashboard(req, res) {
   try {
     const ownerId = req.user._id;
-    await autoHealMoveInInvoices(ownerId, req.user).catch(() => {});
+    // Read-only path. Move-in invoice backfill is a repair with writes
+    // (RentInvoice/RentPayment/RentAuditLog creates); it runs in the scheduled
+    // job (jobs/ownerPropertyHealJob.js) rather than blocking this read.
     const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;
     const ownerIds = [req.user._id];
     if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
@@ -351,7 +352,9 @@ async function getDashboard(req, res) {
 async function listInvoices(req, res) {
   try {
     const ownerId = req.user._id;
-    await autoHealMoveInInvoices(ownerId, req.user).catch(() => {});
+    // Read-only path. Move-in invoice backfill is a repair with writes
+    // (RentInvoice/RentPayment/RentAuditLog creates); it runs in the scheduled
+    // job (jobs/ownerPropertyHealJob.js) rather than blocking this read.
     const { status, phase, billingMonth, propertyId, page = 1, limit = 20 } = req.query;
 
     const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).lean() : null;

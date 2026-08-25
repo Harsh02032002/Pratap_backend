@@ -10,7 +10,9 @@ const employeeSchema = new mongoose.Schema({
         type: String,
         required: true,
         unique: true,
-        sparse: true
+        sparse: true,
+        trim: true,
+        uppercase: true
     },
     email: {
         type: String,
@@ -48,7 +50,7 @@ const employeeSchema = new mongoose.Schema({
     // ─── Assigned Scope (Area Data Isolation) ────────────────────────────────
     assignedProperties: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Property' }],
     assignedOwners:     [{ type: mongoose.Schema.Types.ObjectId, ref: 'Owner' }],
-    parentLoginId: String, // For sub-employees
+    parentLoginId: { type: String, trim: true, uppercase: true }, // For sub-employees
     isActive: {
         type: Boolean,
         default: true

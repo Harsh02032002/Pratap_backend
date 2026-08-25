@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Complaint = require('../models/Complaint');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 // Get all complaints for a specific tenant
 exports.getTenantComplaints = async (req, res) => {
@@ -257,7 +258,7 @@ exports.getAllComplaints = async (req, res) => {
         const filter = applyComplaintScope(req, {});
         if (type) filter.type = type;
         if (ownerLoginId) {
-            filter.ownerLoginId = { $regex: new RegExp('^' + ownerLoginId + '$', 'i') };
+            filter.ownerLoginId = normalizeLoginId(ownerLoginId);
         }
 
         const complaints = await Complaint.find(filter).sort({ createdAt: -1 });

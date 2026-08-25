@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const EnquirySchema = new mongoose.Schema({
-  ownerLoginId: { type: String, required: true },
+  ownerLoginId: { type: String, required: true, trim: true, uppercase: true },
   propertyId: { type: String },
   propertyName: { type: String },
   studentId: { type: String },

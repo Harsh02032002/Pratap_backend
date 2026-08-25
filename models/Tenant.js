@@ -39,9 +39,9 @@ const TenantSchema = new mongoose.Schema({
     permanentAddress: { type: String },
     
     // Login Credentials (generated during assignment)
-    loginId: { type: String, unique: true, sparse: true }, // e.g., ROOMHYTNT4821
+    loginId: { type: String, unique: true, sparse: true, trim: true, uppercase: true }, // e.g., ROOMHYTNT4821
     tempPassword: { type: String }, // Stored temporarily; user will set own password
-    ownerLoginId: { type: String },
+    ownerLoginId: { type: String, trim: true, uppercase: true },
     propertyTitle: { type: String },
     assignmentLocationCode: { type: String, default: '' }, // locationCode from property at time of assignment
 

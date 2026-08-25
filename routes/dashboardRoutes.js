@@ -24,6 +24,7 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');
 const { MODULE_KEYS } = require('../utils/permissionKeys');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 // GET /:ownerId below is the Owner Dashboard's data source and is Owner/Admin-only
 // by requirement — staff have their own separate /employee endpoint above with
@@ -173,7 +174,7 @@ router.get('/:ownerId', async (req, res) => {
     console.time(labelId);
 
     try {
-        const loginId = String(req.params.ownerId || '').trim().toUpperCase();
+        const loginId = normalizeLoginId(String(req.params.ownerId || ''));
         if (!loginId) {
             return res.status(400).json({ success: false, message: 'ownerId is required' });
         }
@@ -183,13 +184,19 @@ router.get('/:ownerId', async (req, res) => {
             ? String(req.query.propertyId)
             : null;
 
-        // ── PHASE 1: Run heal ONCE (fire-and-forget — never blocks the response) ──
-        ownerController.healOwnerProperties(loginId).catch(err =>
-            console.error(`[dashboard] healOwnerProperties error for ${loginId}:`, err.message)
-        );
+        // ── PHASE 1: (removed) ────────────────────────────────────────────────────
+        // Owner↔property link repair used to be fired from here. Even
+        // fire-and-forget it competed with this request's own queries for the
+        // connection pool and the event loop. It now runs in the scheduled job
+        // (jobs/ownerPropertyHealJob.js), off the request path entirely.
 
         // ── PHASE 2: Parallel fetches ─────────────────────────────────────────────
-        const loginRegex = new RegExp('^' + loginId + '$', 'i');
+        // `loginId` is already normalized (trim + uppercase) above, which is the
+        // canonical form every identifier is generated in. Matching by equality
+        // lets each query use its existing index — the previous
+        // `new RegExp('^' + loginId + '$', 'i')` could not, because a
+        // case-insensitive regex is never index-eligible, so all six queries
+        // below ran as full collection scans.
         const [
             ownerDoc,
             properties,
@@ -199,33 +206,33 @@ router.get('/:ownerId', async (req, res) => {
             transactions,
         ] = await Promise.all([
             // 1. Owner details (lean, no populate needed for dashboard)
-            Owner.findOne({ loginId: loginRegex }).lean(),
+            Owner.findOne({ loginId }).lean(),
 
             // 2. Properties (needed to derive property IDs for rooms/tenants/rent)
-            Property.find({ ownerLoginId: loginRegex, isDeleted: { $ne: true } })
+            Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } })
                 .select('_id title locationCode roomCount bedCount vacantRooms vacantBeds occupiedRooms occupiedBeds status isPublished')
                 .lean(),
 
             // 3. Enquiries — limit to 100 newest for dashboard
-            Enquiry.find({ ownerLoginId: loginRegex, ...(propertyId ? { propertyId } : {}) })
+            Enquiry.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
                 .sort({ ts: -1 })
                 .limit(100)
                 .lean(),
 
             // 4. Notifications — limit to 50 newest
-            Notification.find({ toLoginId: loginRegex })
+            Notification.find({ toLoginId: loginId })
                 .sort({ createdAt: -1 })
                 .limit(50)
                 .lean(),
 
             // 5. Complaints — exact match (index hit), limit 50
-            Complaint.find({ ownerLoginId: loginRegex, ...(propertyId ? { propertyId } : {}) })
+            Complaint.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
                 .sort({ createdAt: -1 })
                 .limit(50)
                 .lean(),
 
             // 6. PaymentTransactions for rent calculation
-            PaymentTransaction.find({ owner_id: loginRegex, ...(propertyId ? { property_id: propertyId } : {}) })
+            PaymentTransaction.find({ owner_id: loginId, ...(propertyId ? { property_id: propertyId } : {}) })
                 .select('owner_amount')
                 .lean(),
         ]);
@@ -250,14 +257,14 @@ router.get('/:ownerId', async (req, res) => {
             Tenant.find({
                 $or: [
                     { property: { $in: propertyIds } },
-                    { ownerLoginId: loginRegex }
+                    { ownerLoginId: loginId }
                 ],
                 isDeleted: { $ne: true }
             })
                 .lean(),
 
             // RentPayments require owner _id — re-use ownerDoc if available
-            ownerDoc ? Promise.resolve(ownerDoc) : Owner.findOne({ loginId: loginRegex }).lean(),
+            ownerDoc ? Promise.resolve(ownerDoc) : Owner.findOne({ loginId }).lean(),
 
             // Also fetch complaint fallback via tenants
             Promise.resolve(null),

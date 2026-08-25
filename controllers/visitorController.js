@@ -4,6 +4,7 @@ const Tenant = require('../models/Tenant');
 const Employee = require('../models/Employee');
 const Owner = require('../models/Owner');
 const Property = require('../models/Property');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
@@ -21,7 +22,7 @@ async function resolveApprover(req, visitor) {
     if (role === 'warden' || role === 'staff') {
         if (!loginId) return { ok: false, code: 400, message: 'Warden identity is required.' };
         const emp = await Employee.findOne({
-            loginId: new RegExp('^' + loginId + '$', 'i'),
+            loginId: normalizeLoginId(loginId),
             isDeleted: { $ne: true },
             isActive: { $ne: false },
         }).select('name parentLoginId').lean();
@@ -76,7 +77,7 @@ exports.createVisitor = async (req, res) => {
         ).toUpperCase();
 
         // Snapshot the owner + property so the scanned pass can display them.
-        const owner = await Owner.findOne({ loginId: new RegExp('^' + ownerLoginId + '$', 'i') })
+        const owner = await Owner.findOne({ loginId: normalizeLoginId(ownerLoginId) })
             .select('name propertyTitle')
             .lean();
         const propertyName = tenant.propertyTitle || owner?.propertyTitle || '';
@@ -156,7 +157,7 @@ exports.getOwnerVisitors = async (req, res) => {
         const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
         const skip = (page - 1) * limit;
 
-        const query = { ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') } };
+        const query = { ownerLoginId: normalizeLoginId(ownerLoginId) };
         if (status) query.status = status;
 
         if (propertyId) {

@@ -22,7 +22,9 @@ const complaintSchema = new mongoose.Schema({
     },
     ownerLoginId: {
         type: String,
-        index: true
+        index: true,
+        trim: true,
+        uppercase: true
     },
     tenantName: {
         type: String,

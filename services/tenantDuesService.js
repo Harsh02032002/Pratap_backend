@@ -79,8 +79,19 @@ async function backfillMissingElectricity(tenants, invoices) {
 
 /**
  * Attach dueAmount / dues to tenant objects from pending rent invoices.
+ *
+ * Read-only by default. `backfillMissingElectricity` is a repair — it writes
+ * electricity amounts onto invoices and creates invoices for tenants that have
+ * a meter reading but no invoice yet — and it does so with a per-invoice and
+ * per-tenant query loop. Running that inside a GET made a read request perform
+ * unbounded writes, so it is now opt-in and driven by the scheduled job.
+ *
+ * @param {Array} tenants
+ * @param {{ repair?: boolean }} [options] `repair: true` runs the electricity
+ *        backfill first and re-reads invoices so the returned dues reflect it.
+ *        Only the background job should pass this.
  */
-async function enrichTenantsWithDues(tenants) {
+async function enrichTenantsWithDues(tenants, options = {}) {
   if (!tenants?.length) return tenants;
 
   const tenantIds = tenants.map(t => t._id);
@@ -89,12 +100,14 @@ async function enrichTenantsWithDues(tenants) {
     status: { $in: ['PENDING', 'PARTIAL'] },
   }).lean();
 
-  await backfillMissingElectricity(tenants, invoices);
-
-  invoices = await RentInvoice.find({
-    tenantId: { $in: tenantIds },
-    status: { $in: ['PENDING', 'PARTIAL'] },
-  }).lean();
+  if (options.repair === true) {
+    await backfillMissingElectricity(tenants, invoices);
+    // Re-read: the backfill above may have added or changed invoices.
+    invoices = await RentInvoice.find({
+      tenantId: { $in: tenantIds },
+      status: { $in: ['PENDING', 'PARTIAL'] },
+    }).lean();
+  }
 
   const duesMap = {};
   for (const inv of invoices) {

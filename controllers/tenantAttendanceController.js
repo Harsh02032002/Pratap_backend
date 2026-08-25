@@ -1,5 +1,6 @@
 const TenantAttendance = require('../models/TenantAttendance');
 const Tenant = require('../models/Tenant');
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 // Get attendance status for all tenants of an owner — either for a single
 // date (existing behavior) or a whole month (for history views), optionally
@@ -11,12 +12,12 @@ exports.getOwnerTenantAttendance = async (req, res) => {
         const ownerLoginId = req.effectiveOwnerLoginId;
         const { date, month, year, tenantId, propertyId } = req.query;
 
-        let query = { ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') } };
+        let query = { ownerLoginId: normalizeLoginId(ownerLoginId) };
         if (propertyId) {
             // TenantAttendance has no property field of its own — scope via the
             // tenant roster for the target property instead of fetching every
             // tenant's attendance for the owner and relying on the caller to filter.
-            const propertyTenants = await Tenant.find({ ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }, property: propertyId }, '_id').lean();
+            const propertyTenants = await Tenant.find({ ownerLoginId: normalizeLoginId(ownerLoginId), property: propertyId }, '_id').lean();
             const propertyTenantIds = propertyTenants.map(t => String(t._id));
             query.tenantId = tenantId
                 ? { $in: propertyTenantIds.includes(String(tenantId)) ? [tenantId] : [] }
@@ -114,7 +115,7 @@ exports.syncTenantAttendance = async (req, res) => {
         const ownedTenantIds = new Set(
             (await Tenant.find({
                 _id: { $in: requestedTenants.map(t => t.id).filter(Boolean) },
-                ownerLoginId: { $regex: new RegExp('^' + ownerLoginId + '$', 'i') }
+                ownerLoginId: normalizeLoginId(ownerLoginId)
             }).select('_id').lean()).map(t => String(t._id))
         );
         const tenants = requestedTenants.filter(t => ownedTenantIds.has(String(t.id)));

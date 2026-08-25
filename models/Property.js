@@ -8,7 +8,7 @@ const PropertySchema = new mongoose.Schema({
   latitude: { type: Number, default: null },
   longitude: { type: Number, default: null },
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  ownerLoginId: { type: String },
+  ownerLoginId: { type: String, trim: true, uppercase: true },
   ownerName: { type: String },
   ownerPhone: { type: String },
   status: { 

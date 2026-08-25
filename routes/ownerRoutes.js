@@ -11,6 +11,7 @@ const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
+const { normalizeLoginId } = require('../utils/normalizeId');
 const ownerController = require('../controllers/ownercontroller');
 
 const mailer = require('../utils/mailer');
@@ -136,12 +137,9 @@ router.get('/subscription-status', async (req, res) => {
 
     const SystemSettings = require('../models/SystemSettings');
     const User = require('../models/user');
-    const escaped = loginId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const rx = new RegExp(`^${escaped}$`, 'i');
-
     let owner = await Owner.findOne({
       $or: [
-        { loginId: rx },
+        { loginId: normalizeLoginId(loginId) },
         { email: loginId.toLowerCase() },
         { phone: loginId },
         { 'profile.phone': loginId }
@@ -341,19 +339,16 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
 router.get('/:loginId/rooms', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        await ownerController.healOwnerProperties(loginId);
+        // Read-only path: owner↔property link repair runs in the scheduled
+        // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
         // Find properties owned by this owner
         const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
         const staffScope = await getStaffPropertyScope(req);
         if (staffScope) propertyFilter._id = { $in: staffScope };
         const properties = await Property.find(propertyFilter).select('_id title');
 
-        // Sync property occupancy (fire-and-forget to avoid blocking API response)
-        for (const prop of properties) {
-            ownerController.syncPropertyOccupancyData(prop._id).catch(syncErr => {
-                console.error(`❌ Error syncing occupancy during rooms fetch for property ${prop._id}:`, syncErr.message);
-            });
-        }
+        // Occupancy counters are refreshed by the scheduled job and by room
+        // mutations — a read must not trigger N background writes.
 
         const propertyIds = properties.map(p => p._id);
         const limit = parseInt(req.query.limit) || 0;
@@ -393,19 +388,16 @@ router.get('/:loginId/rooms', async (req, res) => {
 router.get('/:loginId/properties', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        await ownerController.healOwnerProperties(loginId);
+        // Read-only path: owner↔property link repair runs in the scheduled
+        // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
         const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
         const staffScope = await getStaffPropertyScope(req);
         if (staffScope) propertyFilter._id = { $in: staffScope };
         const properties = await Property.find(propertyFilter);
 
-        const syncedProperties = [];
-        for (const prop of properties) {
-            // Trigger async sync in background to keep data fresh without delaying response
-            ownerController.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
-            syncedProperties.push(prop);
-        }
-        return res.json({ properties: syncedProperties });
+        // Occupancy counters are refreshed by the scheduled job and by room
+        // mutations — a read must not trigger N background writes.
+        return res.json({ properties });
     } catch (err) {
         console.error('❌ Error fetching owner properties:', err.message);
         return res.status(500).json({ error: err.message });
@@ -453,7 +445,8 @@ router.post('/:loginId/properties', auditTrail('owners'), async (req, res) => {
 router.get('/:loginId/rent', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        ownerController.fireHeal(loginId);
+        // Read-only path: owner↔property link repair runs in the scheduled
+        // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
 
         const PaymentTransaction = require('../models/PaymentTransaction');
         const RentPayment = require('../models/RentPayment');
@@ -500,7 +493,8 @@ router.get('/:loginId/rent', async (req, res) => {
 router.get('/:loginId/revenue-dashboard', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        await ownerController.healOwnerProperties(loginId);
+        // Read-only path: owner↔property link repair runs in the scheduled
+        // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
 
         // ── Month filter ─────────────────────────────────────────────────────────
         // Default to current month. Frontend sends ?month=YYYY-MM
@@ -772,7 +766,8 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
 router.get('/:loginId/tenants', async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
-        await ownerController.healOwnerProperties(loginId);
+        // Read-only path: owner↔property link repair runs in the scheduled
+        // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
         const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
         const staffScope = await getStaffPropertyScope(req);
         if (staffScope) propertyFilter._id = { $in: staffScope };
@@ -887,7 +882,7 @@ router.post('/create-subscription-order', async (req, res) => {
     const cfPay = require('../services/cashfreePaymentService');
 
     const [owner, settings] = await Promise.all([
-      Owner.findOne({ loginId: { $regex: new RegExp(`^${cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }),
+      Owner.findOne({ loginId: normalizeLoginId(cleanId) }),
       SystemSettings.findOne().lean()
     ]);
 
@@ -948,7 +943,7 @@ router.post('/verify-subscription-payment', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment not verified or pending' });
     }
 
-    const owner = await Owner.findOne({ loginId: { $regex: new RegExp(`^${cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+    const owner = await Owner.findOne({ loginId: normalizeLoginId(cleanId) });
     if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
     if (!owner.subscription) owner.subscription = {};

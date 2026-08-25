@@ -1,108 +1,23 @@
-// Cache to prevent running the unindexed RegExp auto-healer query on every API request
-const healedOwners = new Set();
+const { normalizeLoginId } = require('../utils/normalizeId');
 
 /**
- * fireHeal — fire-and-forget wrapper for healOwnerProperties.
- * Call this in routes instead of await healOwnerProperties(...) so the route
- * never blocks waiting for the property linker to finish.
+ * Owner↔property link repair now lives in jobs/ownerPropertyHealJob.js and runs
+ * on a schedule under a distributed lock — it is NOT part of any request path.
+ * See that file for the batching, idempotency and locking rationale.
+ *
+ * This re-export is kept so existing callers and tests keep resolving, and so
+ * an operator can still repair a single owner on demand (e.g. from a script or
+ * an admin action). Never call it from a GET handler.
  */
-exports.fireHeal = (loginId) => {
-    exports.healOwnerProperties(loginId).catch(err =>
-        console.error(`[fireHeal] healOwnerProperties error for ${loginId}:`, err.message)
-    );
-};
+exports.healOwnerProperties = (loginId) =>
+    require('../jobs/ownerPropertyHealJob').healOwnerProperties(loginId);
 
-// Auto-healer function to match and link previously unlinked properties to owners on-the-fly
-exports.healOwnerProperties = async (loginId) => {
-    try {
-        const normalizedLoginId = String(loginId || '').trim().toUpperCase();
-        if (!normalizedLoginId) return;
-
-        const mongoose = require('mongoose');
-        const Owner = mongoose.models.Owner || require('../models/Owner');
-        const Property = mongoose.models.Property || require('../models/Property');
-        const User = mongoose.models.User || require('../models/user');
-
-        const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId });
-        if (!ownerDoc) return;
-
-        // Collect all possible emails and phones of the owner
-        const emails = [
-            ownerDoc.email,
-            ownerDoc.profile?.email,
-            ownerDoc.checkinEmail
-        ].map(e => String(e || '').trim().toLowerCase()).filter(Boolean);
-
-        const phones = [
-            ownerDoc.phone,
-            ownerDoc.profile?.phone,
-            ownerDoc.checkinPhone
-        ].map(p => {
-            const clean = String(p || '').replace(/\D/g, '');
-            return clean.length >= 10 ? clean.slice(-10) : '';
-        }).filter(Boolean);
-
-        if (emails.length === 0 && phones.length === 0) return;
-
-        const matchConditions = [];
-        if (emails.length > 0) {
-            matchConditions.push({ 'contact.email': { $in: emails } });
-            matchConditions.push({ 'email': { $in: emails } });
-        }
-        if (phones.length > 0) {
-            phones.forEach(p => {
-                matchConditions.push({ 'contact.number': new RegExp(p + '$') });
-                matchConditions.push({ 'ownerPhone': new RegExp(p + '$') });
-                matchConditions.push({ 'phone': new RegExp(p + '$') });
-            });
-        }
-
-        if (matchConditions.length === 0) return;
-
-        const finalQuery = {
-            $and: [
-                {
-                    $or: [
-                        { ownerLoginId: { $exists: false } },
-                        { ownerLoginId: null },
-                        { ownerLoginId: "" },
-                        { ownerLoginId: "TEMP" },
-                        { ownerLoginId: "GEN" }
-                    ]
-                },
-                { isDeleted: { $ne: true } },
-                { $or: matchConditions }
-            ]
-        };
-
-        const unmatchedProperties = await Property.find(finalQuery);
-        if (unmatchedProperties.length === 0) return;
-
-        console.log(`🧹 Auto-Healer: Found ${unmatchedProperties.length} unmatched properties matching owner ${normalizedLoginId}. Healing now...`);
-
-        const userDoc = await User.findOne({ loginId: normalizedLoginId, role: 'owner' });
-        const ownerUserId = userDoc ? userDoc._id : null;
-
-        for (const prop of unmatchedProperties) {
-            prop.ownerLoginId = normalizedLoginId;
-            if (ownerUserId) {
-                prop.owner = ownerUserId;
-            }
-            if (!prop.ownerName) {
-                prop.ownerName = ownerDoc.name || ownerDoc.profile?.name;
-            }
-            if (!prop.ownerPhone) {
-                prop.ownerPhone = ownerDoc.phone || ownerDoc.profile?.phone;
-            }
-            await prop.save();
-            console.log(`   ✓ Linked property "${prop.title}" to owner ${normalizedLoginId}`);
-        }
-        // Heal unpaid invoices if corresponding paid Rent records exist
-        await exports.healTenantInvoices(normalizedLoginId);
-    } catch (err) {
-        console.error('❌ Error running auto-healer in healOwnerProperties:', err);
-    }
-};
+/**
+ * @deprecated Repair no longer runs on the request path. Retained as a no-op so
+ * any straggling caller cannot silently reintroduce writes into a read handler.
+ * Use the scheduled job (jobs/ownerPropertyHealJob.js) instead.
+ */
+exports.fireHeal = () => {};
 
 exports.healTenantInvoices = async (ownerLoginId) => {
     try {
@@ -364,8 +279,13 @@ exports.syncPropertyOccupancyData = async (propertyId) => {
 exports.getOwnerProperties = async (req, res) => {
     try {
         const rawLoginId = req.params.loginId;
-        const ownerLoginId = String(rawLoginId || '').trim().toUpperCase();
-        await exports.healOwnerProperties(ownerLoginId).catch(err => console.error('Heal error:', err));
+        const ownerLoginId = normalizeLoginId(String(rawLoginId || ''));
+        // Canonical form plus the caller's literal input, deduped. An $in of
+        // plain strings can use the ownerLoginId index; the case-insensitive
+        // regex branch this replaces could not, and an $or is only
+        // index-eligible when every one of its branches is.
+        const ownerIdCandidates = [...new Set([ownerLoginId, rawLoginId].filter(Boolean))];
+        // Read-only path: repair runs in jobs/ownerPropertyHealJob.js.
 
         const mongoose = require('mongoose');
         const Owner = mongoose.models.Owner || require('../models/Owner');
@@ -373,10 +293,7 @@ exports.getOwnerProperties = async (req, res) => {
         const ApprovedProperty = mongoose.models.ApprovedProperty || require('../models/ApprovedProperty');
 
         const ownerDoc = await Owner.findOne({
-            $or: [
-                { loginId: ownerLoginId },
-                { loginId: rawLoginId }
-            ]
+            loginId: { $in: ownerIdCandidates }
         }).lean();
 
         const ownerEmails = [ownerLoginId, ownerDoc?.email, ownerDoc?.profile?.email, ownerDoc?.checkinEmail]
@@ -385,9 +302,7 @@ exports.getOwnerProperties = async (req, res) => {
             .filter(Boolean).map(p => String(p).replace(/\D/g, '')).filter(p => p.length >= 10);
 
         const matchOr = [
-            { ownerLoginId: ownerLoginId },
-            { ownerLoginId: rawLoginId },
-            { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') }
+            { ownerLoginId: { $in: ownerIdCandidates } }
         ];
 
         if (ownerDoc?._id) {
@@ -415,10 +330,8 @@ exports.getOwnerProperties = async (req, res) => {
         // Also merge items from ApprovedProperty if not already in properties list
         const approvedProps = await ApprovedProperty.find({
             $or: [
-                { 'generatedCredentials.loginId': ownerLoginId },
-                { 'generatedCredentials.loginId': new RegExp('^' + ownerLoginId + '$', 'i') },
-                { ownerLoginId: ownerLoginId },
-                { ownerLoginId: new RegExp('^' + ownerLoginId + '$', 'i') },
+                { 'generatedCredentials.loginId': { $in: ownerIdCandidates } },
+                { ownerLoginId: { $in: ownerIdCandidates } },
                 ...matchOr
             ]
         }).lean();
@@ -447,9 +360,7 @@ exports.getOwnerProperties = async (req, res) => {
 
         const syncedProperties = [];
         for (const prop of properties) {
-            if (prop._id) {
-                exports.syncPropertyOccupancyData(prop._id).catch(err => console.error('Async sync error:', err));
-            }
+            // Occupancy sync intentionally not triggered from this read path.
             syncedProperties.push({
                 ...prop,
                 title: prop.title || prop.name || 'Property',
@@ -473,8 +384,7 @@ exports.getOwnerProperties = async (req, res) => {
 exports.getOwnerRooms = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        // Fire-and-forget heal properties (do not block)
-        exports.healOwnerProperties(ownerLoginId).catch(err => console.error('Heal error:', err));
+        // Read-only path: repair runs in jobs/ownerPropertyHealJob.js.
         // pagination (default page 1, 3 per page)
         const page = Math.max(parseInt(req.query.page) || 1, 1);
         const limit = Math.max(parseInt(req.query.limit) || 3, 1);
@@ -503,7 +413,7 @@ exports.getOwnerRooms = async (req, res) => {
         const propertyIds = rooms.map(r => r.property);
         const Property = require('../models/Property');
         const props = await Property.find({ _id: { $in: propertyIds } }).lean();
-        props.forEach(p => syncPromises.push(exports.syncPropertyOccupancyData(p._id).catch(err => console.error('Async sync error:', err))));
+        // Occupancy sync intentionally not triggered from this read path.
         res.json({ rooms, totalCount, page, limit });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -514,7 +424,7 @@ exports.getOwnerRooms = async (req, res) => {
 exports.getOwnerTenants = async (req, res) => {
     try {
         const ownerLoginId = req.params.loginId;
-        await exports.healOwnerProperties(ownerLoginId);
+        // Read-only path: repair runs in jobs/ownerPropertyHealJob.js.
         const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).lean();
         const propertyIds = properties.map(p => p._id);
         const Tenant = require('../models/Tenant');
