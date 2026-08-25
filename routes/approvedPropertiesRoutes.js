@@ -727,21 +727,47 @@ router.get('/:visitId', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid property ID' });
         }
 
-        // Support both visitId strings and MongoDB ObjectIds in the URL
-        const query = mongoose.Types.ObjectId.isValid(visitId)
-            ? { $or: [{ visitId }, { _id: visitId }] }
-            : { visitId };
+        // Support visitId strings, MongoDB ObjectIds, and property name slugs (e.g. paradise-residency)
+        let query = {};
+        if (mongoose.Types.ObjectId.isValid(visitId)) {
+            query = { $or: [{ visitId }, { _id: visitId }, { propertyId: visitId }] };
+        } else {
+            const cleanRegex = visitId.replace(/-/g, '[-\\s]*');
+            query = {
+                $or: [
+                    { visitId: visitId },
+                    { propertyId: visitId },
+                    { title: new RegExp(cleanRegex, 'i') },
+                    { 'propertyInfo.name': new RegExp(cleanRegex, 'i') }
+                ]
+            };
+        }
 
-        const property = await ApprovedProperty.findOne(query).select({
-            // Credentials — never expose to public
+        const selectFields = {
             'generatedCredentials.tempPassword': 0,
             'generatedCredentials.loginId': 0,
-            // Admin-only internal data
             reuploadRequests: 0,
-            // Analytics — internal only
             views: 0,
             clicks: 0,
-        });
+        };
+
+        let property = await ApprovedProperty.findOne(query).select(selectFields);
+
+        // Fallback: match by slugified title/name across all approved properties
+        if (!property) {
+            const slugify = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            const targetSlug = slugify(visitId);
+            const allProps = await ApprovedProperty.find({}).select(selectFields).lean();
+            property = allProps.find(p => {
+                const name = p.propertyInfo?.name || p.title || '';
+                return slugify(name) === targetSlug || p.visitId === visitId || p.propertyId === visitId || String(p._id) === visitId;
+            });
+        }
+
+        if (!property) {
+            const Property = require('../models/Property');
+            property = await Property.findOne(query).lean();
+        }
 
         if (!property) {
             return res.status(404).json({
