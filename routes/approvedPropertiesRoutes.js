@@ -727,12 +727,16 @@ router.get('/:visitId', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid property ID' });
         }
 
-        // Support visitId strings, MongoDB ObjectIds, and property name slugs (e.g. paradise-residency)
+        const slugify = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const rawTargetSlug = slugify(visitId);
+        const cleanTargetSlug = rawTargetSlug.replace(/^(roomhyprop-crest-|roomhyprop-prime-|roomhyprop-|roomhy-|crest-|prime-)/i, '');
+
+        // Support visitId strings, MongoDB ObjectIds, and property name slugs (e.g. paradise-residency or roomhyprop-crest-hl-residency)
         let query = {};
         if (mongoose.Types.ObjectId.isValid(visitId)) {
             query = { $or: [{ visitId }, { _id: visitId }, { propertyId: visitId }] };
         } else {
-            const cleanRegex = visitId.replace(/-/g, '[-\\s]*');
+            const cleanRegex = cleanTargetSlug.replace(/-/g, '[-\\s]*');
             query = {
                 $or: [
                     { visitId: visitId },
@@ -753,20 +757,40 @@ router.get('/:visitId', async (req, res) => {
 
         let property = await ApprovedProperty.findOne(query).select(selectFields);
 
-        // Fallback: match by slugified title/name across all approved properties
+        // Fallback: match by slugified title/name/composedName across all approved properties
         if (!property) {
-            const slugify = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-            const targetSlug = slugify(visitId);
             const allProps = await ApprovedProperty.find({}).select(selectFields).lean();
             property = allProps.find(p => {
-                const name = p.propertyInfo?.name || p.title || '';
-                return slugify(name) === targetSlug || p.visitId === visitId || p.propertyId === visitId || String(p._id) === visitId;
+                const rawName = p.propertyInfo?.name || p.title || '';
+                const tier = (p.tier || '').toLowerCase();
+                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
+                const nameSlug = slugify(rawName);
+                const composedSlug = slugify(composedName);
+
+                return (
+                    nameSlug === rawTargetSlug ||
+                    nameSlug === cleanTargetSlug ||
+                    composedSlug === rawTargetSlug ||
+                    p.visitId === visitId ||
+                    p.propertyId === visitId ||
+                    String(p._id) === visitId
+                );
             });
         }
 
         if (!property) {
             const Property = require('../models/Property');
-            property = await Property.findOne(query).lean();
+            const allProps = await Property.find({}).lean();
+            property = allProps.find(p => {
+                const rawName = p.title || p.name || '';
+                const nameSlug = slugify(rawName);
+                return (
+                    nameSlug === rawTargetSlug ||
+                    nameSlug === cleanTargetSlug ||
+                    p.visitId === visitId ||
+                    String(p._id) === visitId
+                );
+            });
         }
 
         if (!property) {
