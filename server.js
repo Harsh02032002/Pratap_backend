@@ -16,6 +16,13 @@ let escalationJobStarted = false;
 const initChatSocket = require('./socket/chatSocket');
 const { globalApiLimiter } = require('./middleware/security');
 const { apiCache, getCacheStats, clearCache } = require('./middleware/apiCache');
+const { MONGO, MONGOOSE_BUFFER_TIMEOUT_MS, HTTP } = require('./config/timeouts');
+const {
+    requestDeadline,
+    dbTimeoutErrorHandler,
+    getTimeoutCounters
+} = require('./middleware/requestDeadline');
+const { attachPoolMonitor, getPoolStats, isSaturated } = require('./utils/poolMonitor');
 const {
     compressionMiddleware,
     hppMiddleware,
@@ -142,6 +149,11 @@ app.use(requestHardening);
 const ROOT_DIR = path.resolve(__dirname, '..');
 app.use('/api', globalApiLimiter);
 
+// Bounded lifetime for user-facing API requests. Mounted before apiCache so a
+// slow cache miss is covered too. Payment/upload/webhook/report/chat prefixes
+// are exempt — see DEADLINE_EXEMPT_PREFIXES in config/timeouts.js.
+app.use('/api', requestDeadline);
+
 // API Response Caching - Speeds up frequently accessed data
 app.use('/api', apiCache);
 
@@ -205,19 +217,16 @@ app.use(async (req, res, next) => {
 // Root XML Sitemap Route (Dynamic single source of truth from MongoDB)
 app.get('/sitemap.xml', seoController.generateSitemapXml);
 
-// Optimized Database Connection
-const mongoOptions = {
-    serverSelectionTimeoutMS: 30000,
-    connectTimeoutMS: 30000,
-    socketTimeoutMS: 45000,
-    maxPoolSize: 10,
-    minPoolSize: 2,
-    maxIdleTimeMS: 30000,
-    waitQueueTimeoutMS: 30000,
-    heartbeatFrequencyMS: 10000,
-    retryWrites: true,
-    w: 'majority'
-};
+// Database connection options come from config/timeouts.js, which documents
+// why each value is what it is and keeps the whole hierarchy in one place.
+// Previously these were inline and inverted relative to the 12s client
+// timeout: a request could wait 30s for a pool connection and 45s on the
+// socket long after the browser had given up.
+const mongoOptions = { ...MONGO };
+
+// Mongoose buffers operations while the connection is down. The 10s default
+// silently ate the entire request budget during a reconnect.
+mongoose.set('bufferTimeoutMS', MONGOOSE_BUFFER_TIMEOUT_MS);
 
 console.log('🔗 Connecting to MongoDB...');
 
@@ -238,6 +247,9 @@ if (!mongoUri) {
 mongoose.connect(mongoUri, mongoOptions)
     .then(() => {
         console.log('✅ MongoDB Connected');
+        // Pool saturation is the failure mode behind "random" API timeouts —
+        // observe it rather than inferring it.
+        attachPoolMonitor(mongoose.connection);
         startServer();
     })
     .catch(err => {
@@ -575,13 +587,24 @@ try {
 }
 
 app.get('/api/health', (req, res) => {
+    const pool = getPoolStats();
+    const saturated = isSaturated(mongoOptions.maxPoolSize);
     res.json({
         success: true,
         service: 'roomhy-backend',
         env: process.env.NODE_ENV || 'development',
         timestamp: new Date().toISOString(),
         database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-        cache: getCacheStats()
+        cache: getCacheStats(),
+        // Timeout + pool observability. Counters are per-process and reset on
+        // restart; they exist to tell "too many requests" apart from "queries
+        // too slow", which need opposite fixes.
+        timeouts: getTimeoutCounters(),
+        pool: {
+            ...pool,
+            maxPoolSize: mongoOptions.maxPoolSize,
+            saturated
+        }
     });
 });
 
@@ -746,8 +769,16 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
+// Database timeouts are classified into 503 + Retry-After before reaching the
+// generic handler, so pool exhaustion and query timeouts are distinguishable
+// in logs instead of all surfacing as an opaque 500.
+app.use(dbTimeoutErrorHandler);
+
 app.use((err, req, res, next) => {
     console.error('Express Error:', err);
+    // The deadline middleware may already have responded, and the client may
+    // have hung up — either way a second write would throw.
+    if (res.headersSent || res.writableEnded) return next(err);
     res.status(500).json({
         success: false,
         message: err.message || 'Internal Server Error'
@@ -801,6 +832,14 @@ function startServer() {
     }
     
     if (server.listening) return;
+
+    // Backstops for pathological sockets — NOT the request deadline.
+    // requestTimeout covers receiving the full body, so it stays generous:
+    // uploads accept up to 15MB and a slow mobile connection needs the room.
+    // Node's default is 300s.
+    server.requestTimeout = HTTP.requestTimeout;
+    server.headersTimeout = HTTP.headersTimeout;
+
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`\n✅ Backend API running on http://localhost:${PORT}\n`);
         

@@ -10,7 +10,11 @@ const mailer = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { clearCache } = require('../middleware/apiCache');
-const VISITS_QUERY_TIMEOUT_MS = 12000;
+// Was 12000 — exactly the client timeout, so it could never fire before the
+// browser gave up. Now drawn from the shared hierarchy (7s read class), which
+// sits under the 10s request deadline.
+const { deadlineFor } = require('../utils/queryDeadline');
+const VISITS_QUERY_TIMEOUT_MS = deadlineFor('read');
 const VISITS_CACHE_TTL_MS = 10000;
 const visitsListCache = new Map();
 const visitsListInFlight = new Map();

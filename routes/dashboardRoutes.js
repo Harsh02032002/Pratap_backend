@@ -15,8 +15,6 @@ const Tenant              = require('../models/Tenant');
 const Enquiry             = require('../models/Enquiry');
 const Notification        = require('../models/Notification');
 const Complaint           = require('../models/Complaint');
-const PaymentTransaction  = require('../models/PaymentTransaction');
-const RentPayment         = require('../models/RentPayment');
 const VisitData           = require('../models/VisitData');
 
 const ownerController = require('../controllers/ownercontroller');
@@ -25,6 +23,8 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');
 const { MODULE_KEYS } = require('../utils/permissionKeys');
 const { normalizeLoginId } = require('../utils/normalizeId');
+const { sumPaymentTransactions, sumRentPayments } = require('../services/paymentTotalsService');
+const { withReadDeadline } = require('../utils/queryDeadline');
 
 // GET /:ownerId below is the Owner Dashboard's data source and is Owner/Admin-only
 // by requirement — staff have their own separate /employee endpoint above with
@@ -153,14 +153,23 @@ router.get('/employee', protect, authorize('superadmin', 'employee', 'manager'),
   }
 });
 
-// Helper: compute rent totals from already-fetched data (no extra DB queries)
-function sumRent(enquiries, transactions, rentPayments) {
+/**
+ * Rent total = accepted/approved/active enquiry deposits
+ *            + online booking payouts to the owner (PaymentTransaction)
+ *            + manually recorded rent payments (RentPayment)
+ *
+ * `enquiries` is summed in JS on purpose: those documents are already fetched
+ * for the dashboard response (capped at the 100 newest), and this total has
+ * always been scoped to that same capped set. Summing them server-side over
+ * every enquiry would silently change the figure the dashboard reports.
+ *
+ * The two money totals arrive pre-aggregated from MongoDB — see
+ * sumPaymentTransactions/sumRentPayments below.
+ */
+function sumRent(enquiries, txTotal, rentPaymentsTotal) {
     const enquiriesTotal = enquiries
         .filter(e => ['accepted', 'approved', 'active'].includes(String(e.status || '').toLowerCase()))
         .reduce((sum, e) => sum + (e.paidAmount || 0), 0);
-
-    const txTotal = transactions.reduce((sum, t) => sum + (t.owner_amount || 0), 0);
-    const rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
 
     return enquiriesTotal + txTotal + rentPaymentsTotal;
 }
@@ -203,38 +212,37 @@ router.get('/:ownerId', async (req, res) => {
             enquiries,
             notifications,
             complaints,
-            transactions,
+            txTotal,
         ] = await Promise.all([
             // 1. Owner details (lean, no populate needed for dashboard)
-            Owner.findOne({ loginId }).lean(),
+            withReadDeadline(Owner.findOne({ loginId })).lean(),
 
             // 2. Properties (needed to derive property IDs for rooms/tenants/rent)
-            Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } })
-                .select('_id title locationCode roomCount bedCount vacantRooms vacantBeds occupiedRooms occupiedBeds status isPublished')
+            withReadDeadline(Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } })
+                .select('_id title locationCode roomCount bedCount vacantRooms vacantBeds occupiedRooms occupiedBeds status isPublished'))
                 .lean(),
 
             // 3. Enquiries — limit to 100 newest for dashboard
-            Enquiry.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
+            withReadDeadline(Enquiry.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
                 .sort({ ts: -1 })
-                .limit(100)
+                .limit(100))
                 .lean(),
 
             // 4. Notifications — limit to 50 newest
-            Notification.find({ toLoginId: loginId })
+            withReadDeadline(Notification.find({ toLoginId: loginId })
                 .sort({ createdAt: -1 })
-                .limit(50)
+                .limit(50))
                 .lean(),
 
             // 5. Complaints — exact match (index hit), limit 50
-            Complaint.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
+            withReadDeadline(Complaint.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
                 .sort({ createdAt: -1 })
-                .limit(50)
+                .limit(50))
                 .lean(),
 
-            // 6. PaymentTransactions for rent calculation
-            PaymentTransaction.find({ owner_id: loginId, ...(propertyId ? { property_id: propertyId } : {}) })
-                .select('owner_amount')
-                .lean(),
+            // 6. PaymentTransaction total — summed in MongoDB. Only the scalar
+            //    crosses the wire; the documents themselves were never used.
+            sumPaymentTransactions({ owner_id: loginId, ...(propertyId ? { property_id: propertyId } : {}) }),
         ]);
 
         // Scope to the single selected property when provided (still validated
@@ -248,19 +256,19 @@ router.get('/:ownerId', async (req, res) => {
         // ── PHASE 3: Derive IDs then run remaining parallel fetches ───────────────
         const [rooms, tenants, ownerDoc2, rentPaymentsForOwner] = await Promise.all([
             // 7. Rooms for all owner properties — limit to 200 for dashboard
-            Room.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
+            withReadDeadline(Room.find({ property: { $in: propertyIds }, isDeleted: { $ne: true } })
                 .populate('property', 'title ownerLoginId')
-                .limit(200)
+                .limit(200))
                 .lean(),
 
             // 8. Tenants for all owner properties or matching ownerLoginId
-            Tenant.find({
+            withReadDeadline(Tenant.find({
                 $or: [
                     { property: { $in: propertyIds } },
                     { ownerLoginId: loginId }
                 ],
                 isDeleted: { $ne: true }
-            })
+            }))
                 .lean(),
 
             // RentPayments require owner _id — re-use ownerDoc if available
@@ -270,17 +278,19 @@ router.get('/:ownerId', async (req, res) => {
             Promise.resolve(null),
         ]);
 
-        // RentPayments — need owner _id
-        let rentPayments = [];
+        // RentPayment total — needs the owner _id, so it runs after Phase 3.
+        // Summed in MongoDB for the same reason as the transactions above.
+        let rentPaymentsTotal = 0;
         const resolvedOwner = ownerDoc2 || ownerDoc;
         if (resolvedOwner?._id) {
-            rentPayments = await RentPayment.find({ ownerId: resolvedOwner._id, ...(propertyId ? { propertyId } : {}) })
-                .select('amount')
-                .lean();
+            rentPaymentsTotal = await sumRentPayments({
+                ownerId: resolvedOwner._id,
+                ...(propertyId ? { propertyId } : {}),
+            });
         }
 
         // ── PHASE 4: Derive computed values ───────────────────────────────────────
-        const totalRent = sumRent(enquiries, transactions, rentPayments);
+        const totalRent = sumRent(enquiries, txTotal, rentPaymentsTotal);
 
         // Fetch complaint fallback via tenant IDs (same logic as complaintController)
         // Only do this if there are tenant IDs — and skip if we already have enough complaints

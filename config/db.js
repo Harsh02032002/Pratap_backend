@@ -1,3 +1,14 @@
+/**
+ * ⚠️  NOT USED BY THE RUNNING APPLICATION.
+ *
+ * The live MongoDB connection is opened in server.js using the options in
+ * config/timeouts.js. Nothing requires this file — verified by searching the
+ * whole backend for `require('./config/db')` / `connectDB`.
+ *
+ * It is kept only for standalone scripts that may still import it. Do NOT tune
+ * production timeouts here: edit config/timeouts.js instead, which documents
+ * the whole hierarchy in one place.
+ */
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 
