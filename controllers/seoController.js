@@ -296,17 +296,25 @@ exports.generateSitemapXml = async (req, res) => {
             { loc: 'https://roomhy.com/hostels', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/co-living', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/apartments', priority: '0.9', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/cities', priority: '0.8', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/localities', priority: '0.8', changefreq: 'weekly' },
             { loc: 'https://roomhy.com/about-us', priority: '0.7', changefreq: 'monthly' },
             { loc: 'https://roomhy.com/contact-us', priority: '0.7', changefreq: 'monthly' },
             { loc: 'https://roomhy.com/list-property', priority: '0.8', changefreq: 'weekly' },
             { loc: 'https://roomhy.com/faq', priority: '0.6', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/privacy-policy', priority: '0.5', changefreq: 'monthly' },
+            { loc: 'https://roomhy.com/terms-and-conditions', priority: '0.5', changefreq: 'monthly' },
             { loc: 'https://roomhy.com/pg-in-kota', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/pg-in-jaipur', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/pg-in-delhi', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/pg-in-indore', priority: '0.8', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-bhopal', priority: '0.8', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/pg-in-sikar', priority: '0.8', changefreq: 'daily' },
+            { loc: 'https://roomhy.com/properties-in-kota', priority: '0.9', changefreq: 'daily' },
             { loc: 'https://roomhy.com/pg-in-talwandi-kota', priority: '0.85', changefreq: 'weekly' },
             { loc: 'https://roomhy.com/pg-in-vigyan-nagar-kota', priority: '0.85', changefreq: 'weekly' },
-            { loc: 'https://roomhy.com/pg-in-landmark-city-kota', priority: '0.85', changefreq: 'weekly' }
+            { loc: 'https://roomhy.com/pg-in-landmark-city-kota', priority: '0.85', changefreq: 'weekly' },
+            { loc: 'https://roomhy.com/pg-in-rajeev-gandhi-nagar-kota', priority: '0.85', changefreq: 'weekly' }
         ];
 
         const addedUrls = new Set();
@@ -315,17 +323,51 @@ exports.generateSitemapXml = async (req, res) => {
             xml += `  <url>\n    <loc>${item.loc}</loc>\n    <changefreq>${item.changefreq}</changefreq>\n    <priority>${item.priority}</priority>\n  </url>\n`;
         });
 
+        // Add registered SeoPage entries
         pages.forEach(p => {
             if (p.robots && p.robots.toLowerCase().includes('noindex')) return;
 
             const path = (p.slug || '').replace(/^\/+/, '');
             const url = p.canonicalUrl || `https://roomhy.com/${path}`;
 
-            if (url && !addedUrls.has(url)) {
+            if (url && !addedUrls.has(url) && !url.includes('/login') && !url.includes('/register') && !url.includes('/superadmin') && !url.includes('/propertyowner')) {
                 addedUrls.add(url);
                 xml += `  <url>\n    <loc>${url}</loc>\n    <changefreq>${p.sitemapChangefreq || 'weekly'}</changefreq>\n    <priority>${p.sitemapPriority || 0.8}</priority>\n  </url>\n`;
             }
         });
+
+        // Dynamically append live approved properties to sitemap
+        try {
+            const ApprovedProperty = require('../models/ApprovedProperty');
+            const liveApproved = await ApprovedProperty.find({
+                isLiveOnWebsite: { $ne: false },
+                status: { $in: ['approved', 'live', 'active', 'Approved', 'Live', 'Active'] }
+            }).select('visitId propertyId propertyInfo title propertyType city locality').lean();
+
+            const slugify = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+            liveApproved.forEach(p => {
+                const info = p.propertyInfo || {};
+                const name = info.name || p.title || 'property';
+                const city = info.city || p.city || 'kota';
+                const area = info.area || p.locality || 'all';
+                const type = (info.propertyType || p.propertyType || 'pg').toLowerCase();
+
+                const propSlug = slugify(name);
+                const citySlug = slugify(city);
+                const areaSlug = slugify(area);
+                const typeSlug = type === 'hostel' ? 'hostels' : type;
+
+                const canonicalPropUrl = `https://roomhy.com/${typeSlug}/${citySlug}/${areaSlug}/${propSlug}`;
+
+                if (!addedUrls.has(canonicalPropUrl)) {
+                    addedUrls.add(canonicalPropUrl);
+                    xml += `  <url>\n    <loc>${canonicalPropUrl}</loc>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>\n`;
+                }
+            });
+        } catch (propErr) {
+            console.warn('Sitemap live property append warning:', propErr.message);
+        }
 
         xml += `</urlset>`;
 

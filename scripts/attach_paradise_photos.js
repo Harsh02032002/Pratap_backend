@@ -2,8 +2,7 @@
 /**
  * attach_paradise_photos.js
  * ─────────────────────────────────────────────────────────────
- * Attaches the 8 photos from public/website/Dheeraj Sir/ to
- * PARADISE RESIDENCY in both Property & ApprovedProperty collections.
+ * Updates PARADISE RESIDENCY propertyType to 'hostel' and attaches 8 photos.
  *
  * Usage:
  *   node scripts/attach_paradise_photos.js
@@ -44,38 +43,39 @@ async function main() {
     { title: /PARADISE RESIDENCY/i },
     {
       $set: {
+        propertyType: 'hostel',
         images: photos,
         featuredImage: featuredImage
       }
     }
   );
-  console.log(`✅ Property model updated: ${propResult.modifiedCount} documents updated with ${photos.length} photos`);
+  console.log(`✅ Property model updated: ${propResult.modifiedCount} documents updated to Hostel with ${photos.length} photos`);
 
   // 2. Update ApprovedProperty model
   const appResult = await ApprovedProperty.updateMany(
-    { 'propertyInfo.name': /PARADISE RESIDENCY/i },
+    { $or: [{ 'propertyInfo.name': /PARADISE RESIDENCY/i }, { title: /PARADISE RESIDENCY/i }] },
     {
       $set: {
+        propertyType: 'hostel',
+        'propertyInfo.propertyType': 'hostel',
         images: photos,
         featuredImage: featuredImage,
         'propertyInfo.photos': photos
       }
     }
   );
-  console.log(`✅ ApprovedProperty model updated: ${appResult.modifiedCount} documents updated with ${photos.length} photos`);
+  console.log(`✅ ApprovedProperty model updated: ${appResult.modifiedCount} documents updated to Hostel with ${photos.length} photos`);
 
-  // 3. Clear cache if possible
+  // 3. Clear cache
   try {
     const { clearCache } = require('../middleware/apiCache');
     clearCache('/api/approved-properties');
     clearCache('/api/properties');
     console.log('🧹 API cache cleared');
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
 
   await mongoose.disconnect();
-  console.log('🎉 Photos attached successfully!');
+  console.log('🎉 PARADISE RESIDENCY updated to Hostel successfully!');
 }
 
 main().catch(err => {

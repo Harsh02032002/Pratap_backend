@@ -21,7 +21,7 @@ const PHOTOS_DIR = path.join(__dirname, '../Roomhy-Frontend/public/website/Dheer
 // ─── PROPERTY DATA ───────────────────────────────────────────
 const PROPERTY = {
   title:           'PARADISE RESIDENCY',
-  propertyType:    'pg',
+  propertyType:    'hostel',
   propertyCategory:'PG / HOSTEL',
   address:         'D 39 Landmark City, Kota, Rajasthan',
   locality:        'Landmark City',
