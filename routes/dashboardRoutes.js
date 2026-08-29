@@ -25,6 +25,7 @@ const { MODULE_KEYS } = require('../utils/permissionKeys');
 const { normalizeLoginId } = require('../utils/normalizeId');
 const { sumPaymentTransactions, sumRentPayments } = require('../services/paymentTotalsService');
 const { withReadDeadline } = require('../utils/queryDeadline');
+const { fetchOwnerBookingLeads } = require('../services/ownerLeads');
 
 // GET /:ownerId below is the Owner Dashboard's data source and is Owner/Admin-only
 // by requirement — staff have their own separate /employee endpoint above with
@@ -213,6 +214,7 @@ router.get('/:ownerId', async (req, res) => {
             notifications,
             complaints,
             txTotal,
+            websiteLeads,
         ] = await Promise.all([
             // 1. Owner details (lean, no populate needed for dashboard)
             withReadDeadline(Owner.findOne({ loginId })).lean(),
@@ -222,7 +224,9 @@ router.get('/:ownerId', async (req, res) => {
                 .select('_id title locationCode roomCount bedCount vacantRooms vacantBeds occupiedRooms occupiedBeds status isPublished'))
                 .lean(),
 
-            // 3. Enquiries — limit to 100 newest for dashboard
+            // 3. Enquiries — limit to 100 newest for dashboard.
+            //    Panel-created leads only; website bookings are collected
+            //    separately below, since they live in BookingRequest.
             withReadDeadline(Enquiry.find({ ownerLoginId: loginId, ...(propertyId ? { propertyId } : {}) })
                 .sort({ ts: -1 })
                 .limit(100))
@@ -243,6 +247,20 @@ router.get('/:ownerId', async (req, res) => {
             // 6. PaymentTransaction total — summed in MongoDB. Only the scalar
             //    crosses the wire; the documents themselves were never used.
             sumPaymentTransactions({ owner_id: loginId, ...(propertyId ? { property_id: propertyId } : {}) }),
+
+            // 7. Website leads — direct bookings and bids, which live in
+            //    BookingRequest rather than Enquiry. Without these the dashboard's
+            //    Recent Leads stayed empty no matter how many bookings came in
+            //    from the site. Returned as their own field, never merged into
+            //    `enquiries`: that array feeds sumRent(), and folding booking
+            //    amounts into it would silently move the reported rent total.
+            fetchOwnerBookingLeads({
+                ownerIdCandidates: [...new Set([loginId, String(req.params.ownerId || '')].filter(Boolean))],
+                normalizedOwnerId: loginId,
+                propertyId,
+                limit: 100,
+                wrap: withReadDeadline,
+            }).catch(() => []),
         ]);
 
         // Scope to the single selected property when provided (still validated
@@ -378,6 +396,7 @@ router.get('/:ownerId', async (req, res) => {
             tenants,
             rent: { totalRent },
             enquiries,
+            websiteLeads,
             notifications,
             chats,
             complaints: allComplaints,

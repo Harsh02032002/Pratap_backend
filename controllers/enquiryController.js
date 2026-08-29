@@ -1,6 +1,13 @@
 const Enquiry = require('../models/Enquiry');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { normalizeLoginId } = require('../utils/normalizeId');
+const {
+  resolveOwnerPropertyIdentity,
+  buildOwnerBookingQuery,
+  loadMovedInIndex,
+  mapBookingToLead
+} = require('../services/ownerLeads');
+const BookingRequest = require('../models/BookingRequest');
 
 // Create a new enquiry
 exports.createEnquiry = async (req, res) => {
@@ -96,143 +103,21 @@ exports.listEnquiries = async (req, res) => {
       ownerLoginId: { $in: ownerIdCandidates }
     }).sort({ ts: -1 }).lean();
 
-    // 2. Fetch owner's properties from BOTH Property and ApprovedProperty collections
-    const Property = require('../models/Property');
-    const BookingRequest = require('../models/BookingRequest');
-    const ApprovedProperty = require('../models/ApprovedProperty');
+    // 2-4. Website leads (direct bookings + bids) with their property identity
+    // resolution and Enquiry-shaped mapping. Shared with the owner dashboard via
+    // services/ownerLeads so the two surfaces cannot drift apart — the dashboard
+    // previously had none of this and showed no website leads at all.
+    const identity = await resolveOwnerPropertyIdentity(ownerIdCandidates, normalizedOwnerId);
+    const bookingRequests = await BookingRequest
+        .find(buildOwnerBookingQuery({ ownerIdCandidates, identity }))
+        .sort({ created_at: -1 })
+        .lean();
 
-    let propIds = [];
-    let propVisitIds = [];
-    let propNames = [];
-    let ownerCities = [];
+    const movedIn = await loadMovedInIndex(ownerIdCandidates);
+    const activeTenantPhones = movedIn.phones;
+    const activeTenantEmails = movedIn.emails;
 
-    try {
-      const [regularProps, approvedProps] = await Promise.all([
-        Property.find({
-          $or: [
-            { ownerLoginId: { $in: ownerIdCandidates } },
-            { owner_id: { $in: ownerIdCandidates } }
-          ]
-        }).select('_id visitId title propertyName city locality').lean(),
-        ApprovedProperty.find({
-          $or: [
-            { ownerLoginId: normalizedOwnerId },
-            { 'generatedCredentials.loginId': normalizedOwnerId },
-            { owner_id: normalizedOwnerId },
-            { owner: normalizedOwnerId },
-            { ownerLoginId: ownerLoginId },
-            { owner_id: ownerLoginId }
-          ]
-        }).select('_id visitId propertyName title propertyInfo.city').lean()
-      ]);
-
-      const allProps = [...regularProps, ...approvedProps];
-      propIds = allProps.map(p => String(p._id));
-      propVisitIds = allProps.map(p => p.visitId).filter(Boolean);
-      propNames = allProps.map(p => p.propertyName || p.title || p.propertyInfo?.name).filter(Boolean);
-      ownerCities = allProps.map(p => p.city || p.propertyInfo?.city).filter(Boolean).map(c => String(c).toLowerCase().trim());
-    } catch (_) {}
-
-    const bookingQuery = {
-      $or: [
-        { owner_id:  { $in: ownerIdCandidates } },
-        { owner_ids: { $in: ownerIdCandidates } }
-      ]
-    };
-
-    if (propIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propIds } });
-    if (propVisitIds.length > 0) bookingQuery.$or.push({ property_id: { $in: propVisitIds } });
-    if (propNames.length > 0) {
-      propNames.forEach(name => {
-        if (name) bookingQuery.$or.push({ property_name: new RegExp(String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
-      });
-    }
-
-    // Include open city bids ONLY if they have no property assigned to any other owner.
-    // This prevents showing bids from "Roomhy Premium PG - 1" to owner of "Property01" etc.
-    if (ownerCities.length > 0) {
-      ownerCities.forEach(city => {
-        bookingQuery.$or.push({
-          $and: [
-            { request_type: 'bid' },
-            { $or: [{ city: new RegExp(city, 'i') }, { 'filter_criteria.city': new RegExp(city, 'i') }] },
-            // Only truly open bids — no specific property assigned to another owner
-            { $or: [
-              { property_id: { $in: propIds } },     // bid is for this owner's property
-              { property_id: { $exists: false } },    // bid has no property
-              { property_id: null },                  // bid has no property
-              { property_id: '' },                    // bid has no property
-              { owner_id: { $in: [normalizedOwnerId, ownerLoginId] } } // bid is assigned to this owner
-            ]}
-          ]
-        });
-      });
-    }
-    // Note: removed the broad fallback { request_type: 'bid' } that was pulling ALL bids when no city
-
-
-    const bookingRequests = await BookingRequest.find(bookingQuery).sort({ created_at: -1 }).lean();
-
-    // 3. Fetch tenants to see who has moved in (onboarded)
-    const Tenant = require('../models/Tenant');
-    const tenants = await Tenant.find({
-      $or: [
-        { ownerLoginId: normalizedOwnerId },
-        { ownerLoginId: ownerLoginId }
-      ],
-      isDeleted: { $ne: true }
-    }).lean();
-
-    const activeTenantPhones = new Set(tenants.map(t => String(t.phone || '').replace(/\D/g, '')));
-    const activeTenantEmails = new Set(tenants.map(t => String(t.email || '').toLowerCase().trim()).filter(Boolean));
-
-    // 4. Map booking requests to Enquiry structure
-    const mappedBookings = bookingRequests.map(b => {
-      const cleanPhone = String(b.phone || '').replace(/\D/g, '');
-      const cleanEmail = String(b.email || '').toLowerCase().trim();
-      const isMovedIn = (cleanPhone && activeTenantPhones.has(cleanPhone)) || (cleanEmail && activeTenantEmails.has(cleanEmail));
-
-      return {
-        _id: b._id,
-        ownerLoginId: b.owner_id,
-        propertyId: b.property_id,
-        propertyName: b.property_name,
-        studentId: b.user_id,
-        studentName: b.name,
-        studentEmail: b.email,
-        studentPhone: b.phone,
-        city: b.city || b.filter_criteria?.city || '',
-        area: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
-        notes: b.message || (b.request_type === 'direct' ? 'Direct booking request from website' : `Tenant Max Budget: ₹${((b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 7000).toLocaleString("en-IN")}. If you can offer this property for ₹${((b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 7000).toLocaleString("en-IN")}/month, please accept the bid.`),
-        preferredCity: b.city || b.filter_criteria?.city || '',
-        preferredArea: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
-        location: b.area ? (b.city ? `${b.area}, ${b.city}` : b.area) : (b.city || ''),
-        status: isMovedIn ? 'confirmed' : (b.booking_status || b.status || 'pending'),
-        paidAmount: b.payment_amount || b.rent_amount || b.total_amount || 0,
-        ts: b.created_at || b.createdAt || new Date(),
-        source: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
-        type: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
-        interest: b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website',
-        bidAmount: b.bid_amount || b.bid_max || null,
-        isBid: b.request_type === 'bid',
-        budget: (() => {
-          if (b.request_type === 'bid') {
-            if (b.message) {
-              const match = String(b.message).match(/₹([\d,]+)/);
-              if (match && match[1]) {
-                const val = parseInt(match[1].replace(/,/g, ''), 10);
-                if (val > 0) return `₹${val.toLocaleString("en-IN")}`;
-              }
-            }
-            if (b.bid_amount && b.bid_amount > 0) return `₹${b.bid_amount.toLocaleString("en-IN")}`;
-            if (b.bid_max && b.bid_max > 0) return `₹${b.bid_max.toLocaleString("en-IN")}`;
-            if (b.filter_criteria?.max_price) return `₹${Number(b.filter_criteria.max_price).toLocaleString("en-IN")}`;
-          }
-          return `₹${(b.rent_amount || b.total_amount || 0).toLocaleString("en-IN")}`;
-        })(),
-        isBookingRequest: true
-      };
-    });
+    const mappedBookings = bookingRequests.map(b => mapBookingToLead(b, movedIn));
 
     // 5. Also check Enquiries for moved in status
     const mappedEnquiries = enquiries.map(e => {
