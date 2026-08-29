@@ -243,20 +243,31 @@ if (!mongoUri) {
 
 
 
-// Connect to MongoDB
-mongoose.connect(mongoUri, mongoOptions)
-    .then(() => {
+// Connect to MongoDB.
+//
+// startServer() is called from HERE and nowhere else. It used to also be
+// invoked unconditionally at the bottom of this file, at module load, which
+// won the race every time: `if (server.listening) return` then turned the
+// call below into a no-op. The result was that the HTTP server and every cron
+// job started while mongoose was still opening its first connection, so
+// initDemoOwner's Owner.findOne() had nothing to run against, sat in
+// mongoose's buffer for the full bufferTimeoutMS and reported
+// "buffering timed out after 9000ms" — a startup ordering bug being
+// reported as a database timeout. Both outcomes below still start the
+// server, so nothing is lost by waiting for the connection to settle first.
+(async () => {
+    try {
+        await mongoose.connect(mongoUri, mongoOptions);
         console.log('✅ MongoDB Connected');
         // Pool saturation is the failure mode behind "random" API timeouts —
         // observe it rather than inferring it.
         attachPoolMonitor(mongoose.connection);
-        startServer();
-    })
-    .catch(err => {
+    } catch (err) {
         console.error('❌ MongoDB connection error:', err.message);
         console.warn('⚠️ Starting server anyway; API calls may fail until DB reconnects');
-        startServer();
-    });
+    }
+    startServer();
+})();
 
 // Database connection middleware to ensure connection on every request without creating duplicate pools
 app.use(async (req, res, next) => {
@@ -858,7 +869,8 @@ function startServer() {
 // Vercel serverless function export
 if (process.env.VERCEL) {
     module.exports = app;
-} else {
-    // Local development
-    startServer();
 }
+// Local development does NOT call startServer() here: the mongoose.connect
+// block above owns startup, on both the success and the failure path. Calling
+// it at module load raced the connection and started the cron jobs before the
+// database was reachable (see the note there).

@@ -79,12 +79,38 @@ const QUERY_TIMEOUT_MS = {
 
 // ── MongoDB driver options ───────────────────────────────────────────────────
 const MONGO = {
-  // Time spent finding a suitable server. 5s covers an Atlas failover blip and
-  // still leaves room inside the 10s request deadline. Was 30s.
-  serverSelectionTimeoutMS: int('MONGO_SERVER_SELECTION_MS', 5000),
+  // Time spent finding a suitable server. Covers an Atlas failover blip.
+  // Was 30s, then briefly 5s — 5s proved too tight on a loaded host, where the
+  // process can be descheduled mid-handshake and a 250ms TLS negotiation
+  // stalls past the limit.
+  serverSelectionTimeoutMS: int('MONGO_SERVER_SELECTION_MS', 8000),
 
-  // TCP + TLS + auth handshake for a NEW pool connection. Was 30s.
-  connectTimeoutMS: int('MONGO_CONNECT_TIMEOUT_MS', 5000),
+  // TCP + TLS + auth handshake for a NEW pool connection. Must stay BELOW
+  // waitQueueTimeoutMS — see the note there.
+  //
+  // Note what this budget actually covers: Node starts the connectTimeoutMS
+  // timer before DNS resolution, so a slow getaddrinfo is spent here and is
+  // then reported as "Socket 'secureConnect' timed out after 8001ms" — a DNS
+  // stall wearing a TLS error message.
+  connectTimeoutMS: int('MONGO_CONNECT_TIMEOUT_MS', 8000),
+
+  // Resolve the Atlas hosts over IPv4 only.
+  //
+  // Atlas publishes no AAAA records for this cluster — the shard hostnames
+  // are CNAMEs onto EC2 A records. Left at the default, every fresh lookup
+  // still asks for AAAA alongside A, and that answer is pure waste: at best
+  // an empty response, at worst a stalled query. Measured on a cold resolver
+  // cache, the default path took 5.5s per host to reach a TLS handshake and
+  // one AAAA query timed out against systemd-resolved outright
+  // ("communications error to 127.0.0.53#53: timed out"); the same handshakes
+  // forced to IPv4 took 220-520ms, and ~250ms once the cache was warm.
+  //
+  // A cold start resolves the SRV record plus three shard hosts at once, so
+  // that penalty lands exactly when the pool is opening its first connections
+  // and is what pushed a boot-time connect past connectTimeoutMS. Dropping
+  // the half of the DNS work that can never return a usable address removes
+  // the stall instead of budgeting for it.
+  family: 4,
 
   // Connection-level socket inactivity. Kept above request scale on purpose
   // (see the note at the top) and strictly above every per-operation deadline,
@@ -92,11 +118,22 @@ const MONGO = {
   // close. Was 45s.
   socketTimeoutMS: int('MONGO_SOCKET_TIMEOUT_MS', 30000),
 
-  // THE KEY FIX. How long a request may wait for a free pool connection.
-  // Was 30s — three times the request deadline, so a saturated pool meant
-  // every request burned its whole budget queueing. At 3s we fail fast,
-  // surface a 503, and free the request instead of growing the queue.
-  waitQueueTimeoutMS: int('MONGO_WAIT_QUEUE_MS', 3000),
+  // How long a request may wait for a pool connection.
+  //
+  // MUST be greater than connectTimeoutMS. A waiter is not only waiting for a
+  // BUSY connection to free up — when the pool is below maxPoolSize it is
+  // waiting for a NEW one to be established, which is allowed connectTimeoutMS
+  // to complete. Setting this lower than that guarantees the waiter gives up
+  // before the connection it is waiting for can possibly be ready.
+  //
+  // That inversion (3s wait vs 5s connect) is exactly what caused
+  // "Timed out while checking out a connection from connection pool" at boot,
+  // with the pool reporting only 4 of 10 connections in use — the pool was not
+  // saturated, it simply had not finished growing.
+  //
+  // Still under REQUEST_DEADLINE_MS so the deadline remains the outer bound on
+  // any single request.
+  waitQueueTimeoutMS: int('MONGO_WAIT_QUEUE_MS', 9000),
 
   // Pool size deliberately UNCHANGED at 10. Total connections =
   // maxPoolSize x process count, and the PM2 topology
@@ -104,7 +141,13 @@ const MONGO = {
   // cannot be justified yet. Raising it before the timeout fix would only let
   // more requests pile onto slow queries. Revisit with load-test data.
   maxPoolSize: int('MONGO_MAX_POOL_SIZE', 10),
-  minPoolSize: int('MONGO_MIN_POOL_SIZE', 2),
+
+  // Pre-warm enough connections that normal traffic never waits for the pool
+  // to grow. At boot the demo-owner init, four cron registrations, the socket
+  // server and the escalation job all hit the database at once; with only 2
+  // ready connections the rest queued behind connection establishment. This is
+  // the real fix for that burst — the timeout ordering above is the safety net.
+  minPoolSize: int('MONGO_MIN_POOL_SIZE', 5),
   maxIdleTimeMS: int('MONGO_MAX_IDLE_MS', 30000),
 
   heartbeatFrequencyMS: int('MONGO_HEARTBEAT_MS', 10000),
@@ -117,8 +160,14 @@ const MONGO = {
 
 // How long Mongoose buffers an operation while the connection is down before
 // erroring. The 10s default silently consumed the entire request budget during
-// a reconnect; 3s surfaces the real problem instead.
-const MONGOOSE_BUFFER_TIMEOUT_MS = int('MONGOOSE_BUFFER_TIMEOUT_MS', 3000);
+// a reconnect.
+//
+// Must clear connectTimeoutMS: at boot, code that queries before the pool is
+// ready (initDemoOwner, the cron registrations) buffers its operation while the
+// connection is still being established. At 3s those buffered calls expired
+// first and reported "buffering timed out after 3000ms" even though the
+// connection went on to succeed.
+const MONGOOSE_BUFFER_TIMEOUT_MS = int('MONGOOSE_BUFFER_TIMEOUT_MS', 9000);
 
 // ── Node HTTP server ─────────────────────────────────────────────────────────
 // These are backstops for pathological sockets, NOT the request deadline.
