@@ -447,34 +447,28 @@ exports.getOwnerRent = async (req, res) => {
         const properties = await Property.find({ ownerLoginId, isDeleted: { $ne: true } }).select('_id');
         const propertyIds = properties.map(p => p._id);
 
-        // 1. Find enquiries for these properties that are accepted/approved
-        const enquiries = await require('../models/Enquiry').find({
-            $or: [
-                { propertyId: { $in: propertyIds } },
-                { ownerLoginId }
-            ],
-            status: { $in: ['accepted', 'approved', 'active'] }
-        }).lean();
-        const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
-
-        // 2. Find online booking payment transactions (PaymentTransaction)
-        const PaymentTransaction = require('../models/PaymentTransaction');
-        const transactions = await PaymentTransaction.find({
-            owner_id: ownerLoginId
-        }).select('owner_amount');
-        const txTotal = transactions.reduce((sum, t) => sum + (t.owner_amount || 0), 0);
-
-        // 3. Find monthly rent invoice payments (RentPayment)
-        const RentPayment = require('../models/RentPayment');
+        // All three totals are summed by MongoDB — only the scalar is needed.
+        // Same filters as before: same properties, same enquiry statuses, same
+        // owner scoping.
+        const { sumPaymentTransactions, sumRentPayments, sumEnquiryPaidAmounts } =
+            require('../services/paymentTotalsService');
         const Owner = require('../models/Owner');
-        const ownerDoc = await Owner.findOne({ loginId: ownerLoginId });
-        let rentPaymentsTotal = 0;
-        if (ownerDoc) {
-            const rentPayments = await RentPayment.find({
-                ownerId: ownerDoc._id
-            }).select('amount');
-            rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
-        }
+        const ownerDoc = await Owner.findOne({ loginId: ownerLoginId }).select('_id').lean();
+
+        const [enquiriesTotal, txTotal, rentPaymentsTotal] = await Promise.all([
+            // 1. Booking deposits on accepted/approved/active enquiries
+            sumEnquiryPaidAmounts({
+                $or: [
+                    { propertyId: { $in: propertyIds } },
+                    { ownerLoginId }
+                ],
+                status: { $in: ['accepted', 'approved', 'active'] }
+            }),
+            // 2. Owner's share of online booking payments
+            sumPaymentTransactions({ owner_id: ownerLoginId }),
+            // 3. Manually recorded monthly rent payments
+            ownerDoc ? sumRentPayments({ ownerId: ownerDoc._id }) : Promise.resolve(0),
+        ]);
 
         const totalRent = enquiriesTotal + txTotal + rentPaymentsTotal;
         res.json({ totalRent });

@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const mongoose = require('mongoose');
 let Rent = null;
 let Tenant = null;
 let Notification = null;
@@ -31,6 +32,16 @@ try {
 // Ensure DEMO owner exists
 async function initDemoOwner() {
     if (!Owner) return;
+    // Don't hand a query to a connection that isn't up. Mongoose would buffer
+    // it and fail bufferTimeoutMS later with "buffering timed out", which
+    // describes the symptom and hides the cause; the server now boots after
+    // the connection settles, so reaching here disconnected means the database
+    // is genuinely unreachable and the demo owner simply waits for the next
+    // start. 1 = connected.
+    if (mongoose.connection.readyState !== 1) {
+        console.warn('⚠️ Skipping demo owner init: MongoDB not connected');
+        return;
+    }
     try {
         const demoLoginId = 'ROOMHY0000';
         let demo = await Owner.findOne({ loginId: demoLoginId });

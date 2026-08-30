@@ -12,6 +12,7 @@ const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { auditTrail } = require('../middleware/auditTrail');
 const { normalizeLoginId } = require('../utils/normalizeId');
+const { sumPaymentTransactions, sumRentPayments, sumEnquiryPaidAmounts } = require('../services/paymentTotalsService');
 const ownerController = require('../controllers/ownercontroller');
 
 const mailer = require('../utils/mailer');
@@ -448,9 +449,6 @@ router.get('/:loginId/rent', async (req, res) => {
         // Read-only path: owner↔property link repair runs in the scheduled
         // job (jobs/ownerPropertyHealJob.js), never inside a GET handler.
 
-        const PaymentTransaction = require('../models/PaymentTransaction');
-        const RentPayment = require('../models/RentPayment');
-
         // Run property lookup and owner lookup in parallel first
         const [properties, ownerDoc] = await Promise.all([
             Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id'),
@@ -458,29 +456,29 @@ router.get('/:loginId/rent', async (req, res) => {
         ]);
         const propertyIds = properties.map(p => p._id);
 
-        // Now run all three money queries in parallel
-        const [enquiries, transactions, rentPayments] = await Promise.all([
-            // 1. Find enquiries for these properties that are accepted/approved
-            Enquiry.find({
+        // All three money totals are summed by MongoDB. This endpoint only ever
+        // returns the scalar `totalRent`, so the matching documents were being
+        // transferred to Node purely to be collapsed by reduce(). The filters
+        // below are unchanged — same properties, same enquiry statuses, same
+        // owner scoping.
+        const [enquiriesTotal, txTotal, rentPaymentsTotal] = await Promise.all([
+            // 1. Booking deposits on accepted/approved/active enquiries
+            sumEnquiryPaidAmounts({
                 $or: [
                     { propertyId: { $in: propertyIds } },
                     { ownerLoginId: loginId }
                 ],
                 status: { $in: ['accepted', 'approved', 'active'] }
-            }).select('paidAmount').lean(),
+            }),
 
-            // 2. Find online booking payment transactions (PaymentTransaction)
-            PaymentTransaction.find({ owner_id: loginId }).select('owner_amount').lean(),
+            // 2. Owner's share of online booking payments
+            sumPaymentTransactions({ owner_id: loginId }),
 
-            // 3. Find monthly rent invoice payments (RentPayment)
+            // 3. Manually recorded monthly rent payments
             ownerDoc
-                ? RentPayment.find({ ownerId: ownerDoc._id }).select('amount').lean()
-                : Promise.resolve([])
+                ? sumRentPayments({ ownerId: ownerDoc._id })
+                : Promise.resolve(0)
         ]);
-
-        const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
-        const txTotal = transactions.reduce((sum, t) => sum + (t.owner_amount || 0), 0);
-        const rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
 
         const totalRent = enquiriesTotal + txTotal + rentPaymentsTotal;
         return res.json({ totalRent });

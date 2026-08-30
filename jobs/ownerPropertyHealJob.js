@@ -54,6 +54,7 @@ const User = require('../models/user');
 const CronHealth = require('../models/CronHealth');
 const { acquireLock, releaseLock } = require('../services/cronLockService');
 const { normalizeLoginId } = require('../utils/normalizeId');
+const { withReadDeadline } = require('../utils/queryDeadline');
 
 const JOB_NAME = 'ownerPropertyHeal';
 const LOCK_TIMEOUT_MINUTES = 20;
@@ -143,9 +144,13 @@ async function healOwnerProperties(loginId, opts = {}) {
 
   const maxProperties = opts.maxProperties || MAX_PROPERTIES_PER_RUN;
 
-  const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId })
-    .select('loginId name email phone profile checkinEmail checkinPhone')
-    .lean();
+  // 'job' class, not 'read' — background work must not inherit the 7s
+  // request-scale deadline, but must still be bounded (Phase 11).
+  const ownerDoc = await withReadDeadline(
+    Owner.findOne({ loginId: normalizedLoginId })
+      .select('loginId name email phone profile checkinEmail checkinPhone'),
+    'job',
+  ).lean();
   if (!ownerDoc) return stats;
 
   const query = buildCandidateQuery(ownerDoc);
@@ -153,18 +158,22 @@ async function healOwnerProperties(loginId, opts = {}) {
 
   // Resolved once per owner, not once per property (the old save() hook did the
   // latter). Null is fine — `owner` is simply left alone in that case.
-  const userDoc = await User.findOne({ loginId: normalizedLoginId, role: 'owner' })
-    .select('_id')
-    .lean();
+  const userDoc = await withReadDeadline(
+    User.findOne({ loginId: normalizedLoginId, role: 'owner' }).select('_id'),
+    'job',
+  ).lean();
   const ownerUserId = userDoc ? userDoc._id : null;
 
   const fallbackName = ownerDoc.name || ownerDoc.profile?.name || '';
   const fallbackPhone = ownerDoc.phone || ownerDoc.profile?.phone || '';
 
   // Cursor + batched flush: memory stays flat regardless of match count.
-  const cursor = Property.find(query)
-    .select('_id ownerLoginId owner ownerName ownerPhone')
-    .limit(maxProperties)
+  const cursor = withReadDeadline(
+    Property.find(query)
+      .select('_id ownerLoginId owner ownerName ownerPhone')
+      .limit(maxProperties),
+    'job',
+  )
     .lean()
     .cursor({ batchSize: BATCH_SIZE });
 
@@ -260,12 +269,14 @@ async function runOwnerPropertyHealJob() {
 
     // Page through owners rather than loading them all at once.
     for (;;) {
-      const owners = await Owner.find({ isDeleted: { $ne: true } })
-        .select('loginId')
-        .sort({ _id: 1 })
-        .skip(skip)
-        .limit(OWNER_PAGE_SIZE)
-        .lean();
+      const owners = await withReadDeadline(
+        Owner.find({ isDeleted: { $ne: true } })
+          .select('loginId')
+          .sort({ _id: 1 })
+          .skip(skip)
+          .limit(OWNER_PAGE_SIZE),
+        'job',
+      ).lean();
 
       if (owners.length === 0) break;
 

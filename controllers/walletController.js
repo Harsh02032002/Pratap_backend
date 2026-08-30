@@ -3,6 +3,7 @@ const BookingRequest = require('../models/BookingRequest');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const PayoutRequest = require('../models/PayoutRequest');
 const { directBankTransfer } = require('../services/cashfreePayoutService');
+const { sumRentPayments, sumField, getAdminTransactionTotals } = require('../services/paymentTotalsService');
 
 /**
  * GET /api/wallet/owner/balance
@@ -29,17 +30,20 @@ exports.getOwnerWalletBalance = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Owner account not found' });
     }
 
-    // Fetch transactions & booking requests
-    const [availableTx, payoutLogs, ownerBookings, rentPayments, rents] = await Promise.all([
+    // Transaction + payout documents are returned to the client below, so they
+    // are still fetched. The two rent totals are summed by MongoDB.
+    const [availableTx, payoutLogs, ownerBookings, rentPaymentSum, rentSum] = await Promise.all([
       PaymentTransaction.find({ $or: [{ owner_id: loginId }, { owner_login_id: loginId }], wallet_status: 'available' }).sort({ createdAt: -1 }).lean(),
       PayoutRequest.find({ login_id: loginId, user_type: 'owner' }).sort({ createdAt: -1 }).lean(),
       BookingRequest.find({
         $or: [{ owner_id: loginId }, { ownerLoginId: loginId }],
         paymentStatus: { $in: ['PAID', 'completed'] }
       }).lean(),
-      // 💰 Include manual/cash rent payments recorded by admin (RentPayment uses ObjectId, not loginId)
-      RentPayment.find({ ownerId: owner._id }).sort({ createdAt: -1 }).lean().catch(() => []),
-      Rent.find({ ownerLoginId: loginId, ownerPayoutStatus: 'paid' }).sort({ createdAt: -1 }).lean().catch(() => []),
+      // 💰 Manual/cash rent payments recorded by admin. Only the totals are
+      // used below, so MongoDB sums them — the documents are never returned.
+      // (RentPayment is keyed by ObjectId, Rent by loginId.)
+      sumRentPayments({ ownerId: owner._id }).catch(() => 0),
+      sumField(Rent, { ownerLoginId: loginId, ownerPayoutStatus: 'paid' }, 'paidAmount').catch(() => 0),
     ]);
 
     let liveAvailable = owner.availableBalance || owner.walletBalance || 0;
@@ -49,8 +53,6 @@ exports.getOwnerWalletBalance = async (req, res) => {
     if (calcAvail > 0) liveAvailable = Math.max(liveAvailable, calcAvail);
 
     // 💰 Add manual RentPayments (admin recorded cash/bank transfers)
-    const rentPaymentSum = rentPayments.reduce((s, r) => s + (r.amount || r.paidAmount || 0), 0);
-    const rentSum = rents.reduce((s, r) => s + (r.paidAmount || r.amount || 0), 0);
     const manualTotal = Math.max(rentPaymentSum, rentSum); // take the larger to avoid double-count
 
     if (manualTotal > 0) {
@@ -63,6 +65,7 @@ exports.getOwnerWalletBalance = async (req, res) => {
 
     // Fallback: If no transaction objects, but confirmed paid booking requests exist
     if (liveAvailable === 0 && ownerBookings.length > 0) {
+      // Same `|| 2500` falsy-chain caveat as above — kept in JS for exactness.
       const bookingSum = ownerBookings.reduce((s, b) => s + (b.total_amount || b.rent_amount || 2500), 0);
       liveAvailable = Math.round(bookingSum * 0.95);
     }
@@ -204,8 +207,10 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
  */
 exports.getAdminWalletBalance = async (req, res) => {
   try {
-    const [transactions, bookingRequests, adminPayouts] = await Promise.all([
-      PaymentTransaction.find().lean(),
+    const [txTotals, bookingRequests, adminWithdrawnTotal] = await Promise.all([
+      // One $group replaces loading every PaymentTransaction into memory and
+      // running four separate reduce() passes over the array.
+      getAdminTransactionTotals(),
       BookingRequest.find({
         $or: [
           { payment_status: 'completed' },
@@ -214,13 +219,17 @@ exports.getAdminWalletBalance = async (req, res) => {
           { status: 'completed' }
         ]
       }).lean(),
-      PayoutRequest.find({ user_type: 'admin', status: 'SUCCESS' }).lean()
+      sumField(PayoutRequest, { user_type: 'admin', status: 'SUCCESS' }, 'amount')
     ]);
 
-    let totalRevenue = transactions.reduce((acc, t) => acc + (t.total_amount || t.booking_amount || 0), 0);
-    let totalCommission = transactions.reduce((acc, t) => acc + (t.commission || Math.round((t.total_amount || t.booking_amount || 0) * 0.05)), 0);
+    let totalRevenue = txTotals.totalRevenue;
+    let totalCommission = txTotals.totalCommission;
 
-    // Dynamic aggregation fallback if transactions array is small
+    // Fallback when PaymentTransaction rows are sparse: derive revenue from
+    // booking requests instead. Deliberately still summed in JS — the
+    // `|| 2500` chain treats 0 as absent, which $ifNull does not, so an
+    // aggregation would not be exactly equivalent. This branch only runs when
+    // it beats the transaction total, and BookingRequest volume is far smaller.
     if (bookingRequests.length > 0) {
       const bRevenue = bookingRequests.reduce((acc, b) => acc + (b.total_amount || b.rent_amount || b.bid_amount || 2500), 0);
       const bCommission = Math.round(bRevenue * 0.05);
@@ -228,10 +237,10 @@ exports.getAdminWalletBalance = async (req, res) => {
       if (bCommission > totalCommission) totalCommission = bCommission;
     }
 
-    const totalOwnerHeld = transactions.filter(t => t.wallet_status === 'held').reduce((acc, t) => acc + (t.owner_amount || Math.round((t.total_amount || 0) * 0.95)), 0);
-    const totalOwnerAvailable = transactions.filter(t => t.wallet_status === 'available').reduce((acc, t) => acc + (t.owner_amount || Math.round((t.total_amount || 0) * 0.95)), 0);
-    
-    const totalAdminWithdrawn = adminPayouts.reduce((acc, p) => acc + (p.amount || 0), 0);
+    const totalOwnerHeld = txTotals.totalOwnerHeld;
+    const totalOwnerAvailable = txTotals.totalOwnerAvailable;
+
+    const totalAdminWithdrawn = adminWithdrawnTotal;
     const availableAdminBalance = Math.max(0, totalCommission - totalAdminWithdrawn);
 
     const history = await PayoutRequest.find({ user_type: 'admin' }).sort({ createdAt: -1 }).lean();
