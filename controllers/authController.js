@@ -12,7 +12,7 @@ if (!process.env.JWT_SECRET) {
     throw new Error('JWT_SECRET environment variable is not configured');
 }
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
-const OWNER_LOGIN_ID_REGEX = /^ROOMHY\d{4}$/i;
+const OWNER_LOGIN_ID_REGEX = /^(ROOMHY\d+|\d{10}|\d{3,6})$/i;
 
 // OTP storage (in-memory Map)
 const otpStore = new Map();

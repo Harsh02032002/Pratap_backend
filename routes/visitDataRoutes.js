@@ -55,7 +55,7 @@ function uniqueTruthy(values = []) {
 }
 
 // Owner login ID format: ROOMHY + 4 digits (e.g., ROOMHY1234)
-const OWNER_LOGIN_ID_REGEX = /^ROOMHY\d{4}$/i;
+const OWNER_LOGIN_ID_REGEX = /^(ROOMHY\d+|\d{10}|\d{3,6})$/i;
 
 function buildOwnerLoginId() {
     const n = Math.floor(Math.random() * 10000); // 0-9999
@@ -948,7 +948,15 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
             ownerBehaviour,
             latitude,
             longitude,
-            roomTypes
+            roomTypes,
+            bankAccountHolderName,
+            bankAccountNumber,
+            bankIfscCode,
+            bankName,
+            bankBranchName,
+            bankUpiId,
+            photoTimestamps,
+            photoDetails
         } = req.body;
 
         // Support both old and new formats
@@ -1011,7 +1019,15 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
             ownerCity: ownerCity || city,
             photos: (photos && Array.isArray(photos)) ? photos : (photos ? [photos] : []),
             professionalPhotos: (professionalPhotos && Array.isArray(professionalPhotos)) ? professionalPhotos : (professionalPhotos ? [professionalPhotos] : []),
+            photoTimestamps: photoTimestamps || {},
+            photoDetails: (photoDetails && Array.isArray(photoDetails)) ? photoDetails : [],
             roomTypes: (roomTypes && Array.isArray(roomTypes)) ? roomTypes : [],
+            bankAccountHolderName: bankAccountHolderName || '',
+            bankAccountNumber: bankAccountNumber || '',
+            bankIfscCode: bankIfscCode || '',
+            bankName: bankName || '',
+            bankBranchName: bankBranchName || '',
+            bankUpiId: bankUpiId || '',
             status: 'submitted',
             // Additional fields from old format
             ...(staffId && { staffId }),

@@ -83,6 +83,8 @@ const rentInvoiceSchema = new Schema({
   lastEvaluatedAt: Date,
 
   notes: String,
+  cashfreeOrderId: { type: String, index: true, sparse: true },
+  cashfreePaymentId: { type: String },
 }, {
   timestamps: true,
   collection: 'rent_invoices',

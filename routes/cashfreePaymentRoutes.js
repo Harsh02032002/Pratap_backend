@@ -46,4 +46,7 @@ router.post('/refund', ctrl.initiateRefund);
 // Payment history
 router.get('/history', ctrl.getPaymentHistory);
 
+// Verify rent payment after Cashfree redirect (called by tenant dashboard)
+router.post('/verify-rent-payment', ctrl.verifyRentPayment);
+
 module.exports = router;

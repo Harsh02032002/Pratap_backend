@@ -145,6 +145,8 @@ const VisitDataSchema = new mongoose.Schema({
     bankName:              { type: String },
     bankBranchName:        { type: String },
     bankUpiId:             { type: String },
+    photoTimestamps:       { type: mongoose.Schema.Types.Mixed },
+    photoDetails:          [{ url: String, capturedAt: String }],
     isLiveOnWebsite: {
         type: Boolean,
         default: false

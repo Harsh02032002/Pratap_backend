@@ -39,6 +39,8 @@ const rentSchema = new mongoose.Schema({
     razorpayOrderId: String,
     razorpayPaymentId: String,
     razorpaySignature: String,
+    cashfreeOrderId: { type: String, index: true, sparse: true },
+    cashfreePaymentId: String,
     // Owner payout tracking (platform -> owner transfer)
     ownerPayoutStatus: {
         type: String,
