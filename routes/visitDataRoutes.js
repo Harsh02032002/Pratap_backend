@@ -18,6 +18,19 @@ const { deadlineFor, runOutsideRequestBudget } = require('../utils/queryDeadline
 const VISITS_QUERY_TIMEOUT_MS = deadlineFor('read');
 const VISITS_CACHE_TTL_MS = 10000;
 const visitsListCache = new Map();
+
+/**
+ * Drop the cached visit lists after anything changes a visit.
+ *
+ * The cache was write-only: entries expired on a 10s TTL and nothing ever
+ * cleared them. So a superadmin who approved or rejected a report, and the
+ * panel then reloaded the list, could be served the pre-change copy and see the
+ * row unchanged — the action looking as though it had silently failed.
+ *
+ * Cheap to clear wholesale: entries are keyed by staff filter and pagination,
+ * and one mutation can affect any of them.
+ */
+const invalidateVisitsList = () => visitsListCache.clear();
 const visitsListInFlight = new Map();
 
 const APP_URL = process.env.APP_URL || process.env.APP_BASE_URL || process.env.WEB_APP_URL || 'https://app.roomhy.com';
@@ -899,6 +912,10 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
+        // Every photo on the report goes to the listing — live captures and
+        // uploads alike are treated the same.
+        const propertyPhotos = Array.isArray(visit.photos) ? visit.photos : [];
+
         let ownerProperty = await Property.findOne({
             ownerLoginId: finalLoginId,
             title: { $regex: `^${escapeRegex(propertyTitle)}$`, $options: 'i' }
@@ -906,6 +923,19 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
 
         if (!ownerProperty) {
             ownerProperty = await Property.create({
+                // Link the Property back to the visit it came from.
+                //
+                // syncToApprovedProperty() keys on `property.visitId || _id`, and
+                // a Property created here had no visitId — so it could never match
+                // the ApprovedProperty this same approval had just created under
+                // the visit's id. Editing the property later therefore inserted a
+                // SECOND listing instead of updating the first, and the same
+                // property appeared twice on the website.
+                visitId: String(visit._id || visit.visitId),
+                // The website gallery reads Property.images. Nothing was ever
+                // writing it, so every approved property published with an empty
+                // gallery while its photos sat in ApprovedProperty.
+                images: propertyPhotos,
                 title: propertyTitle,
                 description: visit.description || '',
                 address: propertyAddress,
@@ -947,6 +977,12 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             if (visit.roomTypes && visit.roomTypes.length > 0) {
                 ownerProperty.roomTypes = visit.roomTypes;
             }
+            // Only overwrite when this visit actually carries listing photos, so
+            // re-approving a report whose uploads were removed cannot blank a
+            // gallery that is already live.
+            if (propertyPhotos.length) ownerProperty.images = propertyPhotos;
+            // Backfill the link on properties created before it was set.
+            if (!ownerProperty.visitId) ownerProperty.visitId = String(visit._id || visit.visitId);
             await ownerProperty.save();
         }
 
@@ -962,7 +998,9 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                     city: visit.city || (visit.propertyInfo && visit.propertyInfo.city) || '',
                     area: visit.area || (visit.propertyInfo && visit.propertyInfo.area) || '',
                     locationCode: propertyLocationCode,
-                    photos: visit.photos || (visit.propertyInfo && visit.propertyInfo.photos) || [],
+                    photos: propertyPhotos.length
+                        ? propertyPhotos
+                        : ((visit.propertyInfo && visit.propertyInfo.photos) || []),
                     ownerName: visit.ownerName || (visit.propertyInfo && visit.propertyInfo.ownerName) || '',
                     ownerPhone: visit.ownerPhone || visit.contactPhone || (visit.propertyInfo && visit.propertyInfo.contactPhone) || '',
                     ownerEmail: visit.ownerEmail || (visit.propertyInfo && visit.propertyInfo.ownerEmail) || '',
@@ -1004,6 +1042,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             // Don't fail the approval if ApprovedProperty save fails
         }
 
+        invalidateVisitsList();
         console.log('? [visits/approve] Visit approved successfully:', visitId);
 
         // Everything the approval actually consists of is now durable, so reply.
@@ -1339,6 +1378,7 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
         // none of it belongs inside the request. Delivery outcome is written
         // back onto the VisitData doc instead of being reported inline — the
         // list reads kycStatus, and "Resend KYC" covers a failure.
+        invalidateVisitsList();
         respondOnce(res, 201, {
             success: true,
             message: 'Visit submitted successfully. The digital KYC link is being emailed to the owner.',
@@ -1527,6 +1567,7 @@ router.post('/reject', protect, authorize('superadmin', 'employee', 'manager', '
             });
         }
 
+        invalidateVisitsList();
         console.log('? [visits/reject] Visit rejected:', visitId);
 
         res.json({
