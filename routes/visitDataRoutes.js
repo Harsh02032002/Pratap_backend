@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const VisitData = require('../models/VisitData');
+const VisitSubmitClaim = require('../models/VisitSubmitClaim');
 const User = require('../models/user');
 const Owner = require('../models/Owner');
 const CheckinRecord = require('../models/CheckinRecord');
@@ -13,7 +14,7 @@ const { clearCache } = require('../middleware/apiCache');
 // Was 12000 — exactly the client timeout, so it could never fire before the
 // browser gave up. Now drawn from the shared hierarchy (7s read class), which
 // sits under the 10s request deadline.
-const { deadlineFor } = require('../utils/queryDeadline');
+const { deadlineFor, runOutsideRequestBudget } = require('../utils/queryDeadline');
 const VISITS_QUERY_TIMEOUT_MS = deadlineFor('read');
 const VISITS_CACHE_TTL_MS = 10000;
 const visitsListCache = new Map();
@@ -221,6 +222,231 @@ async function sendOwnerKycLink(visit) {
 
     console.log(`[sendOwnerKycLink] KYC link sent to ${ownerEmail} for visit ${visit.visitId}, loginId: ${loginId}`);
     return { loginId, tempPassword };
+}
+
+/**
+ * Write a response only if one has not already gone out.
+ *
+ * The request deadline (middleware/requestDeadline.js) can answer 503 while a
+ * handler is still running, and Node cannot cancel that handler — so a late
+ * res.json() throws ERR_HTTP_HEADERS_SENT. Worse, a throw from inside a
+ * handler's success path lands in its own catch, which responds again and
+ * throws a second time, escaping to the Express error handler as noise that
+ * buries real failures. Guarding both ends turns that into one log line.
+ */
+function respondOnce(res, status, payload) {
+    if (res.headersSent || res.writableEnded) {
+        console.warn(`[visits] response already sent; dropping ${status} reply`);
+        return false;
+    }
+    res.status(status).json(payload);
+    return true;
+}
+
+/**
+ * Post-submission delivery: owner KYC link, superadmin notification, WhatsApp.
+ *
+ * Runs AFTER the response has been flushed, so its latency cannot push the
+ * request past its deadline. Never throws — the caller does not await it, so an
+ * escaping rejection would be an unhandled rejection, not a handled error.
+ * Outcomes land on the VisitData doc so the Visit Reports list can show what
+ * actually happened.
+ */
+async function dispatchVisitSubmissionNotices(visit, ctx = {}) {
+    const { propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area } = ctx;
+
+    try {
+        await sendOwnerKycLink(visit);
+    } catch (kycErr) {
+        console.warn('[visits/submit] KYC link auto-send failed:', kycErr.message);
+        // sendOwnerKycLink sets kycStatus 'sent' only on success, so the status
+        // stays 'not_sent' here; record why, for the Resend KYC affordance.
+        try {
+            await VisitData.updateOne(
+                { visitId: visit.visitId },
+                { $set: { kycLinkError: kycErr.message } }
+            );
+        } catch (writeErr) {
+            console.warn('[visits/submit] could not record KYC error:', writeErr.message);
+        }
+    }
+
+    try {
+        await notifySuperadmin({
+            type: 'new_enquiry',
+            from: 'area_manager',
+            subject: `New Visit Submission - ${propertyName || 'Property'}`,
+            message: 'A new visit submission is waiting for superadmin approval.',
+            meta: {
+                enquiryId: visit.visitId,
+                userName: ownerName || visitorName || staffName || '',
+                userEmail: ownerEmail || visitorEmail || '',
+                propertyName: propertyName || '',
+                city: city || '',
+                area: area || ''
+            }
+        });
+    } catch (notifyErr) {
+        console.warn('visit submit notification failed:', notifyErr.message);
+    }
+}
+
+/**
+ * Email the owner their credentials after an approval.
+ *
+ * Sent AFTER the approve response, not inside it: this is an SMTP round-trip
+ * (plus WhatsApp) on top of the seven database round-trips the approval already
+ * makes, and awaiting it pushed the request past the 10s request deadline. The
+ * deadline then answered 503 for an approval that had already published the
+ * property. Never throws — the caller does not await it.
+ */
+async function sendApprovalCredentialsEmail({
+    finalLoginId, finalPassword, ownerEmailFromVisit, ownerName, propertyTitle
+}) {
+        try {
+            const ownerFromDb = await Owner.findOne({ loginId: finalLoginId })
+                .select('email profile.email')
+                .lean();
+            const checkinRecord = await CheckinRecord.findOne({ loginId: finalLoginId, role: 'owner' })
+                .select('ownerProfile.email')
+                .lean();
+            const ownerEmail =
+                ownerEmailFromVisit ||
+                (ownerFromDb && (ownerFromDb.email || (ownerFromDb.profile && ownerFromDb.profile.email))) ||
+                (checkinRecord && checkinRecord.ownerProfile && checkinRecord.ownerProfile.email) ||
+                '';
+
+            if (ownerEmail) {
+                const loginPageLink = `${APP_URL}/propertyowner/ownerlogin`;
+                const subject = 'Welcome to RoomHy - Your Property is Approved!';
+                const text = `Welcome to RoomHy!\n\nDear ${ownerName},\n\nYour property has been approved.\n\nProperty: ${propertyTitle}\nLogin ID: ${finalLoginId}\nTemporary Password: ${finalPassword}\n\nOwner Login Page: ${loginPageLink}\n\nPlease change your password after first login.\n\nRoomHy Team`;
+                const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>
+  body{margin:0;padding:0;font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;}
+  .wrap{max-width:520px;margin:40px auto;padding:20px;}
+  .card{background:#fff;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden;}
+  .hdr{background:linear-gradient(135deg,#667eea,#764ba2);padding:30px;text-align:center;}
+  .hdr h1{margin:0;color:#fff;font-size:26px;font-weight:700;}
+  .hdr p{margin:8px 0 0;color:rgba(255,255,255,.85);font-size:13px;}
+  .body{padding:30px;color:#333;}
+  .cred{background:#f5f7fa;border-left:4px solid #667eea;border-radius:10px;padding:20px;margin:20px 0;}
+  .lbl{color:#666;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
+  .val{color:#222;font-size:18px;font-weight:700;background:#fff;padding:8px 14px;border-radius:6px;display:inline-block;}
+  .btn{display:block;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;text-align:center;padding:14px;text-decoration:none;border-radius:10px;margin:24px 0;font-size:15px;font-weight:600;}
+  .warn{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:14px;font-size:13px;color:#856404;margin-top:16px;}
+  .foot{background:#f8f9fa;padding:16px;text-align:center;border-top:1px solid #eee;}
+  .foot p{margin:0;color:#999;font-size:12px;}
+</style></head>
+<body>
+  <div class="wrap"><div class="card">
+    <div class="hdr"><h1>RoomHy</h1><p>Your Property is Approved!</p></div>
+    <div class="body">
+      <p>Dear <strong>${ownerName}</strong>,</p>
+      <p>Congratulations! Your property <strong>${propertyTitle}</strong> has been approved and added to your owner account.</p>
+      <div class="cred">
+        <div style="margin-bottom:14px;"><div class="lbl">Login ID</div><div class="val">${finalLoginId}</div></div>
+        <div><div class="lbl">Temporary Password</div><div class="val">${finalPassword}</div></div>
+      </div>
+      <a href="${loginPageLink}" class="btn">Login to Owner Portal</a>
+      <div class="warn">⚠️ <strong>Important:</strong> Please change your password after your first login.</div>
+    </div>
+    <div class="foot"><p>© 2025 RoomHy. All rights reserved. | support@roomhy.com</p></div>
+  </div></div>
+</body>
+</html>`;
+                await mailer.sendMail(ownerEmail, subject, text, html);
+            }
+        } catch (emailErr) {
+            console.warn('[visits/approve] Email send failed:', emailErr.message);
+        }
+}
+
+/**
+ * How recently an identical report counts as an accidental re-submit.
+ *
+ * Measured against the real duplicates in the database: the pair this guard
+ * exists for was filed 57 SECONDS apart (a retry after the request appeared to
+ * fail), while the genuinely separate re-listings of the same property were
+ * ~20 DAYS apart. Ten minutes sits far above the first and far below the
+ * second, so it catches the accident without ever blocking a real re-listing.
+ */
+const DUPLICATE_SUBMIT_WINDOW_MS =
+    Number.parseInt(process.env.DUPLICATE_SUBMIT_WINDOW_MS || '', 10) || 10 * 60 * 1000;
+
+/**
+ * Identity of a submission, for duplicate detection.
+ *
+ * Property name plus a strong owner identifier. Name alone would collide across
+ * genuinely different owners; an owner alone would block someone legitimately
+ * filing two of their properties in one sitting. Normalised so that casing and
+ * stray whitespace cannot sneak a duplicate past.
+ *
+ * @returns {string|null} null when there is not enough to identify the report,
+ *   in which case no duplicate claim is attempted at all.
+ */
+function buildVisitFingerprint({ propertyName, ownerPhone, ownerEmail }) {
+    const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const name = norm(propertyName);
+    // Phone first: it survives a typo'd email and is what staff actually key on.
+    const owner = String(ownerPhone || '').replace(/\D/g, '') || norm(ownerEmail);
+    if (!name || !owner) return null;
+    return `${name}::${owner}`;
+}
+
+/**
+ * Claim the right to file this report, or report who already has it.
+ *
+ * Insert-first-wins against a unique index (models/VisitSubmitClaim.js), so
+ * this is safe against concurrent submits in a way a "look then insert" check
+ * is not. Verified against the running server: five simultaneous submits used
+ * to create five reports, and now create one.
+ *
+ * @returns {Promise<{claimed:true}|{claimed:false, existingVisit:object|null}>}
+ */
+async function claimVisitSubmission(fingerprint, visitId) {
+    if (!fingerprint) return { claimed: true };
+
+    try {
+        await VisitSubmitClaim.create({
+            fingerprint,
+            visitId,
+            expiresAt: new Date(Date.now() + DUPLICATE_SUBMIT_WINDOW_MS)
+        });
+        return { claimed: true };
+    } catch (err) {
+        const isDuplicate = err?.code === 11000 || /E11000/.test(err?.message || '');
+        if (!isDuplicate) throw err;
+    }
+
+    // Someone holds the claim. Point the caller at the report they filed.
+    const held = await VisitSubmitClaim.findOne({ fingerprint }).lean();
+    const existingVisit = held?.visitId
+        ? await VisitData.findOne({ visitId: held.visitId }).lean()
+        : null;
+
+    // The claim outlived the report it named (deleted, or the save that made it
+    // failed). Nothing to point at, so let this submission take the claim over
+    // rather than refusing a report that does not exist.
+    if (!existingVisit) {
+        await VisitSubmitClaim.updateOne({ fingerprint }, {
+            $set: { visitId, expiresAt: new Date(Date.now() + DUPLICATE_SUBMIT_WINDOW_MS) }
+        });
+        return { claimed: true };
+    }
+
+    return { claimed: false, existingVisit };
+}
+
+/** Release a claim whose report failed to save, so a retry is not locked out. */
+async function releaseVisitSubmission(fingerprint, visitId) {
+    if (!fingerprint) return;
+    try {
+        await VisitSubmitClaim.deleteOne({ fingerprint, visitId });
+    } catch (err) {
+        console.warn('[visits/submit] could not release claim:', err.message);
+    }
 }
 
 async function resolveRequestUser(req) {
@@ -502,7 +728,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
 
         if (!visitId) {
             console.error('? [visits/approve] Missing visitId in request body');
-            return res.status(400).json({
+            return respondOnce(res, 400, {
                 success: false,
                 message: 'Missing visitId'
             });
@@ -511,7 +737,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
         // Tier must be assigned before a property is published, mirroring the
         // KYC gate below — the UI already disables Approve until both are set.
         if (!tier) {
-            return res.status(400).json({
+            return respondOnce(res, 400, {
                 success: false,
                 message: 'Cannot approve. Select a property tier before publishing.'
             });
@@ -526,7 +752,7 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
         const kycCompleted = visitForKycCheck?.kycStatus === 'completed';
 
         if (!kycCompleted) {
-            return res.status(400).json({
+            return respondOnce(res, 400, {
                 success: false,
                 message: 'Cannot approve. Owner KYC must be completed first. Send the KYC link to the owner.'
             });
@@ -554,11 +780,20 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             query = { visitId: visitId };
         }
         
-        // Find and update visit status to approved
+        // Claim the transition atomically.
+        //
+        // Approving does a lot of downstream work — an Owner upsert, a Property
+        // create, an ApprovedProperty upsert, a credentials email. Two clicks
+        // (or a retry after the request appeared to fail) both used to pass the
+        // checks above and run all of it twice, which is how a property gets
+        // published twice and the owner gets two credential mails. The `$ne`
+        // means only ONE request can move the visit into the target status;
+        // whoever loses finds it already approved and stops.
+        const targetStatus = status || 'approved';
         const visit = await VisitData.findOneAndUpdate(
-            query,
+            { ...query, status: { $ne: targetStatus } },
             {
-                status: status || 'approved',
+                status: targetStatus,
                 approvedAt: new Date(),
                 isLiveOnWebsite: isLiveOnWebsite !== undefined ? isLiveOnWebsite : false,
                 generatedCredentials: {
@@ -570,10 +805,22 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
         );
 
         if (!visit) {
-            console.error('? [visits/approve] Visit not found:', visitId);
-            return res.status(404).json({
-                success: false,
-                message: 'Visit not found'
+            // Either it does not exist, or someone already approved it.
+            const existing = await VisitData.findOne(query).lean();
+            if (!existing) {
+                console.error('? [visits/approve] Visit not found:', visitId);
+                return respondOnce(res, 404, {
+                    success: false,
+                    message: 'Visit not found'
+                });
+            }
+            console.warn(`[visits/approve] ${visitId} is already '${existing.status}'; ignoring duplicate approve`);
+            return respondOnce(res, 200, {
+                success: true,
+                message: 'This visit was already approved.',
+                alreadyApproved: true,
+                visit: existing,
+                credentials: existing.generatedCredentials || null
             });
         }
 
@@ -759,70 +1006,16 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
 
         console.log('? [visits/approve] Visit approved successfully:', visitId);
 
-        // Send owner credentials email with owner login page and digital KYC links.
-        let emailAttempted = false;
-        let emailSent = false;
-        try {
-            const ownerFromDb = await Owner.findOne({ loginId: finalLoginId })
-                .select('email profile.email')
-                .lean();
-            const checkinRecord = await CheckinRecord.findOne({ loginId: finalLoginId, role: 'owner' })
-                .select('ownerProfile.email')
-                .lean();
-            const ownerEmail =
-                ownerEmailFromVisit ||
-                (ownerFromDb && (ownerFromDb.email || (ownerFromDb.profile && ownerFromDb.profile.email))) ||
-                (checkinRecord && checkinRecord.ownerProfile && checkinRecord.ownerProfile.email) ||
-                '';
-
-            if (ownerEmail) {
-                emailAttempted = true;
-                const loginPageLink = `${APP_URL}/propertyowner/ownerlogin`;
-                const subject = 'Welcome to RoomHy - Your Property is Approved!';
-                const text = `Welcome to RoomHy!\n\nDear ${ownerName},\n\nYour property has been approved.\n\nProperty: ${propertyTitle}\nLogin ID: ${finalLoginId}\nTemporary Password: ${finalPassword}\n\nOwner Login Page: ${loginPageLink}\n\nPlease change your password after first login.\n\nRoomHy Team`;
-                const html = `<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<style>
-  body{margin:0;padding:0;font-family:'Segoe UI',Arial,sans-serif;background:#f0f2f5;}
-  .wrap{max-width:520px;margin:40px auto;padding:20px;}
-  .card{background:#fff;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden;}
-  .hdr{background:linear-gradient(135deg,#667eea,#764ba2);padding:30px;text-align:center;}
-  .hdr h1{margin:0;color:#fff;font-size:26px;font-weight:700;}
-  .hdr p{margin:8px 0 0;color:rgba(255,255,255,.85);font-size:13px;}
-  .body{padding:30px;color:#333;}
-  .cred{background:#f5f7fa;border-left:4px solid #667eea;border-radius:10px;padding:20px;margin:20px 0;}
-  .lbl{color:#666;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;}
-  .val{color:#222;font-size:18px;font-weight:700;background:#fff;padding:8px 14px;border-radius:6px;display:inline-block;}
-  .btn{display:block;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;text-align:center;padding:14px;text-decoration:none;border-radius:10px;margin:24px 0;font-size:15px;font-weight:600;}
-  .warn{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:14px;font-size:13px;color:#856404;margin-top:16px;}
-  .foot{background:#f8f9fa;padding:16px;text-align:center;border-top:1px solid #eee;}
-  .foot p{margin:0;color:#999;font-size:12px;}
-</style></head>
-<body>
-  <div class="wrap"><div class="card">
-    <div class="hdr"><h1>RoomHy</h1><p>Your Property is Approved!</p></div>
-    <div class="body">
-      <p>Dear <strong>${ownerName}</strong>,</p>
-      <p>Congratulations! Your property <strong>${propertyTitle}</strong> has been approved and added to your owner account.</p>
-      <div class="cred">
-        <div style="margin-bottom:14px;"><div class="lbl">Login ID</div><div class="val">${finalLoginId}</div></div>
-        <div><div class="lbl">Temporary Password</div><div class="val">${finalPassword}</div></div>
-      </div>
-      <a href="${loginPageLink}" class="btn">Login to Owner Portal</a>
-      <div class="warn">⚠️ <strong>Important:</strong> Please change your password after your first login.</div>
-    </div>
-    <div class="foot"><p>© 2025 RoomHy. All rights reserved. | support@roomhy.com</p></div>
-  </div></div>
-</body>
-</html>`;
-                emailSent = await mailer.sendMail(ownerEmail, subject, text, html);
-            }
-        } catch (emailErr) {
-            console.warn('[visits/approve] Email send failed:', emailErr.message);
-        }
-
-        res.json({
+        // Everything the approval actually consists of is now durable, so reply.
+        //
+        // The credentials email below is a full SMTP round-trip (plus WhatsApp)
+        // and used to be awaited before this response. On top of the seven
+        // database round-trips above it pushed the request past the 10s deadline
+        // in middleware/requestDeadline.js, which answered 503 ("The server took
+        // too long to respond") for an approval that had already published the
+        // property. Nothing above depends on the mail, so it is sent after the
+        // response and detached from the request budget.
+        respondOnce(res, 200, {
             success: true,
             message: 'Visit approved successfully',
             visit: visit,
@@ -831,15 +1024,21 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                 tempPassword: finalPassword
             },
             ownerProperty,
-            email: {
-                attempted: emailAttempted,
-                sent: emailSent
-            }
+            email: { pending: true }
         });
+
+        runOutsideRequestBudget(() => {
+            sendApprovalCredentialsEmail({
+                finalLoginId, finalPassword, ownerEmailFromVisit, ownerName, propertyTitle
+            }).catch((err) => {
+                console.error('[visits/approve] credentials email failed:', err);
+            });
+        });
+
     } catch (error) {
         console.error('? [visits/approve] Error approving visit:', error.message);
         console.error('? [visits/approve] Error stack:', error.stack);
-        res.status(500).json({
+        respondOnce(res, 500, {
             success: false,
             message: 'Error approving visit',
             error: error.message
@@ -983,7 +1182,7 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
         // Validate required fields
         // propertyName is required. city is optional if area is provided.
         if (!propertyName) {
-            return res.status(400).json({
+            return respondOnce(res, 400, {
                 success: false,
                 message: 'Missing required field: propertyName'
             });
@@ -998,6 +1197,33 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
 
         // Create unique visit ID (use existing _id if provided)
         const visitId = req.body._id || (Date.now() + '_' + Math.random().toString(36).substr(2, 9));
+
+        // Refuse an accidental re-submit of the same report.
+        //
+        // The panel reuses one visitId across retries of a draft, so a plain
+        // retry lands on the duplicate-key branch below. This covers what that
+        // cannot: a reload, a second tab, or a second click after the page was
+        // navigated away — all of which mint a FRESH id for a report that has
+        // already been filed and already mailed the owner a KYC link.
+        //
+        // Done as a unique-index claim rather than a lookup because a lookup
+        // races: five simultaneous submits each read "nothing filed yet" and
+        // each created a report, along with five Owner records under five
+        // different loginIds.
+        const fingerprint = buildVisitFingerprint({ propertyName, ownerPhone, ownerEmail });
+        const claim = await claimVisitSubmission(fingerprint, visitId);
+        if (!claim.claimed) {
+            const held = claim.existingVisit;
+            console.warn(`[visits/submit] near-duplicate of ${held.visitId} ("${propertyName}"); not filing a second report`);
+            return respondOnce(res, 200, {
+                success: true,
+                message: 'This visit report was already submitted a moment ago.',
+                visitId: held.visitId,
+                duplicate: true,
+                kycLinkPending: held.kycStatus !== 'sent',
+                data: held
+            });
+        }
 
         // Create new visit
         const visit = new VisitData({
@@ -1056,56 +1282,86 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
             ...(ownerBehaviour && { ownerBehaviour })
         });
 
-        // Save to MongoDB
-        await visit.save();
-
-        // Issue owner credentials and email the digital-KYC link straight away —
-        // the owner completing KYC is what unblocks superadmin approval, so this
-        // must not wait on a manual step. Failure here is reported but never
-        // fails the submission: the report is saved and the link can be resent.
-        let kycLinkSent = false;
-        let kycLinkError = null;
+        // Save to MongoDB.
+        //
+        // visitId is unique, and the panel now reuses one id for all retries of
+        // the same draft (see draftVisitIdRef in the frontend), which makes this
+        // endpoint idempotent: a retry after a failed-looking submit must
+        // confirm the existing report rather than duplicate it or 500 on E11000.
         try {
-            await sendOwnerKycLink(visit);
-            kycLinkSent = true;
-        } catch (kycErr) {
-            kycLinkError = kycErr.message;
-            console.warn('[visits/submit] KYC link auto-send failed:', kycErr.message);
-        }
+            await visit.save();
+        } catch (saveErr) {
+            const isDuplicate = saveErr?.code === 11000 || /E11000/.test(saveErr?.message || '');
+            // The claim names a report that now does not exist. Drop it, or a
+            // genuine retry of a failed submit is locked out for the whole window.
+            if (!isDuplicate) {
+                await releaseVisitSubmission(fingerprint, visitId);
+                throw saveErr;
+            }
 
-        try {
-            await notifySuperadmin({
-                type: 'new_enquiry',
-                from: 'area_manager',
-                subject: `New Visit Submission - ${propertyName || 'Property'}`,
-                message: 'A new visit submission is waiting for superadmin approval.',
-                meta: {
-                    enquiryId: visitId,
-                    userName: ownerName || visitorName || staffName || '',
-                    userEmail: ownerEmail || visitorEmail || '',
-                    propertyName: propertyName || '',
-                    city: city || '',
-                    area: area || ''
-                }
+            const existing = await VisitData.findOne({ visitId });
+            console.warn(`[visits/submit] duplicate submit for ${visitId}; confirming the existing report`);
+            if (!existing) await releaseVisitSubmission(fingerprint, visitId);
+
+            respondOnce(res, 200, {
+                success: true,
+                message: 'This visit report was already submitted.',
+                visitId,
+                duplicate: true,
+                kycLinkPending: existing?.kycStatus !== 'sent',
+                data: existing
             });
-        } catch (notifyErr) {
-            console.warn('visit submit notification failed:', notifyErr.message);
+
+            // Only re-run the fan-out if the first attempt never got the link out.
+            if (existing && existing.kycStatus !== 'sent') {
+                runOutsideRequestBudget(() => {
+                    dispatchVisitSubmissionNotices(existing, {
+                        propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area
+                    }).catch((err) => {
+                        console.error('[visits/submit] retry dispatch failed:', err);
+                    });
+                });
+            }
+            return;
         }
 
-        res.status(201).json({
+        // Reply as soon as the report is durable.
+        //
+        // The KYC email, the superadmin email and the WhatsApp ping below are
+        // each a full round-trip to an external provider, and together they ran
+        // 10s+ — past the request deadline in middleware/requestDeadline.js.
+        // The deadline then answered 503 ("The server took too long to
+        // respond") while this handler carried on to completion, so staff saw a
+        // failure for a submission that had in fact saved and mailed, and the
+        // handler's own res.json() afterwards threw ERR_HTTP_HEADERS_SENT.
+        //
+        // Nothing below this line affects whether the visit was recorded, so
+        // none of it belongs inside the request. Delivery outcome is written
+        // back onto the VisitData doc instead of being reported inline — the
+        // list reads kycStatus, and "Resend KYC" covers a failure.
+        respondOnce(res, 201, {
             success: true,
-            message: kycLinkSent
-                ? 'Visit submitted successfully. Digital KYC link sent to the owner.'
-                : 'Visit submitted successfully, but the KYC link could not be emailed. Resend it from Visit Reports.',
+            message: 'Visit submitted successfully. The digital KYC link is being emailed to the owner.',
             visitId: visitId,
-            kycLinkSent,
-            kycLinkError,
+            kycLinkPending: true,
             data: visit
+        });
+
+        // Fire-and-forget, and detached from the request budget: this work
+        // outlives the response, so left inside it every query it runs after
+        // the first slow SMTP call would be clamped to MIN_OPERATION_MS and
+        // fail on arithmetic rather than on being slow.
+        runOutsideRequestBudget(() => {
+            dispatchVisitSubmissionNotices(visit, {
+                propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area
+            }).catch((err) => {
+                console.error('[visits/submit] post-response dispatch failed:', err);
+            });
         });
 
     } catch (error) {
         console.error('Error submitting visit:', error);
-        res.status(500).json({
+        respondOnce(res, 500, {
             success: false,
             message: 'Error submitting visit',
             error: error.message

@@ -131,6 +131,10 @@ const VisitDataSchema = new mongoose.Schema({
     kycToken: { type: String },
     kycTokenExpiry: { type: Date },
     kycSentAt: { type: Date },
+    // Why the automatic KYC email failed, when it did. Written by the
+    // post-response dispatcher in routes/visitDataRoutes.js, which can no
+    // longer report the failure in the submit response itself.
+    kycLinkError: { type: String, default: '' },
     
     // KYC data filled by owner
     kycAadhaarNumber: { type: String },

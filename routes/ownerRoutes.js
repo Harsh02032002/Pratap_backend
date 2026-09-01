@@ -504,7 +504,22 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         const billingMonth = rawMonth; // e.g. "2026-07"
         // ─────────────────────────────────────────────────────────────────────────
 
-        const properties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
+        // ── Property filter ──────────────────────────────────────────────────────
+        // Same query-param contract as the other owner-scoped endpoints
+        // (dashboard, complaints, rooms, tenants): the sidebar's active-property
+        // switcher sends ?propertyId=<id>, and 'all' / absent means every property.
+        const propertyId = req.query.propertyId && req.query.propertyId !== 'all'
+            ? String(req.query.propertyId)
+            : null;
+        // ─────────────────────────────────────────────────────────────────────────
+
+        const allProperties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
+        // Scope to the single selected property when provided — still resolved
+        // against this owner's own properties list, so the query param can never
+        // reach another owner's data.
+        const properties = propertyId
+            ? allProperties.filter(p => String(p._id) === propertyId)
+            : allProperties;
         const propertyIds = properties.map(p => p._id);
 
         // 1. Fetch Tenant Payments (gross) — scoped to selected month
@@ -512,13 +527,18 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         const PaymentTransaction = require('../models/PaymentTransaction');
         const transactions = await PaymentTransaction.find({
             owner_id: loginId,
+            ...(propertyId ? { property_id: propertyId } : {}),
             payment_date: { $gte: monthStart, $lte: monthEnd }
         }).sort({ payment_date: -1 }).lean();
         const txTotal = transactions.reduce((sum, t) => sum + (t.booking_amount || t.owner_amount || 0), 0);
 
         // b. From RentPayment — scoped to selected month via billingMonth on invoice
         const Tenant = require('../models/Tenant');
-        const tenants = await Tenant.find({ property: { $in: propertyIds } }).select('_id').lean();
+        // name/roomNo/bedNo are needed further down: RentPayment stores only
+        // tenantId (no denormalised tenantName/roomNumber), so without this the
+        // Recent Transactions table fell back to the literal "Tenant"/"TBD".
+        const tenants = await Tenant.find({ property: { $in: propertyIds } }).select('_id name roomNo bedNo').lean();
+        const tenantById = new Map(tenants.map(t => [String(t._id), t]));
         const RentInvoice = require('../models/RentInvoice');
 
         let rentPaymentsTotal = 0;
@@ -540,11 +560,16 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
 
         // c. From Enquiry — scoped to selected month
         const Enquiry = require('../models/Enquiry');
+        // The ownerLoginId branch matches enquiries across every property, so it
+        // has to go when a single property is selected — otherwise the other
+        // properties' booking money leaks back into this property's totals.
         const enquiries = await Enquiry.find({
-            $or: [
-                { propertyId: { $in: propertyIds } },
-                { ownerLoginId: loginId }
-            ],
+            $or: propertyId
+                ? [{ propertyId: { $in: propertyIds } }]
+                : [
+                    { propertyId: { $in: propertyIds } },
+                    { ownerLoginId: loginId }
+                ],
             status: { $in: ['accepted', 'approved', 'active'] },
             createdAt: { $gte: monthStart, $lte: monthEnd }
         }).sort({ createdAt: -1 }).lean();
@@ -552,7 +577,12 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
 
         const tenantCollected = txTotal + rentPaymentsTotal + enquiriesTotal;
 
-        // 2. Fetch Payouts — scoped to selected month
+        // 2. Fetch Payouts — scoped to selected month.
+        // NOTE: PayoutLog has no property reference — a payout is a settlement to
+        // the owner's bank account, not to a property — so these two figures stay
+        // account-wide even when a single property is selected. The response flags
+        // that (payoutsScope) so the UI can label them instead of implying they
+        // belong to the selected property.
         const PayoutLog = require('../models/PayoutLog');
         const payouts = await PayoutLog.find({
             owner_id: loginId,
@@ -606,10 +636,16 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
         });
 
         rentPayments.forEach(r => {
+            const t = tenantById.get(String(r.tenantId));
+            // Bare room identifier, matching the other two branches — the panel
+            // renders its own "Room " prefix, so labelling it here would double it.
+            const roomLabel = t?.roomNo
+                ? `${t.roomNo}${t.bedNo ? ` / Bed ${t.bedNo}` : ''}`
+                : 'TBD';
             formattedPayments.push({
                 id: r._id ? `RNT-${String(r._id).slice(-6)}` : 'N/A',
-                tenant: r.tenantName || 'Tenant',
-                room: r.roomNumber || 'TBD',
+                tenant: r.tenantName || t?.name || 'Tenant',
+                room: r.roomNumber || roomLabel,
                 amount: r.amount || 0,
                 category: 'Monthly Rent',
                 date: r.createdAt ? new Date(r.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A',
@@ -744,6 +780,12 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
 
         return res.json({
             success: true,
+            scope: {
+                propertyId: propertyId || null,
+                propertyName: propertyId ? (properties[0]?.title || null) : null,
+                // 'account' = not attributable to one property (see PayoutLog note above)
+                payoutsScope: 'account'
+            },
             summaryMetrics: {
                 tenantCollected: exactTenantCollected,
                 ownerPayouts,

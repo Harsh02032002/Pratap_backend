@@ -1556,6 +1556,51 @@ router.post('/tenant/agreement/complete', async (req, res) => {
     }
 });
 
+// ── Cloudinary document uploads ──────────────────────────────────────────────
+//
+// The document endpoints below take base64 data URLs and push them to
+// Cloudinary. Two things about that were biting users on a domestic uplink:
+//
+//  1. The SDK's default socket timeout is 60s (node_modules/cloudinary/lib/
+//     uploader.js), far past any request budget, so a stalled upload held the
+//     request open for a minute before failing.
+//  2. It rejects with a PLAIN OBJECT — { error: { message, http_code, name } } —
+//     not an Error. `err.message` on that is undefined, so the handlers'
+//     `res.status(500).json({ message: err.message })` sent a body with no
+//     message at all and the browser fell back to rendering a bare "HTTP 500".
+//     The actual cause ("Request Timeout", http_code 499) was in the server log
+//     and nowhere else.
+//
+// Both endpoints are exempt from the request deadline (config/timeouts.js), so
+// this timeout is what bounds them. It is generous because the whole point of
+// the exemption is that a large upload on a slow link is legitimate.
+const CLOUDINARY_UPLOAD_TIMEOUT_MS = Number.parseInt(
+    process.env.CLOUDINARY_UPLOAD_TIMEOUT_MS || '', 10) || 45000;
+
+/** Upload one data URL, turning Cloudinary's non-Error rejection into an Error. */
+const uploadDoc = async (dataUrl, folder) => {
+    try {
+        const uploaded = await cloudinary.uploader.upload(dataUrl, {
+            folder,
+            resource_type: 'image',
+            timeout: CLOUDINARY_UPLOAD_TIMEOUT_MS,
+        });
+        return uploaded.secure_url;
+    } catch (err) {
+        // Unwrap { error: { message, http_code, name } } into something whose
+        // .message survives the trip to the browser.
+        const inner = err?.error || err;
+        const detail = inner?.message || inner?.name || 'unknown error';
+        const wrapped = new Error(
+            inner?.http_code === 499 || inner?.name === 'TimeoutError'
+                ? `Upload timed out after ${Math.round(CLOUDINARY_UPLOAD_TIMEOUT_MS / 1000)}s — the image may be too large for this connection. Try a smaller photo.`
+                : `Image upload failed: ${detail}`
+        );
+        wrapped.cloudinary = inner;
+        throw wrapped;
+    }
+};
+
 // POST /owner/documents — upload owner documents to Cloudinary + run Aadhaar OCR
 router.post('/owner/documents', async (req, res) => {
     try {
@@ -1566,31 +1611,33 @@ router.post('/owner/documents', async (req, res) => {
         const update = {};
         const result = {};
 
-        const uploadDoc = async (dataUrl, folder) => {
-            const uploaded = await cloudinary.uploader.upload(dataUrl, { folder, resource_type: 'image' });
-            return uploaded.secure_url;
-        };
+        // Upload the documents concurrently. Awaited one after another, three
+        // photos on a slow uplink took three times as long as the slowest one
+        // for no reason — they are independent, and it is the wall-clock time
+        // here that the user experiences as "the upload hangs".
+        const [ownerPhotoUrl, bankProofUrl, aadhaarImageUrl] = await Promise.all([
+            ownerPhoto?.dataUrl ? uploadDoc(ownerPhoto.dataUrl, 'owner_documents/photos') : null,
+            bankProof?.dataUrl ? uploadDoc(bankProof.dataUrl, 'owner_documents/bank') : null,
+            aadhaarImage?.dataUrl ? uploadDoc(aadhaarImage.dataUrl, 'owner_documents/aadhaar') : null,
+        ]);
 
-        if (ownerPhoto && ownerPhoto.dataUrl) {
-            const url = await uploadDoc(ownerPhoto.dataUrl, 'owner_documents/photos');
-            update.checkinOwnerPhoto = url;
+        if (ownerPhotoUrl) {
+            update.checkinOwnerPhoto = ownerPhotoUrl;
             update.checkinOwnerPhotoName = ownerPhoto.name || '';
-            result.ownerPhotoUrl = url;
+            result.ownerPhotoUrl = ownerPhotoUrl;
         }
 
-        if (bankProof && bankProof.dataUrl) {
-            const url = await uploadDoc(bankProof.dataUrl, 'owner_documents/bank');
-            update.checkinBankProof = url;
+        if (bankProofUrl) {
+            update.checkinBankProof = bankProofUrl;
             update.checkinBankProofName = bankProof.name || '';
-            result.bankProofUrl = url;
+            result.bankProofUrl = bankProofUrl;
         }
 
-        if (aadhaarImage && aadhaarImage.dataUrl) {
-            const url = await uploadDoc(aadhaarImage.dataUrl, 'owner_documents/aadhaar');
-            update.checkinAadhaarImage = url;
+        if (aadhaarImageUrl) {
+            update.checkinAadhaarImage = aadhaarImageUrl;
             update.checkinAadhaarImageName = aadhaarImage.name || '';
-            update['kyc.documentImage'] = url;
-            result.aadhaarImageUrl = url;
+            update['kyc.documentImage'] = aadhaarImageUrl;
+            result.aadhaarImageUrl = aadhaarImageUrl;
 
             try {
                 const base64Only = aadhaarImage.dataUrl.replace(/^data:[^;]+;base64,/, '');
@@ -1633,11 +1680,6 @@ router.post('/tenant/documents', async (req, res) => {
         const upper = String(loginId).toUpperCase();
         const update = {};
         const result = {};
-
-        const uploadDoc = async (dataUrl, folder) => {
-            const uploaded = await cloudinary.uploader.upload(dataUrl, { folder, resource_type: 'image' });
-            return uploaded.secure_url;
-        };
 
         const toDataUrl = (v) => (typeof v === 'object' && v?.dataUrl ? v.dataUrl : typeof v === 'string' ? v : null);
 

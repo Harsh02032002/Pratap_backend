@@ -24,6 +24,7 @@
  */
 
 const { REQUEST_DEADLINE_MS, DEADLINE_EXEMPT_PREFIXES } = require('../config/timeouts');
+const { runWithRequestBudget } = require('../utils/queryDeadline');
 
 // ── Counters ─────────────────────────────────────────────────────────────────
 // Plain in-process counters, exposed for the health/metrics endpoint. Reset on
@@ -43,9 +44,29 @@ const resetTimeoutCounters = () => {
 
 const isExempt = (path) => DEADLINE_EXEMPT_PREFIXES.some((p) => path.startsWith(p));
 
+/**
+ * The path the exemption list is written against.
+ *
+ * This middleware is mounted with `app.use('/api', requestDeadline)`, and Express
+ * strips the mount path from `req.path` — inside the handler a request to
+ * /api/upload/x arrives as `/upload/x`. Testing that against prefixes that all
+ * begin with `/api` matched nothing, so every deliberately exempt route
+ * (uploads, Cashfree, payments, webhooks, reports, chat, SSE, WhatsApp) was in
+ * fact being cut off at the 10s deadline. Rejoining baseUrl restores the path
+ * the list describes, and still works if the middleware is ever mounted
+ * globally, where baseUrl is empty.
+ */
+const exemptionPath = (req) => `${req.baseUrl || ''}${req.path || ''}` || req.originalUrl || '';
+
 /** Correlation id, reusing whatever the request already carries. */
+// Marks a request whose database timeout has already been classified, so the
+// normaliser and the error handler cannot both count the same failure.
+const CLASSIFIED = Symbol('roomhy.dbTimeoutClassified');
+
+// Optional chaining throughout: this only ever feeds a log line, and a missing
+// header bag must not be able to throw inside a response path.
 const requestIdOf = (req) =>
-  req.id || req.requestId || req.headers['x-request-id'] || req.headers['x-correlation-id'] || '-';
+  req?.id || req?.requestId || req?.headers?.['x-request-id'] || req?.headers?.['x-correlation-id'] || '-';
 
 /**
  * Classify a database error by failure mode. The driver's messages differ per
@@ -110,7 +131,7 @@ function classifyDbTimeout(err) {
  * worse than the wait.
  */
 function requestDeadline(req, res, next) {
-  if (isExempt(req.path)) return next();
+  if (isExempt(exemptionPath(req))) return next();
 
   const controller = new AbortController();
   req.deadlineSignal = controller.signal;
@@ -163,6 +184,66 @@ function requestDeadline(req, res, next) {
   res.on('finish', finish);
   res.on('close', finish);
 
+  // Carry the budget down to every database operation this request starts, so
+  // MongoDB is told to stop at the same moment the deadline would fire instead
+  // of running on and holding its pool slot. Exempt routes returned above and
+  // never enter this context — they must not inherit a request-scale deadline.
+  return runWithRequestBudget(REQUEST_DEADLINE_MS, next);
+}
+
+/**
+ * Normalises database timeouts that a controller already turned into a response.
+ *
+ * dbTimeoutErrorHandler below is correct but unreachable for most routes: nearly
+ * every controller wraps its body in try/catch and answers with
+ * `res.status(500).json({ message: error.message })`, so the error never enters
+ * Express's error pipeline. Under pool exhaustion that surfaced to the Owner
+ * Panel as HTTP 500 carrying the driver's own text — "Timed out while checking
+ * out a connection from connection pool" — which is both the wrong status for a
+ * retryable condition and a driver diagnostic string that should not leave the
+ * server.
+ *
+ * Wrapping res.json fixes every route at once without touching a single
+ * controller's logic: only the status, message and Retry-After of an
+ * already-failed database timeout change. Everything else passes through
+ * untouched.
+ */
+function dbTimeoutResponseNormalizer(req, res, next) {
+  const sendJson = res.json.bind(res);
+
+  res.json = function normalizedJson(body) {
+    try {
+      if (
+        !req[CLASSIFIED] &&
+        res.statusCode >= 500 &&
+        !res.headersSent &&
+        body && typeof body === 'object' && typeof body.message === 'string'
+      ) {
+        const classified = classifyDbTimeout({ message: body.message, name: body.name, code: body.code });
+        if (classified) {
+          req[CLASSIFIED] = true;
+          console.warn(JSON.stringify({
+            level: 'warn',
+            event: 'db_timeout',
+            requestId: requestIdOf(req),
+            method: req.method,
+            route: req.route?.path || req.path,
+            durationMs: req.startedAt ? Date.now() - req.startedAt : undefined,
+            reason: classified.reason,
+            source: 'controller_catch',
+            detail: String(body.message).slice(0, 300),
+          }));
+          res.status(classified.status);
+          res.set('Retry-After', '2');
+          return sendJson({ success: false, message: classified.message, reason: classified.reason });
+        }
+      }
+    } catch (_) {
+      // Normalisation must never be the reason a response fails to send.
+    }
+    return sendJson(body);
+  };
+
   next();
 }
 
@@ -173,8 +254,10 @@ function requestDeadline(req, res, next) {
  * Internal driver text is logged, never returned to the caller.
  */
 function dbTimeoutErrorHandler(err, req, res, next) {
+  if (req[CLASSIFIED]) return next(err);
   const classified = classifyDbTimeout(err);
   if (!classified) return next(err);
+  req[CLASSIFIED] = true;
 
   console.warn(JSON.stringify({
     level: 'warn',
@@ -198,7 +281,9 @@ function dbTimeoutErrorHandler(err, req, res, next) {
 }
 
 module.exports = {
+  exemptionPath,
   requestDeadline,
+  dbTimeoutResponseNormalizer,
   dbTimeoutErrorHandler,
   classifyDbTimeout,
   getTimeoutCounters,

@@ -17,8 +17,16 @@ const initChatSocket = require('./socket/chatSocket');
 const { globalApiLimiter } = require('./middleware/security');
 const { apiCache, getCacheStats, clearCache } = require('./middleware/apiCache');
 const { MONGO, MONGOOSE_BUFFER_TIMEOUT_MS, HTTP } = require('./config/timeouts');
+const { installGlobalQueryDeadline } = require('./utils/queryDeadline');
+
+// Installed before any route or model require below, so every schema compiled
+// from here on carries a default operation deadline. Without it the request
+// deadline can free the HTTP request but not the query behind it, and the pool
+// slot stays occupied — see utils/queryDeadline.js.
+installGlobalQueryDeadline(mongoose);
 const {
     requestDeadline,
+    dbTimeoutResponseNormalizer,
     dbTimeoutErrorHandler,
     getTimeoutCounters
 } = require('./middleware/requestDeadline');
@@ -153,6 +161,9 @@ app.use('/api', globalApiLimiter);
 // slow cache miss is covered too. Payment/upload/webhook/report/chat prefixes
 // are exempt — see DEADLINE_EXEMPT_PREFIXES in config/timeouts.js.
 app.use('/api', requestDeadline);
+// Runs before the routes so it can wrap res.json; converts a database timeout a
+// controller already answered with 500 into the classified 503 + Retry-After.
+app.use('/api', dbTimeoutResponseNormalizer);
 
 // API Response Caching - Speeds up frequently accessed data
 app.use('/api', apiCache);
@@ -238,7 +249,10 @@ if (!mongoUri) {
     console.error('❌ Please set MONGO_URI in your .env file');
 } else {
     console.log('📍 URI length:', mongoUri.length);
-    console.log('🔍 URI preview:', mongoUri.substring(0, 50) + '...');
+    // Host only. The first 50 characters of a mongodb+srv URI are the username
+    // and password, so the old preview wrote working credentials into every log
+    // sink, crash report and terminal scrollback this process touches.
+    console.log('🔍 Cluster:', mongoUri.replace(/^(mongodb(?:\+srv)?:\/\/)[^@]*@/, '$1<redacted>@').split('?')[0]);
 }
 
 

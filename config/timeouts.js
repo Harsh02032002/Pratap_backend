@@ -82,8 +82,10 @@ const MONGO = {
   // Time spent finding a suitable server. Covers an Atlas failover blip.
   // Was 30s, then briefly 5s — 5s proved too tight on a loaded host, where the
   // process can be descheduled mid-handshake and a 250ms TLS negotiation
-  // stalls past the limit.
-  serverSelectionTimeoutMS: int('MONGO_SERVER_SELECTION_MS', 8000),
+  // stalls past the limit. 8s respected that but left only 2s of the request
+  // budget if selection was the blocker; 6s stays clear of the 5s that failed
+  // and still finishes inside QUERY_TIMEOUT_MS.read.
+  serverSelectionTimeoutMS: int('MONGO_SERVER_SELECTION_MS', 6000),
 
   // TCP + TLS + auth handshake for a NEW pool connection. Must stay BELOW
   // waitQueueTimeoutMS — see the note there.
@@ -92,7 +94,16 @@ const MONGO = {
   // timer before DNS resolution, so a slow getaddrinfo is spent here and is
   // then reported as "Socket 'secureConnect' timed out after 8001ms" — a DNS
   // stall wearing a TLS error message.
-  connectTimeoutMS: int('MONGO_CONNECT_TIMEOUT_MS', 8000),
+  //
+  // 8s was sized for that DNS stall. `family: 4` below removed the stall at its
+  // source: the measurement recorded there is 220-520ms cold and ~250ms warm,
+  // and a full SRV-resolve + connect + auth + ping from a home link measured
+  // 788/1135/1125ms. 2.5s is ~5x the warm path and still ~2x the worst of those
+  // three, while sitting under waitQueueTimeoutMS so a pool waiter can never
+  // give up before the connection it is waiting for is able to finish. Holding
+  // 8s here is what forced waitQueueTimeoutMS up to 9s and left a request ~1s
+  // of usable budget after acquiring a connection.
+  connectTimeoutMS: int('MONGO_CONNECT_TIMEOUT_MS', 2500),
 
   // Resolve the Atlas hosts over IPv4 only.
   //
@@ -131,9 +142,21 @@ const MONGO = {
   // with the pool reporting only 4 of 10 connections in use — the pool was not
   // saturated, it simply had not finished growing.
   //
-  // Still under REQUEST_DEADLINE_MS so the deadline remains the outer bound on
-  // any single request.
-  waitQueueTimeoutMS: int('MONGO_WAIT_QUEUE_MS', 9000),
+  // Sized so the two halves of a request add up to exactly the budget:
+  //
+  //     waitQueueTimeoutMS (3s) + QUERY_TIMEOUT_MS.read (7s) = REQUEST_DEADLINE_MS (10s)
+  //
+  // A request that waits the full pool budget and then runs a full-length query
+  // consumes the deadline precisely, with nothing left unaccounted for. At 9s
+  // the pool wait alone was 90% of the budget: a request could spend almost its
+  // entire life queueing and then 503 without ever reaching MongoDB, which reads
+  // to the user as "the server is slow" when the query had not started.
+  //
+  // Still above connectTimeoutMS (2.5s), so the boot-time failure that raising
+  // this to 9s was fixing — a waiter giving up before a NEW connection could be
+  // established — stays fixed. Both constraints hold only because connect came
+  // down; see the note there.
+  waitQueueTimeoutMS: int('MONGO_WAIT_QUEUE_MS', 3000),
 
   // Pool size deliberately UNCHANGED at 10. Total connections =
   // maxPoolSize x process count, and the PM2 topology
@@ -189,6 +212,14 @@ const HTTP = {
 // design, and SSE/chat are long-lived by nature.
 const DEADLINE_EXEMPT_PREFIXES = [
   '/api/upload',
+  // These two are uploads in everything but name: they take base64 data URLs
+  // and stream them to Cloudinary, which is exactly why /api/upload is exempt.
+  // Left deadlined, a single 4MB photo on a domestic uplink 503'd at 10.0s
+  // while the upload was still in flight, and the handler ran on to Cloudinary's
+  // own 60s timeout. Listed individually rather than exempting '/api/checkin',
+  // because the rest of that router is ordinary bounded reads and writes.
+  '/api/checkin/owner/documents',
+  '/api/checkin/tenant/documents',
   '/api/cashfree',
   '/api/payment',
   '/api/payments',
