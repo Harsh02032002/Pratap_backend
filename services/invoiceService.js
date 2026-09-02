@@ -58,8 +58,26 @@ function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function attachPendingElectricity(invoice, tenantId) {
-  const tenant = await Tenant.findById(tenantId).select('property roomNo room').lean();
+/**
+ * @param {object} invoice
+ * @param {string} tenantId
+ * @param {object} [prefetched] tenant doc the caller already has. Passed in by
+ *   generateMonthlyInvoices, which fetches every tenant up front — without it
+ *   this re-queried the SAME tenant the caller had just read, once per invoice.
+ */
+/** Does this meter reading belong to this tenant's room? Mirrors the $or below. */
+function meterMatchesTenant(meter, tenant) {
+  if (String(meter.property) !== String(tenant.property)) return false;
+  if (!(meter.totalBill > 0)) return false;
+  if (tenant.roomNo && meter.roomNo &&
+      String(meter.roomNo).toLowerCase() === String(tenant.roomNo).toLowerCase()) return true;
+  if (tenant.room && meter.room && String(meter.room) === String(tenant.room)) return true;
+  return false;
+}
+
+async function attachPendingElectricity(invoice, tenantId, prefetched, meterPool, prefetch = {}) {
+  const tenant = prefetched
+    || await Tenant.findById(tenantId).select('property roomNo room').lean();
   if (!tenant?.property) return;
 
   const orClause = [];
@@ -67,12 +85,17 @@ async function attachPendingElectricity(invoice, tenantId) {
   if (tenant.room) orClause.push({ room: tenant.room });
   if (!orClause.length) return;
 
-  const meter = await ElectricityMeter.findOne({
-    property: tenant.property,
-    billingMonth: invoice.billingMonth,
-    totalBill: { $gt: 0 },
-    $or: orClause,
-  }).lean();
+  // A caller generating many invoices hands over every meter reading for the
+  // month in one go, so this matches in memory rather than issuing a query per
+  // tenant. Falls back to the single lookup for any other caller.
+  const meter = meterPool
+    ? meterPool.find(mtr => meterMatchesTenant(mtr, tenant))
+    : await ElectricityMeter.findOne({
+        property: tenant.property,
+        billingMonth: invoice.billingMonth,
+        totalBill: { $gt: 0 },
+        $or: orClause,
+      }).lean();
 
   if (!meter?.totalBill) return;
 
@@ -82,7 +105,7 @@ async function attachPendingElectricity(invoice, tenantId) {
   invoice.electricityCurrReading = meter.currentReading || 0;
   invoice.electricityReadingAdded = true;
 
-  const { updates } = await evaluateInvoice(invoice);
+  const { updates } = await evaluateInvoice(invoice, null, prefetch);
   Object.assign(invoice, updates);
 }
 
@@ -90,20 +113,65 @@ async function attachPendingElectricity(invoice, tenantId) {
 
 async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
   const results = { created: 0, skipped: 0, errors: [] };
+  if (!tenants.length) return results;
+
+  // ── Batch the reads ────────────────────────────────────────────────────────
+  //
+  // This loop used to make up to EIGHT sequential round-trips per tenant: the
+  // tenant, the existing-invoice check, three cascading PenaltyConfig lookups
+  // inside getEffectiveConfig, an electricity meter, the save, and an audit log.
+  // At ~30 tenants that is ~240 serial queries, which measured past the 10s
+  // request deadline — the deadline answered 503 while this kept running, and
+  // the handler's later res.json() threw ERR_HTTP_HEADERS_SENT.
+  //
+  // The three lookups below replace 2 per-tenant queries with 2 total, and the
+  // config memo collapses the cascade to one resolution per property/unit
+  // rather than one per tenant. Tenants in the same property share a config, so
+  // in practice that is the difference between 90 queries and 3.
+  const tenantIds = tenants.map(t => t.tenantId);
+
+  const [tenantDocs, existingInvoices] = await Promise.all([
+    // property/roomNo/room are here for attachPendingElectricity, which used to
+    // fetch the same tenant again for them.
+    Tenant.find({ _id: { $in: tenantIds } })
+      .select('name email phone moveInDate property roomNo room digitalCheckin.agreementDetails.lateFee').lean(),
+    RentInvoice.find({ ownerId, billingMonth, tenantId: { $in: tenantIds } }).select('tenantId').lean(),
+  ]);
+
+  // Every meter reading these tenants could match, in one query instead of one
+  // per tenant. Scoped to the properties actually involved.
+  const propertyIds = [...new Set(tenantDocs.map(d => d.property).filter(Boolean).map(String))];
+  const meterPool = propertyIds.length
+    ? await ElectricityMeter.find({
+        property: { $in: propertyIds },
+        billingMonth,
+        totalBill: { $gt: 0 },
+      }).lean()
+    : [];
+
+  const tenantById = new Map(tenantDocs.map(d => [String(d._id), d]));
+  const alreadyInvoiced = new Set(existingInvoices.map(i => String(i.tenantId)));
+
+  const configCache = new Map();
+  const configFor = async (propertyId, unitId) => {
+    const key = `${propertyId || ''}|${unitId || ''}`;
+    if (!configCache.has(key)) configCache.set(key, await getEffectiveConfig(ownerId, propertyId, unitId));
+    return configCache.get(key);
+  };
+
+  // Audit entries are collected and written once at the end — they are a record
+  // of what happened, and nothing in the loop reads them back.
+  const auditEntries = [];
+  // Built in memory, then written in one insertMany below.
+  const pending = [];
 
   for (const tenant of tenants) {
     try {
-      const tenantDoc = await Tenant.findById(tenant.tenantId).select('name email phone moveInDate').lean();
+      if (alreadyInvoiced.has(String(tenant.tenantId))) { results.skipped++; continue; }
 
+      const tenantDoc = tenantById.get(String(tenant.tenantId)) || null;
+      const config = await configFor(tenant.propertyId, tenant.unitId);
 
-      const existing = await RentInvoice.findOne({
-        ownerId,
-        tenantId: tenant.tenantId,
-        billingMonth,
-      });
-      if (existing) { results.skipped++; continue; }
-
-      const config = await getEffectiveConfig(ownerId, tenant.propertyId, tenant.unitId);
       const dueYear = parseInt(billingMonth.split('-')[0], 10);
       const dueMonth = parseInt(billingMonth.split('-')[1], 10) - 1; // 0-indexed
       const dueDay = config.rentDueDay || 1;
@@ -128,44 +196,98 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
         penaltyConfigSnapshot: config,
       });
 
-      await attachPendingElectricity(invoice, tenant.tenantId);
-      await invoice.save();
-      await RentAuditLog.create({
-        action: 'INVOICE_CREATED',
-        invoiceId: invoice._id,
-        tenantId: tenant.tenantId,
-        ownerId,
-        propertyId: tenant.propertyId,
-        meta: { billingMonth, rentAmount: tenant.rentAmount },
-      });
-
-      results.created++;
+      await attachPendingElectricity(invoice, tenant.tenantId, tenantDoc, meterPool, { config, tenantDoc });
+      pending.push({ invoice, tenant });
     } catch (err) {
-      // Unique index violation: concurrent request already created this invoice
-      if (err.code === 11000) {
-        results.skipped++;
-        continue;
-      }
       results.errors.push({ tenantId: tenant.tenantId, error: err.message });
     }
   }
+
+  // ── One write for the whole batch ──────────────────────────────────────────
+  //
+  // A save() per tenant was the last remaining per-tenant round-trip, and with
+  // 100+ tenants it was the whole cost of the request. insertMany sends them
+  // together. RentInvoice has no save middleware, so nothing is skipped by not
+  // going through save() — validators and defaults still apply.
+  //
+  // ordered:false so one rejected document cannot abandon the rest, and the
+  // { tenantId, billingMonth } unique index still arbitrates against a request
+  // running concurrently: those come back as 11000 write errors, which are
+  // duplicates rather than failures and are counted as skipped.
+  if (pending.length) {
+    const docs = pending.map(p => p.invoice);
+    let insertedCount = docs.length;
+    try {
+      await RentInvoice.insertMany(docs, { ordered: false });
+    } catch (err) {
+      const writeErrors = err?.writeErrors || err?.result?.result?.writeErrors || [];
+      if (!writeErrors.length) throw err;
+      insertedCount = docs.length - writeErrors.length;
+      for (const we of writeErrors) {
+        const code = we?.err?.code ?? we?.code;
+        const at = we?.err?.index ?? we?.index;
+        const failed = pending[at];
+        if (code === 11000) results.skipped++;
+        else results.errors.push({
+          tenantId: failed?.tenant?.tenantId,
+          error: we?.err?.errmsg || we?.errmsg || 'insert failed',
+        });
+      }
+      const failedIdx = new Set(writeErrors.map(we => we?.err?.index ?? we?.index));
+      pending.forEach((p, i) => { if (failedIdx.has(i)) p.failed = true; });
+    }
+
+    results.created += insertedCount;
+    for (const p of pending) {
+      if (p.failed) continue;
+      auditEntries.push({
+        action: 'INVOICE_CREATED',
+        invoiceId: p.invoice._id,
+        tenantId: p.tenant.tenantId,
+        ownerId,
+        propertyId: p.tenant.propertyId,
+        meta: { billingMonth, rentAmount: p.tenant.rentAmount },
+      });
+    }
+  }
+
+  if (auditEntries.length) {
+    // ordered:false so one bad entry cannot discard the rest, and a failure to
+    // write the audit trail must not fail invoices that were actually created.
+    try {
+      await RentAuditLog.insertMany(auditEntries, { ordered: false });
+    } catch (err) {
+      console.warn('[generateMonthlyInvoices] audit log write failed:', err.message);
+    }
+  }
+
   return results;
 }
 
 // ─── THE GOLDEN RULE: always recalculate from dueDate ────────────────────────
 
-async function evaluateInvoice(invoice, asOfDate = null) {
+/**
+ * @param {object} invoice
+ * @param {Date|null} [asOfDate]
+ * @param {{config?:object, tenantDoc?:object}} [prefetch] values the caller
+ *   already holds. Bulk generation passes both so this does not re-query the
+ *   config and the tenant once per invoice; every other caller omits it and
+ *   behaves exactly as before.
+ */
+async function evaluateInvoice(invoice, asOfDate = null, prefetch = {}) {
   // Always use the live config so invoices created before penalty settings were
   // configured still get correct penalties after the owner sets them up.
-  let config = await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
+  let config = prefetch.config
+    || await getEffectiveConfig(invoice.ownerId, invoice.propertyId, invoice.unitId);
 
   // If the owner hasn't configured a Phase 3 penalty (or set it to 0), fall back
   // to the lateFee stored on the tenant's agreement (digitalCheckin.agreementDetails.lateFee).
   // This ensures the per-tenant late fee actually appears in penalty calculations.
   if (!config.majorPenalty?.enabled || !config.majorPenalty?.value) {
-    const tenantDoc = await Tenant.findById(invoice.tenantId)
-      .select('digitalCheckin.agreementDetails.lateFee')
-      .lean();
+    const tenantDoc = prefetch.tenantDoc
+      || await Tenant.findById(invoice.tenantId)
+        .select('digitalCheckin.agreementDetails.lateFee')
+        .lean();
     const tenantLateFee = Number(tenantDoc?.digitalCheckin?.agreementDetails?.lateFee) || 0;
     if (tenantLateFee > 0) {
       config = {

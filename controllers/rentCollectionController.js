@@ -20,6 +20,26 @@ const { calculatePenalties, generatePreviewBreakdown } = require('../engine/pena
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Reply only if nothing has been sent yet.
+ *
+ * The request deadline (middleware/requestDeadline.js) can answer 503 while a
+ * handler is still working, and Node cannot cancel that handler — so its later
+ * res.json() throws ERR_HTTP_HEADERS_SENT. That throw lands in the handler's
+ * own catch, which responds again and throws a SECOND time, escaping to the
+ * Express error handler as noise that buries real failures. Guarding both ends
+ * turns it into one log line.
+ */
+function respondOnce(res, status, payload) {
+  if (res.headersSent || res.writableEnded) {
+    console.warn(`[rent-collection] response already sent; dropping ${status} reply`);
+    return false;
+  }
+  res.status(status).json(payload);
+  return true;
+}
+
+
 function getPerformedBy(req) {
   return req.user?.loginId || String(req.user?._id) || 'unknown';
 }
@@ -52,12 +72,12 @@ async function generateInvoices(req, res) {
     const ownerId = req.user._id;
     const { billingMonth, tenants } = req.body;
     if (!billingMonth || !Array.isArray(tenants)) {
-      return res.status(400).json({ success: false, message: 'billingMonth and tenants[] required' });
+      return respondOnce(res, 400, { success: false, message: 'billingMonth and tenants[] required' });
     }
     const result = await generateMonthlyInvoices(ownerId, billingMonth, tenants);
-    res.json({ success: true, ...result });
+    respondOnce(res, 200, { success: true, ...result });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondOnce(res, 500, { success: false, message: err.message });
   }
 }
 
