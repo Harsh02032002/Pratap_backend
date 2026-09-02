@@ -881,6 +881,9 @@ const ME_PROJECTION =
     ' gender dob guardianNumber emergencyContact' +
     ' policeVerification.status policeVerification.submittedAt' +
     ' moveoutRequest.status moveoutRequest.requestedDate moveoutRequest.reason moveoutRequest.submittedAt' +
+    ' moveoutRequest.approvedAt moveoutRequest.noticeEndDate moveoutRequest.completedAt' +
+    ' moveoutRequest.cancelledAt moveoutRequest.cancelReason' +
+    ' moveoutRequest.duesAtMoveout moveoutRequest.refundAmount moveoutRequest.refundStatus' +
     ' securityDepositTotal securityDepositPaid securityDepositBalance' +
     ' electricityCharge maintenanceCharge' +
     ' agreementSigned agreementSignedAt agreementESignName' +

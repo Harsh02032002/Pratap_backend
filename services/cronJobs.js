@@ -692,6 +692,49 @@ async function sendDelayedReminderEmail(rent, reminderNumber = 1) {
 }
 
 // Export functions
+// ── Move-out notice completion ───────────────────────────────────────────────
+// Runs daily. Any tenant whose one-month notice period (started the day the
+// owner approved their exit) has elapsed becomes an ex-tenant: their bed is
+// released, their panel login is revoked, and every outbound channel to them is
+// suppressed from that point on (see services/tenantCommsGuard.js).
+const moveoutCompletionSchedule = cron.schedule('0 1 * * *', async () => {
+    if (!Tenant) {
+        console.warn('⚠️  Skipping move-out completion job - dependencies not loaded');
+        return;
+    }
+    console.log('🔔 Running move-out notice completion job...');
+    try {
+        const { completeElapsedNotices } = require('./moveoutService');
+        const { clearCommsGuardCache } = require('./tenantCommsGuard');
+        const completed = await completeElapsedNotices();
+
+        for (const tenant of completed) {
+            console.log(`🚪 Move-out complete: ${tenant.name} (${tenant.loginId})`);
+
+            // Owner-side notice only. The tenant is now suppressed by the comms
+            // guard, so any message aimed at them here would be dropped anyway.
+            if (tenant.ownerLoginId && Notification) {
+                await Notification.create({
+                    toLoginId: tenant.ownerLoginId,
+                    from: 'system',
+                    type: 'system',
+                    meta: {
+                        title: `🚪 ${tenant.name} has moved out`,
+                        message: `${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) completed their 1-month notice period today. They have been moved to Ex-Tenants, their bed is now vacant, and their tenant panel access has been closed.`
+                    },
+                    read: false
+                }).catch((e) => console.error('Moveout completion notification failed:', e.message));
+            }
+        }
+
+        // Their reachability just changed; drop any cached "allowed" verdicts.
+        if (completed.length) clearCommsGuardCache();
+        console.log(`✅ Move-out completion job done — ${completed.length} tenant(s) moved out`);
+    } catch (err) {
+        console.error('❌ Move-out completion job failed:', err.message);
+    }
+});
+
 module.exports = {
     startCronJobs: () => {
         initDemoOwner(); // Ensure DEMO owner is ready
@@ -701,6 +744,7 @@ module.exports = {
         console.log('   - Delayed payment reminders: 9 AM, 2 PM, 6 PM (after 15th)');
         console.log('   - Auto reminders: Daily 10:30 AM (enabled manually per unpaid rent)');
         console.log('   - Agreement renewals: Daily 9 AM (10 and 11 month checks)');
+        console.log('   - Move-out notice completion: Daily 1 AM');
     },
     stopCronJobs: () => {
         demoResetSchedule.stop();
@@ -708,6 +752,7 @@ module.exports = {
         delayedReminderSchedule.stop();
         autoReminderSchedule.stop();
         agreementRenewalSchedule.stop();
+        moveoutCompletionSchedule.stop();
         console.log('🛑 Cron jobs stopped');
     }
 };

@@ -168,6 +168,20 @@ async function resolvePhoneByEmailOrUserId({ phone, email, userId }) {
 
 async function sendWhatsAppPayload(payload) {
     const cfg = getConfig();
+
+    // Ex-tenant guard — every WhatsApp sender in this module funnels through
+    // here, so this one check covers text, template, button and document sends.
+    // Fails open: a guard error must never block a legitimate message.
+    try {
+        const { isRecipientSuppressed } = require('../services/tenantCommsGuard');
+        if (payload?.to && await isRecipientSuppressed({ phone: payload.to })) {
+            console.log('[WhatsApp] Suppressed — recipient is an ex-tenant');
+            return false;
+        }
+    } catch (e) {
+        console.error('[WhatsApp] comms guard skipped:', e.message);
+    }
+
     if (!cfg.accessToken || !cfg.phoneNumberId || !payload) {
         console.warn('[WhatsApp] Missing config — accessToken:', !!cfg.accessToken, 'phoneNumberId:', !!cfg.phoneNumberId);
         return false;

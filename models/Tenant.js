@@ -136,7 +136,24 @@ const TenantSchema = new mongoose.Schema({
         submittedAt: { type: Date },
         duesAtMoveout: { type: Number, default: 0 },
         refundAmount: { type: Number, default: 0 },
-        refundStatus: { type: String, default: '' }
+        refundStatus: { type: String, default: '' },
+        // ── Notice period (set when the owner approves the exit) ──────────────
+        // The tenant is NOT an ex-tenant at approval time. They serve a fixed
+        // one-month notice starting the day the owner approves; `status` stays
+        // 'active' throughout so rent, ledger and room occupancy keep working.
+        // The daily job in services/cronJobs.js completes the exit once
+        // noticeEndDate passes. "On notice" is derived, never stored as a
+        // status value — adding one to the enum would silently drop these
+        // tenants out of every `status === 'active'` query in the codebase.
+        approvedAt: { type: Date },
+        noticeEndDate: { type: Date },
+        completedAt: { type: Date },
+        // Retained after the owner cancels a notice period. The rest of
+        // moveoutRequest is reset to a clean slate, but why the exit was called
+        // off is worth keeping for the tenant's history.
+        cancelledAt: { type: Date },
+        cancelReason: { type: String, default: '' },
+        cancelledBy: { type: String, default: '' }
     },
 
     // Onboarding Payment Tracking (Phase 4–6.5)
@@ -185,5 +202,11 @@ const TenantSchema = new mongoose.Schema({
 
 TenantSchema.index({ ownerLoginId: 1 });
 TenantSchema.index({ property: 1 });
+// Serves the nightly move-out completion job (services/moveoutService.js).
+TenantSchema.index({ 'moveoutRequest.status': 1, 'moveoutRequest.noticeEndDate': 1 });
+// Serves the ex-tenant communication guard (services/tenantCommsGuard.js),
+// which looks a recipient up by address on every outbound send.
+TenantSchema.index({ email: 1 });
+TenantSchema.index({ phone: 1 });
 
 module.exports = mongoose.models.Tenant || mongoose.model('Tenant', TenantSchema);

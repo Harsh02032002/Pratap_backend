@@ -6,6 +6,8 @@ const Property = require('../models/Property');
 const LedgerEntry = require('../models/LedgerEntry');
 const TenantFeedback = require('../models/TenantFeedback');
 const Rent = require('../models/Rent');
+const Notification = require('../models/Notification');
+const { calcNoticeEndDate } = require('../services/moveoutService');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const tenantController = require('../controllers/tenantController');
 const { auditTrail } = require('../middleware/auditTrail');
@@ -32,6 +34,15 @@ const ALWAYS_EXCLUDED =
     ' -agreementESignName';
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+// Escapes text interpolated into HTML emails. The cancellation reason is typed
+// by the owner, so it must not be able to inject markup into the tenant's mail.
+const escapeHtml = (v) => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 // Returns the authenticated caller's loginId, normalized to uppercase.
 // Always derived from the verified JWT payload — never from request input.
@@ -488,12 +499,35 @@ router.post(
                 }
             }
 
-            tenant.status = 'inactive';
+            // Approval starts a fixed one-month notice period; it does NOT make
+            // the tenant an ex-tenant yet. `status` deliberately stays 'active'
+            // so rent generation, the ledger and room occupancy keep treating
+            // them as a resident for the month they are still living there.
+            // services/cronJobs.js completes the exit once the notice elapses.
+            const approvedAt = new Date();
             tenant.moveoutRequest.status = 'approved';
+            tenant.moveoutRequest.approvedAt = approvedAt;
+            tenant.moveoutRequest.noticeEndDate = calcNoticeEndDate(approvedAt);
             tenant.moveoutRequest.duesAtMoveout = Number(duesAtMoveout) || 0;
             tenant.moveoutRequest.refundAmount = Number(refundAmount) || 0;
             tenant.moveoutRequest.refundStatus = refundStatus || 'cleared';
             await tenant.save();
+
+            // Tell the tenant when their notice ends while they can still be
+            // reached — comms are suppressed the moment the exit completes.
+            if (tenant.loginId) {
+                Notification.create({
+                    toLoginId: tenant.loginId,
+                    from: 'system',
+                    type: 'system',
+                    meta: {
+                        title: 'Move-out approved — 1 month notice period started',
+                        message: `Your move-out request has been approved. Your notice period runs until ${tenant.moveoutRequest.noticeEndDate.toDateString()}. Your tenant account stays active until then, after which it will be closed automatically.`
+                    },
+                    read: false
+                }).catch((e) => console.error('Moveout approval notification failed:', e.message));
+            }
+
             res.json({ success: true, tenant });
         } catch (err) {
             res.status(500).json({ message: err.message });
@@ -520,6 +554,100 @@ router.post(
 
             tenant.moveoutRequest.status = 'rejected';
             await tenant.save();
+            res.json({ success: true, tenant });
+        } catch (err) {
+            res.status(500).json({ message: err.message });
+        }
+    }
+);
+
+// ══ 12b. ADMIN/OWNER: CANCEL AN ACTIVE NOTICE PERIOD ════════════════════════
+// Reverses an approved move-out while the tenant is still serving notice: the
+// exit is called off entirely and the tenant returns to being an ordinary
+// resident. Only valid before the notice completes — once completeMoveout has
+// run the bed is released and possibly re-let, so undoing it is not safe here.
+router.post(
+    '/moveout/cancel',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    async (req, res) => {
+        try {
+            const { tenantId, reason } = req.body;
+            // Reason is optional — when the owner does give one it is stored and
+            // surfaced to the tenant on their Move-out Notice tab.
+            const cancelReason = String(reason || '').trim();
+
+            const tenant = await Tenant.findById(tenantId);
+            if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
+
+            if (req.user.role === 'owner') {
+                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+                }
+            }
+
+            if (tenant.moveoutRequest?.status !== 'approved' || tenant.moveoutRequest?.completedAt) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'This tenant is not currently serving a notice period.'
+                });
+            }
+
+            // Clear the whole move-out, not just the notice dates — the tenant
+            // goes back to a clean slate and would have to raise a fresh exit
+            // notice to leave.
+            tenant.moveoutRequest = {
+                status: 'none',
+                reason: '',
+                duesAtMoveout: 0,
+                refundAmount: 0,
+                refundStatus: '',
+                cancelledAt: new Date(),
+                cancelReason,
+                cancelledBy: callerLoginId(req)
+            };
+            tenant.status = 'active';
+            await tenant.save();
+
+            if (tenant.loginId) {
+                Notification.create({
+                    toLoginId: tenant.loginId,
+                    from: 'system',
+                    type: 'system',
+                    meta: {
+                        title: 'Move-out cancelled',
+                        message: `Your property owner has cancelled your move-out.${cancelReason ? ` Reason: "${cancelReason}".` : ''} Your notice period has been called off and your tenancy continues as normal. Raise a new move-out notice if you still wish to leave.`
+                    },
+                    read: false
+                }).catch((e) => console.error('Moveout cancel notification failed:', e.message));
+            }
+
+            // Email the tenant as well. Fire-and-forget: a mail failure must not
+            // roll back a cancellation that is already saved.
+            if (tenant.email) {
+                const { sendMail } = require('../utils/mailer');
+                const propertyName = tenant.propertyTitle || 'your property';
+                const reasonLine = cancelReason
+                    ? `<p style="margin:16px 0;padding:12px 16px;background:#fffbeb;border-left:3px solid #f59e0b;color:#78350f;"><b>Reason given by your owner:</b><br/>${escapeHtml(cancelReason)}</p>`
+                    : '';
+                sendMail(
+                    tenant.email,
+                    'Your move-out has been cancelled — RoomHy',
+                    `Dear ${tenant.name}, your property owner has cancelled your move-out at ${propertyName}.`
+                        + (cancelReason ? ` Reason: ${cancelReason}.` : '')
+                        + ' Your notice period has been called off and your tenancy continues as normal.'
+                        + ' Raise a new move-out notice from your tenant dashboard if you still wish to leave.',
+                    `<h2 style="color:#111;">Move-out Cancelled</h2>`
+                        + `<p>Dear ${escapeHtml(tenant.name || 'Tenant')},</p>`
+                        + `<p>Your property owner has <b>cancelled your move-out</b> at <b>${escapeHtml(propertyName)}</b>, and your one-month notice period has been called off.</p>`
+                        + reasonLine
+                        + `<p>Your tenancy continues as normal — your rent, ledger and room allocation are unchanged, and your tenant portal access stays active.</p>`
+                        + `<p>If you still wish to leave, you can raise a fresh move-out notice from the <b>Move-out Notice</b> section of your tenant dashboard.</p>`
+                        + `<br/><p>— RoomHy Team</p>`
+                ).catch((e) => console.error('Moveout cancel email failed:', e.message));
+            }
+
             res.json({ success: true, tenant });
         } catch (err) {
             res.status(500).json({ message: err.message });
