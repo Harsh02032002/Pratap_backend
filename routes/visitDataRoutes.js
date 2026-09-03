@@ -199,15 +199,49 @@ async function sendOwnerKycLink(visit) {
     const propertyLocationCode = String(ownerArea || visit.city || loginId).trim().toUpperCase();
     const occupancy = normalizeOccupancyFields(visit);
 
-    // Create/update Owner record so the digital-checkin page can look it up with ALL visit data prefilled
-    const ownerAddress = visit.address || visit.fullAddress || '';
-    const bankName = visit.bankName || '';
-    const branchName = visit.bankBranchName || '';
-    const bankAccountNumber = visit.bankAccountNumber || '';
-    const ifscCode = visit.bankIfscCode || '';
-    const accountHolderName = visit.bankAccountHolderName || ownerName;
-    const upiId = visit.bankUpiId || '';
+    // Carry what the employee already wrote down onto the Owner record, so the
+    // digital check-in page can prefill it. Without this the owner is asked to
+    // retype the address and bank details that are already on the visit report,
+    // and the page shows those fields blank under a "PRE-FILLED BY ROOMHY"
+    // heading.
+    //
+    // Gaps only. This function also backs the manual "Resend KYC" button, and by
+    // then the owner may have corrected these fields on the check-in page. The
+    // visit report is the employee's second-hand note; whatever the owner
+    // entered about their own bank account wins.
+    const existingOwner = await Owner.findOne({ loginId })
+        .select('phone profile address bankName branchName accountNumber ifscCode accountHolderName upiId ' +
+                'checkinPhone checkinAddress checkinBankName checkinBranchName ' +
+                'checkinBankAccountNumber checkinIfscCode checkinAccountHolderName checkinUpiId')
+        .lean();
 
+    const prefill = {};
+    const fillIfBlank = (field, value) => {
+        const next = String(value || '').trim();
+        if (next && !String(existingOwner?.[field] || '').trim()) prefill[field] = next;
+    };
+    fillIfBlank('checkinPhone', ownerPhone);
+    fillIfBlank('checkinAddress', visit.address || visit.fullAddress);
+    fillIfBlank('checkinBankName', visit.bankName);
+    fillIfBlank('checkinBranchName', visit.bankBranchName);
+    fillIfBlank('checkinBankAccountNumber', visit.bankAccountNumber);
+    fillIfBlank('checkinIfscCode', visit.bankIfscCode);
+    fillIfBlank('checkinAccountHolderName', visit.bankAccountHolderName || ownerName);
+    fillIfBlank('checkinUpiId', visit.bankUpiId);
+
+    fillIfBlank('address', visit.address || visit.fullAddress);
+    fillIfBlank('bankName', visit.bankName);
+    fillIfBlank('branchName', visit.bankBranchName);
+    fillIfBlank('accountNumber', visit.bankAccountNumber);
+    fillIfBlank('ifscCode', visit.bankIfscCode);
+    fillIfBlank('accountHolderName', visit.bankAccountHolderName || ownerName);
+    fillIfBlank('upiId', visit.bankUpiId);
+
+    // A visit with no owner phone must not blank out a number the owner already
+    // gave — this same line runs again on every resend.
+    const resolvedPhone = ownerPhone || existingOwner?.phone || existingOwner?.profile?.phone || '';
+
+    // Create/update Owner record so the digital-checkin page can look it up
     await Owner.findOneAndUpdate(
         { loginId },
         {
@@ -215,41 +249,25 @@ async function sendOwnerKycLink(visit) {
                 loginId,
                 name: ownerName,
                 email: ownerEmail,
-                phone: ownerPhone,
-                address: ownerAddress,
+                phone: resolvedPhone,
                 area: ownerArea,
                 locationCode: propertyLocationCode,
-                checkinAddress: ownerAddress,
-                checkinPhone: ownerPhone,
-                checkinArea: ownerArea,
-                checkinEmail: ownerEmail,
-                checkinBankName: bankName,
-                checkinBranchName: branchName,
-                checkinBankAccountNumber: bankAccountNumber,
-                checkinIfscCode: ifscCode,
-                checkinAccountHolderName: accountHolderName,
-                checkinUpiId: upiId,
-                bankName: bankName,
-                branchName: branchName,
-                accountNumber: bankAccountNumber,
-                ifscCode: ifscCode,
-                accountHolderName: accountHolderName,
-                upiId: upiId,
                 profile: {
                     name: ownerName,
                     email: ownerEmail,
-                    phone: ownerPhone,
-                    address: ownerAddress,
+                    phone: resolvedPhone,
+                    address: visit.address || visit.fullAddress || '',
                     locationCode: propertyLocationCode,
-                    bankName: bankName,
-                    accountNumber: bankAccountNumber,
-                    ifscCode: ifscCode,
-                    branchName: branchName,
-                    accountHolderName: accountHolderName,
-                    upiId: upiId,
+                    bankName: visit.bankName || '',
+                    accountNumber: visit.bankAccountNumber || '',
+                    ifscCode: visit.bankIfscCode || '',
+                    branchName: visit.bankBranchName || '',
+                    accountHolderName: visit.bankAccountHolderName || ownerName,
+                    upiId: visit.bankUpiId || '',
                     updatedAt: new Date()
                 },
                 ...occupancy,
+                ...prefill,
                 credentials: { password: tempPassword, firstTime: true },
                 checkinPassword: tempPassword,
                 isActive: true

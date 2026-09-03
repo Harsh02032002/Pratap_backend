@@ -877,6 +877,84 @@ router.post('/owner/final-submit', async (req, res) => {
     }
 });
 
+// Prefill for the owner's digital check-in page.
+//
+// The owner opens this page from an emailed link and has no session, so the
+// page cannot use GET /api/owners/:loginId — that route is behind `protect` and
+// answers 401, which the page swallows, leaving every field it did not get from
+// the URL blank. Hence a public route, mirroring the tenant one below.
+//
+// Public, but not open: a login ID is ROOMHY + 4 digits and therefore guessable,
+// and the response carries the owner's address and bank details. The temporary
+// password from the same emailed link has to match. Credentials are never
+// returned.
+router.get('/owner/profile/:loginId', async (req, res) => {
+    try {
+        const normalizedLoginId = String(req.params.loginId || '').trim().toUpperCase();
+        if (!normalizedLoginId) return res.status(400).json({ success: false, message: 'Missing loginId' });
+
+        const owner = await Owner.findOne({ loginId: normalizedLoginId }).lean();
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+        const supplied = String(req.query.password || '').trim();
+        const expected = String(owner.checkinPassword || owner.credentials?.password || '').trim();
+        if (!expected || supplied !== expected) {
+            return res.status(403).json({ success: false, message: 'Invalid check-in link' });
+        }
+
+        // Explicit allow-list. Returning `owner` wholesale would ship the
+        // password, internal KYC payloads and audit fields to an
+        // unauthenticated caller.
+        return res.json({
+            success: true,
+            owner: {
+                loginId: owner.loginId,
+                name: owner.name || '',
+                email: owner.email || '',
+                phone: owner.phone || '',
+                area: owner.area || '',
+                address: owner.address || '',
+                locationCode: owner.locationCode || '',
+                profile: {
+                    name: owner.profile?.name || '',
+                    email: owner.profile?.email || '',
+                    phone: owner.profile?.phone || '',
+                    address: owner.profile?.address || '',
+                    locationCode: owner.profile?.locationCode || ''
+                },
+                checkinEmail: owner.checkinEmail || '',
+                checkinDob: owner.checkinDob || '',
+                checkinPhone: owner.checkinPhone || '',
+                checkinAddress: owner.checkinAddress || '',
+                checkinArea: owner.checkinArea || '',
+                checkinAccountHolderName: owner.checkinAccountHolderName || '',
+                checkinUpiId: owner.checkinUpiId || '',
+                checkinBankAccountNumber: owner.checkinBankAccountNumber || '',
+                checkinIfscCode: owner.checkinIfscCode || '',
+                checkinBankName: owner.checkinBankName || '',
+                checkinBranchName: owner.checkinBranchName || '',
+                bankName: owner.bankName || '',
+                accountNumber: owner.accountNumber || '',
+                ifscCode: owner.ifscCode || '',
+                checkinAadhaarNumber: owner.checkinAadhaarNumber || '',
+                checkinAadhaarLinkedPhone: owner.checkinAadhaarLinkedPhone || '',
+                checkinOwnerPhoto: owner.checkinOwnerPhoto || '',
+                checkinBankProof: owner.checkinBankProof || '',
+                checkinAadhaarImage: owner.checkinAadhaarImage || '',
+                kyc: { status: owner.kyc?.status || '' },
+                vacantRooms: owner.vacantRooms ?? 0,
+                vacantBeds: owner.vacantBeds ?? 0,
+                occupiedRooms: owner.occupiedRooms ?? 0,
+                occupiedBeds: owner.occupiedBeds ?? 0,
+                roomInventory: owner.roomInventory || []
+            }
+        });
+    } catch (err) {
+        console.error('owner/profile GET error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 router.get('/tenant/profile/:loginId', async (req, res) => {
     try {
         const normalizedLoginId = String(req.params.loginId || '').toUpperCase();
