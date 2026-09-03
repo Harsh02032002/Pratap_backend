@@ -137,7 +137,7 @@ router.post('/create', async (req, res) => {
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 
 router.get('/inbox/:login_id', protect, chatController.getInbox);
-router.get('/all-chats', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, chatController.getAllChats);
+router.get('/all-chats', protect, authorize('superadmin', 'areamanager', 'employee', 'manager', 'owner', 'tenant', 'website_user'), applyEmployeeScope, chatController.getAllChats);
 router.get('/messages/:room_id', protect, chatController.getMessages);
 router.get('/conversation', protect, chatController.getConversation);
 router.post('/mark-read/:room_id', protect, chatLimiter, chatController.markAsRead);

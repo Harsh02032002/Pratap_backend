@@ -199,7 +199,15 @@ async function sendOwnerKycLink(visit) {
     const propertyLocationCode = String(ownerArea || visit.city || loginId).trim().toUpperCase();
     const occupancy = normalizeOccupancyFields(visit);
 
-    // Create/update Owner record so the digital-checkin page can look it up
+    // Create/update Owner record so the digital-checkin page can look it up with ALL visit data prefilled
+    const ownerAddress = visit.address || visit.fullAddress || '';
+    const bankName = visit.bankName || '';
+    const branchName = visit.bankBranchName || '';
+    const bankAccountNumber = visit.bankAccountNumber || '';
+    const ifscCode = visit.bankIfscCode || '';
+    const accountHolderName = visit.bankAccountHolderName || ownerName;
+    const upiId = visit.bankUpiId || '';
+
     await Owner.findOneAndUpdate(
         { loginId },
         {
@@ -208,9 +216,39 @@ async function sendOwnerKycLink(visit) {
                 name: ownerName,
                 email: ownerEmail,
                 phone: ownerPhone,
+                address: ownerAddress,
                 area: ownerArea,
                 locationCode: propertyLocationCode,
-                profile: { name: ownerName, email: ownerEmail, phone: ownerPhone, locationCode: propertyLocationCode, updatedAt: new Date() },
+                checkinAddress: ownerAddress,
+                checkinPhone: ownerPhone,
+                checkinArea: ownerArea,
+                checkinEmail: ownerEmail,
+                checkinBankName: bankName,
+                checkinBranchName: branchName,
+                checkinBankAccountNumber: bankAccountNumber,
+                checkinIfscCode: ifscCode,
+                checkinAccountHolderName: accountHolderName,
+                checkinUpiId: upiId,
+                bankName: bankName,
+                branchName: branchName,
+                accountNumber: bankAccountNumber,
+                ifscCode: ifscCode,
+                accountHolderName: accountHolderName,
+                upiId: upiId,
+                profile: {
+                    name: ownerName,
+                    email: ownerEmail,
+                    phone: ownerPhone,
+                    address: ownerAddress,
+                    locationCode: propertyLocationCode,
+                    bankName: bankName,
+                    accountNumber: bankAccountNumber,
+                    ifscCode: ifscCode,
+                    branchName: branchName,
+                    accountHolderName: accountHolderName,
+                    upiId: upiId,
+                    updatedAt: new Date()
+                },
                 ...occupancy,
                 credentials: { password: tempPassword, firstTime: true },
                 checkinPassword: tempPassword,
@@ -586,147 +624,32 @@ router.post('/', protect, authorize('superadmin', 'employee', 'manager', 'areama
 // Used by Area Manager / Employee dashboard
 // Supports optional ?staffId / ?staffName parameters to filter by staff
 // ============================================================
-router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
+router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areamanager', 'owner'), async (req, res) => {
     try {
         const requester = await resolveRequestUser(req);
-        const requestedStaffId = String(req.query.staffId || '').trim();
-        const requestedStaffName = (req.query.staffName || '').toString().trim();
-
-        const isEmployee = requester?.role === 'employee' || requester?.role === 'staff' || requester?.role === 'areamanager';
-        const enforcedStaffId = isEmployee
-            ? String(requester?.loginId || requestedStaffId || '').trim()
-            : requestedStaffId;
-
-        const staffId = enforcedStaffId;
-        const staffName = isEmployee ? (requester?.name || requestedStaffName) : (staffId ? '' : requestedStaffName);
         const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
         const skip = Math.max(0, parseInt(req.query.skip, 10) || 0);
 
-        const cacheKey = JSON.stringify({ staffId, staffName, limit, skip, empRole: requester?.role, empCity: requester?.city, empArea: requester?.area });
+        // Fetch all visit reports for staff / employee / area admin view without stale cache
+        const visitsQuery = VisitData.find({})
+            .sort({ submittedAt: -1 })
+            .limit(limit)
+            .skip(skip)
+            .maxTimeMS(VISITS_QUERY_TIMEOUT_MS)
+            .lean();
 
-        let query = {};
-        let usesCaseInsensitiveMatch = false;
+        const countQuery = VisitData.countDocuments({}).maxTimeMS(VISITS_QUERY_TIMEOUT_MS);
+        const [visits, totalCount] = await Promise.all([visitsQuery, countQuery]);
 
-        if (isEmployee && requester) {
-            const empCity = (requester.city || '').trim();
-            const empArea = (requester.area || requester.areaCode || '').trim();
+        await syncVisitKycStatus(visits);
 
-            const employeeFilters = [];
-
-            // 1. Explicitly assigned by staffId / loginId
-            if (staffId) {
-                const idValues = uniqueTruthy([
-                    staffId,
-                    String(staffId).toUpperCase(),
-                    String(staffId).toLowerCase()
-                ]);
-                employeeFilters.push(
-                    { staffId: { $in: idValues } },
-                    { submittedById: { $in: idValues } },
-                    { submittedByLoginId: { $in: idValues } }
-                );
-            }
-
-            // 2. City & Area matching for new verification requests in employee's assigned area
-            if (empCity) {
-                usesCaseInsensitiveMatch = true;
-                const cityRegex = new RegExp(`^${escapeRegex(empCity)}$`, 'i');
-                if (empArea) {
-                    const areaRegex = new RegExp(`^${escapeRegex(empArea)}$`, 'i');
-                    employeeFilters.push({
-                        city: cityRegex,
-                        $or: [
-                            { area: areaRegex },
-                            { landmark: areaRegex }
-                        ]
-                    });
-                } else {
-                    employeeFilters.push({ city: cityRegex });
-                }
-            }
-
-            // 3. Explicitly assigned properties
-            if (requester.assignedProperties && requester.assignedProperties.length > 0) {
-                employeeFilters.push({ _id: { $in: requester.assignedProperties } });
-            }
-
-            query = employeeFilters.length ? { $or: employeeFilters } : { staffId: staffId || 'NONE' };
-            console.log('[visits/GET] Fetching visits for employee with area scope:', {
-                staffId,
-                empCity,
-                empArea,
-                filtersCount: employeeFilters.length
-            });
-        } else if (staffId || staffName) {
-            const or = [];
-            if (staffId) {
-                const idValues = uniqueTruthy([
-                    staffId,
-                    String(staffId).toUpperCase(),
-                    String(staffId).toLowerCase()
-                ]);
-                or.push(
-                    { staffId: { $in: idValues } },
-                    { submittedById: { $in: idValues } },
-                    { submittedByLoginId: { $in: idValues } },
-                    { ownerLoginId: { $in: idValues } }
-                );
-            }
-            if (staffName) {
-                usesCaseInsensitiveMatch = true;
-                const nameRegex = new RegExp(`^${escapeRegex(staffName)}$`, 'i');
-                or.push(
-                    { staffName: nameRegex },
-                    { submittedBy: nameRegex }
-                );
-            }
-            query = or.length ? { $or: or } : {};
-            console.log('[visits/GET] Fetching visits for superadmin staff filter:', { staffId, staffName });
-        } else {
-            console.log('[visits/GET] Fetching all visits (Superadmin access)');
-        }
-
-        const fetchVisits = async () => {
-            const visitsQuery = VisitData.find(query)
-                .sort({ submittedAt: -1 })
-                .limit(limit)
-                .skip(skip)
-                .maxTimeMS(VISITS_QUERY_TIMEOUT_MS)
-                .lean();
-
-            const countQuery = VisitData.countDocuments(query).maxTimeMS(VISITS_QUERY_TIMEOUT_MS);
-
-            if (usesCaseInsensitiveMatch) {
-                const collation = { locale: 'en', strength: 2 };
-                visitsQuery.collation(collation);
-                countQuery.collation(collation);
-            }
-
-            const [visits, totalCount] = await Promise.all([visitsQuery, countQuery]);
-
-            // Refresh kycStatus from the owners' digital check-in progress so the
-            // superadmin Approve button reflects reality on this list.
-            await syncVisitKycStatus(visits);
-
-            console.log(`? [visits/GET] Returning ${visits.length} visits from ${totalCount} total (limit: ${limit}, skip: ${skip})`);
-            return {
-                success: true,
-                count: totalCount,
-                returned: visits.length,
-                visits
-            };
-        };
-
-        let requestPromise = visitsListInFlight.get(cacheKey);
-        if (!requestPromise) {
-            requestPromise = fetchVisits();
-            visitsListInFlight.set(cacheKey, requestPromise);
-        }
-
-        const payload = await requestPromise;
-        visitsListInFlight.delete(cacheKey);
-        visitsListCache.set(cacheKey, { timestamp: Date.now(), payload });
-        res.json(payload);
+        console.log(`✅ [visits/GET] Returning all ${visits.length} visits from ${totalCount} total in MongoDB`);
+        return res.json({
+            success: true,
+            count: totalCount,
+            returned: visits.length,
+            visits
+        });
     } catch (error) {
         console.error('Error fetching visits:', error);
         const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
@@ -960,9 +883,27 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
-        // Every photo on the report goes to the listing — live captures and
-        // uploads alike are treated the same.
-        const propertyPhotos = Array.isArray(visit.photos) ? visit.photos : [];
+        const photoDetails = Array.isArray(visit.photoDetails) ? visit.photoDetails : [];
+        const cameraPhotoUrls = new Set(
+            photoDetails
+                .filter(d => d && (d.source === 'camera' || d.isLiveCapture || d.type === 'camera' || d.isCamera === true))
+                .map(d => d.url)
+                .filter(Boolean)
+        );
+
+        (visit.propertyViews || []).forEach((view) => {
+            const label = String(view?.label || '').toLowerCase();
+            if (label.includes('camera') || label.includes('live')) {
+                (view.images || []).forEach((url) => { if (url) cameraPhotoUrls.add(url); });
+            }
+        });
+
+        const allPhotos = Array.isArray(visit.photos) ? visit.photos : [];
+        const uploadedGalleryPhotos = allPhotos.filter(url => url && !cameraPhotoUrls.has(url));
+
+        // Use uploaded gallery photos for public property listing (exclude live camera captures)
+        const propertyPhotos = uploadedGalleryPhotos;
+        const featuredImage = propertyPhotos[0] || '';
 
         let ownerProperty = await Property.findOne({
             ownerLoginId: finalLoginId,
@@ -971,19 +912,9 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
 
         if (!ownerProperty) {
             ownerProperty = await Property.create({
-                // Link the Property back to the visit it came from.
-                //
-                // syncToApprovedProperty() keys on `property.visitId || _id`, and
-                // a Property created here had no visitId — so it could never match
-                // the ApprovedProperty this same approval had just created under
-                // the visit's id. Editing the property later therefore inserted a
-                // SECOND listing instead of updating the first, and the same
-                // property appeared twice on the website.
                 visitId: String(visit._id || visit.visitId),
-                // The website gallery reads Property.images. Nothing was ever
-                // writing it, so every approved property published with an empty
-                // gallery while its photos sat in ApprovedProperty.
                 images: propertyPhotos,
+                featuredImage: featuredImage,
                 title: propertyTitle,
                 description: visit.description || '',
                 address: propertyAddress,
@@ -999,7 +930,8 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                 locationCode: propertyLocationCode || 'GEN',
                 ownerLoginId: finalLoginId,
                 status: 'active',
-                isPublished: propertyHasVacancy,
+                isPublished: true,
+                isLiveOnWebsite: true,
                 roomTypes: visit.roomTypes || []
             });
         } else {
@@ -1021,15 +953,13 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             ownerProperty.locationCode = propertyLocationCode || ownerProperty.locationCode || 'GEN';
             ownerProperty.ownerLoginId = finalLoginId;
             ownerProperty.status = 'active';
-            ownerProperty.isPublished = propertyHasVacancy;
+            ownerProperty.isPublished = true;
+            ownerProperty.isLiveOnWebsite = true;
             if (visit.roomTypes && visit.roomTypes.length > 0) {
                 ownerProperty.roomTypes = visit.roomTypes;
             }
-            // Only overwrite when this visit actually carries listing photos, so
-            // re-approving a report whose uploads were removed cannot blank a
-            // gallery that is already live.
-            if (propertyPhotos.length) ownerProperty.images = propertyPhotos;
-            // Backfill the link on properties created before it was set.
+            ownerProperty.images = propertyPhotos;
+            if (featuredImage) ownerProperty.featuredImage = featuredImage;
             if (!ownerProperty.visitId) ownerProperty.visitId = String(visit._id || visit.visitId);
             await ownerProperty.save();
         }
@@ -1040,15 +970,15 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             const propData = {
                 visitId: visit._id || visit.visitId,
                 tier,
+                images: propertyPhotos,
+                featuredImage: featuredImage,
                 propertyInfo: {
                     name: visit.propertyName || (visit.propertyInfo && visit.propertyInfo.name) || 'Property',
                     address: visit.address || (visit.propertyInfo && visit.propertyInfo.address) || '',
                     city: visit.city || (visit.propertyInfo && visit.propertyInfo.city) || '',
                     area: visit.area || (visit.propertyInfo && visit.propertyInfo.area) || '',
                     locationCode: propertyLocationCode,
-                    photos: propertyPhotos.length
-                        ? propertyPhotos
-                        : ((visit.propertyInfo && visit.propertyInfo.photos) || []),
+                    photos: propertyPhotos,
                     ownerName: visit.ownerName || (visit.propertyInfo && visit.propertyInfo.ownerName) || '',
                     ownerPhone: visit.ownerPhone || visit.contactPhone || (visit.propertyInfo && visit.propertyInfo.contactPhone) || '',
                     ownerEmail: visit.ownerEmail || (visit.propertyInfo && visit.propertyInfo.ownerEmail) || '',
@@ -1068,8 +998,8 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
                     tempPassword: finalPassword
                 },
                 propertyRef: ownerProperty._id,
-                isLiveOnWebsite: propertyHasVacancy ? Boolean(isLiveOnWebsite) : false,
-                status: propertyHasVacancy && isLiveOnWebsite ? 'live' : 'approved',
+                isLiveOnWebsite: true,
+                status: 'live',
                 approvedAt: new Date(),
                 submittedAt: visit.submittedAt || new Date(),
                 approvedBy: 'superadmin'
@@ -1187,7 +1117,11 @@ router.post('/hold', protect, authorize('superadmin', 'employee', 'manager', 'ar
 // POST: Submit a new visit
 // Supports both old (Area Manager) and new (clean form) formats
 // ============================================================
-router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', 'areamanager'), async (req, res) => {
+router.post('/submit', protect, authorize(
+    'superadmin', 'employee', 'manager', 'areamanager',
+    'area_manager', 'area_admin', 'staff', 'field_executive', 'verification_officer',
+    'owner', 'tenant', 'website_user', 'user'
+), async (req, res) => {
     try {
         let {
             visitorName,
@@ -1313,6 +1247,71 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
             });
         }
 
+        // Check if an existing VisitData report already exists for this visitId (Edit Mode)
+        const mongoose = require('mongoose');
+        const existingVisit = await VisitData.findOne({
+            $or: [
+                { visitId: visitId },
+                (req.body._id && mongoose.Types.ObjectId.isValid(req.body._id)) ? { _id: req.body._id } : null
+            ].filter(Boolean)
+        });
+
+        if (existingVisit) {
+            console.log(`📝 [visits/submit] Updating existing visit report ${existingVisit.visitId}`);
+            const updateData = {
+                visitorName: visitorName || staffName || existingVisit.visitorName,
+                visitorEmail: visitorEmail || existingVisit.visitorEmail,
+                visitorPhone: visitorPhone || existingVisit.visitorPhone,
+                propertyName: propertyName || existingVisit.propertyName,
+                propertyType: propertyType || existingVisit.propertyType,
+                state: state || existingVisit.state,
+                city: city || existingVisit.city,
+                area: area || existingVisit.area,
+                address: address || existingVisit.address,
+                pincode: pincode || existingVisit.pincode,
+                description: description || existingVisit.description,
+                amenities: (amenities && Array.isArray(amenities)) ? amenities : existingVisit.amenities,
+                genderSuitability: genderSuitability || existingVisit.genderSuitability,
+                monthlyRent: parseInt(monthlyRent) || existingVisit.monthlyRent,
+                deposit: deposit || existingVisit.deposit,
+                ...normalizeOccupancyFields({ vacantRooms, occupiedRooms, occupiedBeds }),
+                ownerName: ownerName || existingVisit.ownerName,
+                ownerEmail: ownerEmail || existingVisit.ownerEmail,
+                ownerPhone: ownerPhone || existingVisit.ownerPhone,
+                ownerCity: ownerCity || city || existingVisit.ownerCity,
+                contactPhone: contactPhone || ownerPhone || visitorPhone || existingVisit.contactPhone,
+                photos: (photos && Array.isArray(photos) && photos.length > 0) ? photos : existingVisit.photos,
+                professionalPhotos: (professionalPhotos && Array.isArray(professionalPhotos)) ? professionalPhotos : existingVisit.professionalPhotos,
+                photoTimestamps: photoTimestamps || existingVisit.photoTimestamps,
+                photoDetails: (photoDetails && Array.isArray(photoDetails) && photoDetails.length > 0) ? photoDetails : existingVisit.photoDetails,
+                propertyViews: (req.body.propertyViews && Array.isArray(req.body.propertyViews) && req.body.propertyViews.length > 0) ? req.body.propertyViews : existingVisit.propertyViews,
+                roomTypes: (roomTypes && Array.isArray(roomTypes) && roomTypes.length > 0) ? roomTypes : existingVisit.roomTypes,
+                bankAccountHolderName: bankAccountHolderName || existingVisit.bankAccountHolderName,
+                bankAccountNumber: bankAccountNumber || existingVisit.bankAccountNumber,
+                bankIfscCode: bankIfscCode || existingVisit.bankIfscCode,
+                bankName: bankName || existingVisit.bankName,
+                bankBranchName: bankBranchName || existingVisit.bankBranchName,
+                bankUpiId: bankUpiId || existingVisit.bankUpiId,
+                updatedAt: new Date()
+            };
+
+            const updatedVisit = await VisitData.findOneAndUpdate(
+                { _id: existingVisit._id },
+                { $set: updateData },
+                { new: true }
+            );
+
+            invalidateVisitsList();
+
+            return respondOnce(res, 200, {
+                success: true,
+                message: 'Visit report updated successfully',
+                visitId: updatedVisit.visitId,
+                isUpdate: true,
+                data: updatedVisit
+            });
+        }
+
         // Create new visit
         const visit = new VisitData({
             visitId,
@@ -1341,6 +1340,7 @@ router.post('/submit', protect, authorize('superadmin', 'employee', 'manager', '
             professionalPhotos: (professionalPhotos && Array.isArray(professionalPhotos)) ? professionalPhotos : (professionalPhotos ? [professionalPhotos] : []),
             photoTimestamps: photoTimestamps || {},
             photoDetails: (photoDetails && Array.isArray(photoDetails)) ? photoDetails : [],
+            propertyViews: (req.body.propertyViews && Array.isArray(req.body.propertyViews)) ? req.body.propertyViews : [],
             roomTypes: (roomTypes && Array.isArray(roomTypes)) ? roomTypes : [],
             bankAccountHolderName: bankAccountHolderName || '',
             bankAccountNumber: bankAccountNumber || '',
@@ -1681,7 +1681,7 @@ router.put('/:visitId/status', protect, authorize('superadmin', 'employee', 'man
 // ============================================================
 // PUT: Update full visit details (moved after status route to avoid interception)
 // ============================================================
-router.put('/:visitId', protect, authorize('employee', 'manager', 'areamanager'), async (req, res) => {
+router.put('/:visitId', protect, authorize('employee', 'manager', 'areamanager', 'superadmin', 'owner', 'tenant', 'website_user', 'user'), async (req, res) => {
     try {
         const {
             propertyName,

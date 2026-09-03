@@ -837,12 +837,14 @@ exports.getOwnerById = async (req, res) => {
             .select('visitId isLiveOnWebsite status')
             .lean();
 
-        // Fallback: read bank fields from VisitData if Owner checkin fields are missing
+        // Fallback: read bank, phone, address, location & occupancy fields from VisitData if Owner checkin fields are missing
         const VisitData = require('../models/VisitData');
-        const visitForBank = await VisitData.findOne({ 'generatedCredentials.loginId': normalizedLoginId })
-            .select('bankAccountHolderName bankAccountNumber bankIfscCode bankName bankBranchName bankUpiId ownerPhone contactPhone')
-            .sort({ updatedAt: -1 })
-            .lean();
+        const visitForBank = await VisitData.findOne({
+            $or: [
+                { 'generatedCredentials.loginId': normalizedLoginId },
+                { visitId: normalizedLoginId }
+            ]
+        }).sort({ updatedAt: -1 }).lean();
 
         const checkin = await CheckinRecord.findOne({ role: 'owner', loginId: normalizedLoginId }).lean();
         const primaryProperty = await Property.findOne({ ownerLoginId: normalizedLoginId })
@@ -850,26 +852,36 @@ exports.getOwnerById = async (req, res) => {
             .select('title locationCode')
             .lean();
 
+        const visitPhone = visitForBank?.ownerPhone || visitForBank?.visitorPhone || visitForBank?.contactPhone || '';
+        const visitAddress = visitForBank?.address || visitForBank?.fullAddress || '';
+        const visitArea = visitForBank?.area || visitForBank?.areaLocality || visitForBank?.city || '';
+        const visitEmail = visitForBank?.ownerEmail || visitForBank?.visitorEmail || '';
+        const visitName = visitForBank?.ownerName || visitForBank?.visitorName || '';
+
         const checkinBankName = owner.checkinBankName || checkin?.ownerProfile?.payment?.bankName || owner.bankName || visitForBank?.bankName || '';
         const checkinBranchName = owner.checkinBranchName || checkin?.ownerProfile?.payment?.branchName || owner.branchName || visitForBank?.bankBranchName || '';
         const checkinBankAccountNumber = owner.checkinBankAccountNumber || checkin?.ownerProfile?.payment?.bankAccountNumber || visitForBank?.bankAccountNumber || '';
         const checkinIfscCode = owner.checkinIfscCode || checkin?.ownerProfile?.payment?.ifscCode || visitForBank?.bankIfscCode || '';
-        const checkinAccountHolderName = owner.checkinAccountHolderName || checkin?.ownerProfile?.payment?.accountHolderName || visitForBank?.bankAccountHolderName || '';
+        const checkinAccountHolderName = owner.checkinAccountHolderName || checkin?.ownerProfile?.payment?.accountHolderName || visitForBank?.bankAccountHolderName || visitName || '';
         const checkinUpiId = owner.checkinUpiId || checkin?.ownerProfile?.payment?.upiId || visitForBank?.bankUpiId || '';
         const bankLockedByVisit = !!owner.bankLockedByVisit || !!(visitForBank?.bankName || visitForBank?.bankAccountNumber);
-        const visitPhone = visitForBank?.ownerPhone || visitForBank?.contactPhone || '';
         const phoneLockedByVisit = !!visitPhone;
+
+        const vacantRooms = Number(owner.vacantRooms ?? visitForBank?.vacantRooms ?? 0);
+        const occupiedRooms = Number(owner.occupiedRooms ?? visitForBank?.occupiedRooms ?? 0);
+        const vacantBeds = Number(owner.vacantBeds ?? visitForBank?.vacantBeds ?? (vacantRooms * 1));
+        const occupiedBeds = Number(owner.occupiedBeds ?? visitForBank?.occupiedBeds ?? (occupiedRooms * 1));
 
         res.json({
             ...owner,
-            propertyTitle: primaryProperty?.title || '',
-            propertyName: primaryProperty?.title || '',
-            propertyLocationCode: primaryProperty?.locationCode || '',
-            name: owner.profile?.name || owner.name || 'Unknown',
-            email: owner.profile?.email || owner.email || owner.checkinEmail || (checkin?.ownerProfile?.email || ''),
-            phone: owner.profile?.phone || owner.phone || owner.checkinPhone || (checkin?.ownerProfile?.phone || ''),
-            address: owner.profile?.address || owner.address || owner.checkinAddress || (checkin?.ownerProfile?.address || ''),
-            locationCode: owner.profile?.locationCode || owner.locationCode || owner.checkinArea || (checkin?.ownerProfile?.area || ''),
+            propertyTitle: primaryProperty?.title || visitForBank?.propertyName || '',
+            propertyName: primaryProperty?.title || visitForBank?.propertyName || '',
+            propertyLocationCode: primaryProperty?.locationCode || visitArea || '',
+            name: owner.profile?.name || owner.name || visitName || 'Unknown',
+            email: owner.profile?.email || owner.email || owner.checkinEmail || visitEmail || (checkin?.ownerProfile?.email || ''),
+            phone: owner.profile?.phone || owner.phone || owner.checkinPhone || visitPhone || (checkin?.ownerProfile?.phone || ''),
+            address: owner.profile?.address || owner.address || owner.checkinAddress || visitAddress || (checkin?.ownerProfile?.address || ''),
+            locationCode: owner.profile?.locationCode || owner.locationCode || owner.checkinArea || visitArea || (checkin?.ownerProfile?.area || ''),
             bankName: owner.profile?.bankName || checkinBankName || '',
             accountNumber: owner.profile?.accountNumber || owner.accountNumber || checkinBankAccountNumber || '',
             ifscCode: owner.profile?.ifscCode || owner.ifscCode || checkinIfscCode || '',
@@ -880,16 +892,21 @@ exports.getOwnerById = async (req, res) => {
             profileFilled: !!owner.profileFilled,
             password: owner.credentials?.password || owner.checkinPassword || '',
             checkinDob: owner.checkinDob || checkin?.ownerProfile?.dob || '',
-            checkinEmail: owner.checkinEmail || checkin?.ownerProfile?.email || owner.email || '',
-            checkinPhone: owner.checkinPhone || checkin?.ownerProfile?.phone || owner.phone || '',
-            checkinAddress: owner.checkinAddress || checkin?.ownerProfile?.address || owner.address || '',
-            checkinArea: owner.checkinArea || checkin?.ownerProfile?.area || owner.locationCode || '',
+            checkinEmail: owner.checkinEmail || checkin?.ownerProfile?.email || owner.email || visitEmail || '',
+            checkinPhone: owner.checkinPhone || checkin?.ownerProfile?.phone || owner.phone || visitPhone || '',
+            checkinAddress: owner.checkinAddress || checkin?.ownerProfile?.address || owner.address || visitAddress || '',
+            checkinArea: owner.checkinArea || checkin?.ownerProfile?.area || owner.locationCode || visitArea || '',
             checkinAccountHolderName,
             checkinBankAccountNumber,
             checkinIfscCode,
             checkinBankName,
             checkinBranchName,
             checkinUpiId,
+            vacantRooms,
+            occupiedRooms,
+            vacantBeds,
+            occupiedBeds,
+            roomTypes: (owner.roomTypes && owner.roomTypes.length) ? owner.roomTypes : ((primaryProperty && primaryProperty.roomTypes && primaryProperty.roomTypes.length) ? primaryProperty.roomTypes : ((approvedProperty && approvedProperty.roomTypes && approvedProperty.roomTypes.length) ? approvedProperty.roomTypes : (visitForBank?.roomTypes || []))),
             bankLockedByVisit,
             phoneLockedByVisit,
             checkinAadhaarLinkedPhone: owner.checkinAadhaarLinkedPhone || checkin?.ownerKyc?.aadhaarLinkedPhone || owner.kyc?.aadhaarLinkedPhone || visitPhone || '',

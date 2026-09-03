@@ -6,9 +6,56 @@ const Owner = require('../models/Owner');
 const User = require('../models/user');
 const BookingRequest = require('../models/BookingRequest');
 const jwt = require('jsonwebtoken');
-const { generateWebsiteUserIdFromEmail, buildChatLookupVariants } = require('../utils/chatIdentity');
+const { generateWebsiteUserIdFromEmail, buildChatLookupVariants, canonicalChatId } = require('../utils/chatIdentity');
 
 const normalizeLoginId = (value) => String(value || '').trim();
+
+/**
+ * Every raw id the conversation partner has actually been written under.
+ *
+ * getInbox now folds a website user's email form and their email-hash form into
+ * ONE row (see canonicalChatId), and the row carries the hash — so the owner
+ * opens the thread as user2 = roomhyweb541955. But that person's own replies
+ * are stored with sender_login_id = harshdeepbca503@gmail.com, and a hash
+ * cannot be reversed into an email. Without this expansion the merged thread
+ * would render only half of itself: the owner's side, and none of the tenant's.
+ *
+ * Rather than guess at emails, this reads back the ids this conversation has
+ * genuinely used and keeps the ones that canonicalise to the same person. Both
+ * `distinct` calls are bounded by how many people `selfVariants` has ever
+ * talked to, and both run against indexed fields.
+ *
+ * @param {string[]} partnerVariants variants already derived for the partner
+ * @param {string}   partnerId       the id the caller asked for
+ * @param {string[]} selfVariants    variants of the caller
+ * @returns {Promise<string[]>} partnerVariants plus every equivalent stored id
+ */
+async function expandPartnerVariants(partnerVariants, partnerId, selfVariants) {
+  const canonical = canonicalChatId(partnerId);
+  if (!canonical) return partnerVariants;
+
+  const found = new Set(partnerVariants);
+  try {
+    const [senders, rooms] = await Promise.all([
+      ChatMessage.distinct('sender_login_id', { room_id: { $in: selfVariants } }),
+      ChatMessage.distinct('room_id', { sender_login_id: { $in: selfVariants } })
+    ]);
+
+    for (const raw of [...senders, ...rooms]) {
+      const value = normalizeLoginId(raw);
+      if (!value || canonicalChatId(value) !== canonical) continue;
+      found.add(value);
+      found.add(value.toLowerCase());
+      found.add(value.toUpperCase());
+    }
+  } catch (err) {
+    // A failure here must narrow nothing — fall back to the plain variants.
+    console.warn('expandPartnerVariants failed, using base variants:', err.message);
+    return partnerVariants;
+  }
+
+  return Array.from(found);
+}
 
 function isCallerIdMatch(user, targetId) {
     if (!user || !targetId) return false;
@@ -117,22 +164,42 @@ exports.getInbox = async (req, res) => {
       const sender = normalizeLoginId(msg.sender_login_id);
       const receiver = normalizeLoginId(msg.room_id);
       const isOutgoing = loginVariants.includes(sender);
-      let partnerId = isOutgoing ? receiver : sender;
+      let rawPartnerId = isOutgoing ? receiver : sender;
 
-      // Prevent owner self-matching (if partnerId matches owner loginVariants)
-      if (loginVariants.includes(partnerId)) {
+      // Welcome/system messages are stored in each participant's room with a
+      // conversation_id like OWNER:ROOMHYWEB123456. Use that pair to find the
+      // real participant; treating "system" as the partner hides the welcome
+      // message and prevents the inbox/unread badge from being created.
+      if (sender.toLowerCase() === 'system' && msg.conversation_id?.includes(':')) {
+        const other = msg.conversation_id
+          .split(':')
+          .map((value) => normalizeLoginId(value))
+          .find((value) => value && !loginVariants.includes(value) && value.toLowerCase() !== 'system');
+        if (other) rawPartnerId = other;
+      }
+
+      // Prevent owner self-matching (if rawPartnerId matches owner loginVariants)
+      if (loginVariants.includes(rawPartnerId)) {
         if (loginVariants.includes(sender) && !loginVariants.includes(receiver)) {
-          partnerId = receiver;
+          rawPartnerId = receiver;
         } else if (loginVariants.includes(receiver) && !loginVariants.includes(sender)) {
-          partnerId = sender;
+          rawPartnerId = sender;
         } else if (msg.conversation_id && msg.conversation_id.includes(':')) {
           const parts = msg.conversation_id.split(':');
           const other = parts.find(p => !loginVariants.includes(p.toUpperCase()) && !loginVariants.includes(p.toLowerCase()));
-          if (other) partnerId = other;
+          if (other) rawPartnerId = other;
         }
       }
 
-      if (!partnerId || loginVariants.includes(partnerId) || partnerId.toLowerCase() === 'system') continue;
+      if (!rawPartnerId || loginVariants.includes(rawPartnerId) || rawPartnerId.toLowerCase() === 'system') continue;
+
+      // One person, one row. Messages for the same website user are stored
+      // under whichever id the writing path happened to use — their email on
+      // the messages they send themselves, the email hash on everything the
+      // lead-accept / chat-create paths write. Keying the summary on the raw
+      // string listed that person twice, and the owner's reply then went to
+      // whichever of the two rows they clicked. See canonicalChatId.
+      const partnerId = canonicalChatId(rawPartnerId) || rawPartnerId;
 
       const existing = summaryMap.get(partnerId) || {
         participant_login_id: partnerId,
@@ -150,7 +217,7 @@ exports.getInbox = async (req, res) => {
       }
 
       // Keep searching for a name if we only have the ID so far
-      if (!isOutgoing && msg.sender_name && (!existing.participant_name || existing.participant_name === partnerId)) {
+      if (!isOutgoing && sender.toLowerCase() !== 'system' && msg.sender_name && (!existing.participant_name || existing.participant_name === partnerId)) {
         existing.participant_name = msg.sender_name;
       }
 
@@ -274,7 +341,7 @@ exports.getInbox = async (req, res) => {
 
         if (match) {
             // Update name only if it's currently a loginId
-            if (!item.participant_name || item.participant_name === pid) {
+            if (!item.participant_name || item.participant_name === pid || item.participant_name.toLowerCase() === 'system') {
                 item.participant_name = match.owner_name || match.name || item.participant_name;
             }
             item.participant_email = match.owner_email || match.email || item.participant_email;
@@ -282,7 +349,7 @@ exports.getInbox = async (req, res) => {
             item.participant_property = match.property_name || item.participant_property;
             item.participant_city = match.city || item.participant_city;
         } else if (bookingMatch) {
-            if (!item.participant_name || item.participant_name === pid) {
+            if (!item.participant_name || item.participant_name === pid || item.participant_name.toLowerCase() === 'system') {
                 item.participant_name = bookingMatch.name || item.participant_name;
             }
             item.participant_email = bookingMatch.email || item.participant_email;
@@ -290,7 +357,7 @@ exports.getInbox = async (req, res) => {
             item.participant_property = bookingMatch.property_name || item.participant_property;
             item.participant_city = bookingMatch.city || item.participant_city;
         } else if (userMatch) {
-            if (!item.participant_name || item.participant_name === pid) {
+            if (!item.participant_name || item.participant_name === pid || item.participant_name.toLowerCase() === 'system') {
                 item.participant_name = userMatch.fullName || userMatch.name || `${userMatch.firstName || ''} ${userMatch.lastName || ''}`.trim() || item.participant_name;
             }
             item.participant_email = userMatch.email || item.participant_email;
@@ -357,7 +424,12 @@ exports.getConversation = async (req, res) => {
     }
 
     const user1Variants = [...new Set(buildChatLookupVariants(user1, req.user))];
-    const user2Variants = [...new Set(buildChatLookupVariants(user2, req.user))];
+    let user2Variants = [...new Set(buildChatLookupVariants(user2, req.user))];
+
+    // The inbox hands back one merged row per person, keyed on the canonical
+    // id. Pull in the partner's other stored ids so the merged thread shows
+    // every message, not just the half filed under the id that was clicked.
+    user2Variants = await expandPartnerVariants(user2Variants, user2, user1Variants);
 
     const isSuperadmin = await isCallerSuperadmin(req);
 
@@ -396,6 +468,7 @@ exports.getConversation = async (req, res) => {
       .lean();
 
     const seenSystemContent = new Set();
+    const seenAcceptanceWelcomes = new Set();
     const messages = [];
 
     for (const msg of rawMessages) {
@@ -411,6 +484,12 @@ exports.getConversation = async (req, res) => {
           continue; // Skip duplicate system message
         }
         seenSystemContent.add(contentKey);
+      }
+
+      if (String(msg.message || '').includes('I have reviewed and accepted your request for')) {
+        const welcomeKey = `${String(msg.conversation_id || '')}:${String(msg.sender_login_id || '').toLowerCase()}:${String(msg.message || '')}`;
+        if (seenAcceptanceWelcomes.has(welcomeKey)) continue;
+        seenAcceptanceWelcomes.add(welcomeKey);
       }
 
       messages.push(msg);
@@ -466,7 +545,15 @@ exports.markAsRead = async (req, res) => {
     const roomVariants = [...new Set(buildChatLookupVariants(room_id, req.user))];
     const query = { room_id: { $in: roomVariants }, is_read: false };
     if (sender) {
-      const senderVariants = [...new Set([sender, sender.toLowerCase(), sender.toUpperCase()])];
+      // Same merge problem as getConversation: the caller passes the canonical
+      // partner id from their inbox row, while the unread messages are stored
+      // under whichever id that person sent them from. Without the expansion
+      // the update matched nothing and the unread badge never cleared.
+      const senderVariants = await expandPartnerVariants(
+        [sender, sender.toLowerCase(), sender.toUpperCase()],
+        sender,
+        roomVariants
+      );
       query.sender_login_id = { $in: senderVariants };
     }
     
@@ -596,9 +683,10 @@ exports.sendMessage = async (req, res) => {
 
     const originalText = String(message).trim();
 
-    // 🔒 Phone Number Masking: detect & mask phone numbers before saving to DB
-    const { maskPhoneNumbers } = require('../utils/maskPhoneNumbers');
+    // 🔒 Phone Number & Contact Masking: detect & mask phone numbers, emails, spaced numbers & chunks
+    const { maskPhoneNumbers, maskPreviousConsecutiveMessage } = require('../utils/maskPhoneNumbers');
     const maskedText = maskPhoneNumbers(originalText);
+    await maskPreviousConsecutiveMessage(ChatMessage, targetRoomId, from_login_id, originalText);
 
     const msg = new ChatMessage({
       room_id: targetRoomId,
@@ -640,17 +728,45 @@ exports.sendMessage = async (req, res) => {
 
     // Emit real-time update via Socket.io if global.io is available
     if (global.io) {
-      global.io.to(to_login_id).emit('receive_message', {
+      const payload = {
         _id: msg._id,
-        room_id: to_login_id,
+        room_id: targetRoomId,
         sender_login_id: from_login_id,
         sender_name: senderName,
         message: msg.message,
         message_type: msg.message_type,
         file_url: msg.file_url,
         created_at: msg.created_at
-      });
-      global.io.to(to_login_id).emit('new_message', msg);
+      };
+
+      // Socket.IO rooms are exact strings, so a recipient who joined under a
+      // different form of their own id (their email rather than the email hash,
+      // or vice versa) never received the push and had to reload the page to
+      // see the message. Emitting to every equivalent room covers both.
+      const recipientRooms = new Set(
+        [targetRoomId, to_login_id, canonicalChatId(targetRoomId), canonicalChatId(to_login_id)]
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      );
+
+      for (const room of recipientRooms) {
+        global.io.to(room).emit('receive_message', payload);
+        global.io.to(room).emit('new_message', msg);
+      }
+
+      // Echo to the sender's own room as well. The socket path
+      // (socket/chatSocket.js) already does this, so a message sent over the
+      // socket updated the sender's other open tabs while the identical
+      // message sent over REST did not.
+      const senderRooms = new Set(
+        [from_login_id, canonicalChatId(from_login_id)]
+          .map((id) => String(id || '').trim())
+          .filter((id) => id && !recipientRooms.has(id))
+      );
+
+      for (const room of senderRooms) {
+        global.io.to(room).emit('receive_message', { ...payload, room_id: room });
+      }
     }
     
     res.json({ success: true, message: msg });

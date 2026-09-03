@@ -624,34 +624,99 @@ exports.adminActionOnViolation = async (req, res) => {
 exports.getBlockedOwners = async (req, res) => {
   try {
     const Owner = require('../models/Owner');
+    const User = require('../models/user');
     const ChatViolation = require('../models/ChatViolation');
 
-    const blockedOwners = await Owner.find({ isActive: false }).sort({ updatedAt: -1 }).lean();
+    const blockedOwners = await Owner.find({
+      $or: [
+        { isActive: false },
+        { status: 'blocked' },
+        { chatRestrictedUntil: { $ne: null } }
+      ]
+    }).sort({ updatedAt: -1 }).lean();
 
-    const populated = await Promise.all(blockedOwners.map(async (owner) => {
-      const loginId = owner.loginId;
+    const blockedUsers = await User.find({
+      $or: [
+        { isActive: false },
+        { status: 'blocked' },
+        { chatRestrictedUntil: { $ne: null } }
+      ]
+    }).sort({ updatedAt: -1 }).lean();
+
+    const blockedViolations = await ChatViolation.find({
+      $or: [
+        { attemptNumber: { $gte: 2 } },
+        { status: { $in: ['Account Suspended', 'Blocked', 'Blocked / Suspended'] } },
+        { 'actionHistory.action': { $in: ['blocked', 'suspend_user'] } }
+      ]
+    }).sort({ createdAt: -1 }).lean();
+
+    const seenKeys = new Set();
+    const populated = [];
+
+    const addAccount = async (rawLoginId, defaultName, defaultEmail, defaultPhone, blockedAt, snippet) => {
+      const loginId = String(rawLoginId || '').trim();
+      if (!loginId || seenKeys.has(loginId.toUpperCase())) return;
+      seenKeys.add(loginId.toUpperCase());
+
+      const loginVariants = [loginId, loginId.toLowerCase(), loginId.toUpperCase()];
+
       const violations = await ChatViolation.find({
         $or: [
-          { ownerId: loginId },
-          { participantLoginId: loginId }
+          { ownerId: { $in: loginVariants } },
+          { participantLoginId: { $in: loginVariants } }
         ]
       }).sort({ createdAt: -1 }).lean();
 
-      return {
-        _id: owner._id,
-        loginId: owner.loginId,
-        name: owner.name || 'Owner',
-        email: owner.email || owner.profile?.email || 'N/A',
-        phone: owner.phone || owner.profile?.phone || 'N/A',
-        blockedAt: owner.updatedAt || owner.createdAt,
-        violationsCount: violations.length,
-        violationsSnippet: violations[0]?.messageSnippet || 'Auto-blocked due to 2 commission bypass / contact sharing violations',
+      populated.push({
+        _id: loginId,
+        loginId: loginId,
+        name: defaultName || 'Owner / User',
+        email: defaultEmail || 'N/A',
+        phone: defaultPhone || 'N/A',
+        blockedAt: blockedAt || new Date(),
+        violationsCount: violations.length || 1,
+        violationsSnippet: snippet || violations[0]?.messageSnippet || 'Auto-blocked due to 2 commission bypass / contact sharing violations',
         status: 'blocked'
-      };
-    }));
+      });
+    };
 
-    res.json({ success: true, blockedOwners: populated });
+    for (const owner of blockedOwners) {
+      await addAccount(
+        owner.loginId,
+        owner.name || owner.owner_name,
+        owner.email || owner.profile?.email,
+        owner.phone || owner.profile?.phone,
+        owner.updatedAt || owner.createdAt,
+        owner.blockedReason
+      );
+    }
+
+    for (const u of blockedUsers) {
+      await addAccount(
+        u.loginId || u._id,
+        u.name || `${u.firstName || ''} ${u.lastName || ''}`.trim(),
+        u.email,
+        u.phone,
+        u.updatedAt || u.createdAt,
+        'Account suspended in user system'
+      );
+    }
+
+    for (const v of blockedViolations) {
+      await addAccount(
+        v.participantLoginId || v.ownerId,
+        v.participantName || v.ownerName,
+        '',
+        '',
+        v.updatedAt || v.createdAt,
+        v.messageSnippet
+      );
+    }
+
+    res.json({ success: true, blockedOwners: populated, count: populated.length });
   } catch (err) {
+    console.error('Error in getBlockedOwners:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -664,15 +729,16 @@ exports.unblockOwner = async (req, res) => {
     const AuditLog = require('../models/AuditLog');
     const ChatViolation = require('../models/ChatViolation');
 
-    const normalizedId = String(loginId).toUpperCase();
+    const cleanId = String(loginId).trim();
+    const idVariants = [cleanId, cleanId.toUpperCase(), cleanId.toLowerCase()];
+
     await Promise.all([
-      Owner.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active', blockedReason: null, chatRestrictedUntil: null }),
-      User.updateOne({ loginId: normalizedId }, { isActive: true, status: 'active', chatRestrictedUntil: null }),
-      // Delete all violation records for this owner so attempt counter resets to 0
+      Owner.updateMany({ loginId: { $in: idVariants } }, { isActive: true, status: 'active', blockedReason: null, chatRestrictedUntil: null }),
+      User.updateMany({ loginId: { $in: idVariants } }, { isActive: true, status: 'active', chatRestrictedUntil: null }),
       ChatViolation.deleteMany({
         $or: [
-          { ownerId: normalizedId },
-          { participantLoginId: normalizedId }
+          { ownerId: { $in: idVariants } },
+          { participantLoginId: { $in: idVariants } }
         ]
       })
     ]);
@@ -685,10 +751,10 @@ exports.unblockOwner = async (req, res) => {
       method: 'POST',
       path: req.originalUrl,
       statusCode: 200,
-      payload: { ownerLoginId: normalizedId }
+      payload: { ownerLoginId: cleanId }
     });
 
-    res.json({ success: true, message: `Owner ${normalizedId} unblocked successfully and violation history cleared` });
+    res.json({ success: true, message: `Owner ${cleanId} unblocked successfully and violation history cleared` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

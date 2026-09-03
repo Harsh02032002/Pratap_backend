@@ -26,15 +26,26 @@ router.get('/ifsc/:ifscCode', async (req, res) => {
         });
 
         if (response.data && response.data.BANK) {
+            const rawBranch = (response.data.BRANCH || '').trim();
+            const city = (response.data.CITY || '').trim();
+            const state = (response.data.STATE || '').trim();
+            const address = (response.data.ADDRESS || '').trim();
+
+            let branchName = rawBranch;
+            if (city && !branchName.toLowerCase().includes(city.toLowerCase())) {
+                branchName = branchName ? `${branchName}, ${city}` : city;
+            }
+
             return res.status(200).json({
                 success: true,
                 ifscStatus: 'valid',
                 ifscCode: rawIfsc,
                 bankName: response.data.BANK,
-                branchName: response.data.BRANCH || '',
-                city: response.data.CITY || '',
-                state: response.data.STATE || '',
-                address: response.data.ADDRESS || '',
+                branchName,
+                rawBranch,
+                city,
+                state,
+                address,
                 contact: response.data.CONTACT || '',
                 upi: !!response.data.UPI,
                 rtgs: !!response.data.RTGS,

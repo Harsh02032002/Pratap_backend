@@ -124,15 +124,28 @@ exports.protect = async (req, res, next) => {
 exports.authorize = (...roles) => {
     return (req, res, next) => {
         if (!req.user) return res.status(401).json({ message: 'Not authenticated' });
-        const expanded = roles.includes('superadmin') 
-            ? [...roles, 'admin', 'employee', 'areamanager', 'manager'] 
-            : roles.includes('admin')
-            ? [...roles, 'superadmin', 'employee', 'areamanager', 'manager']
-            : roles;
-        console.log(`[AUTH DEBUG] Path: ${req.method} ${req.originalUrl} | Required: ${roles.join(',')} | User Role: ${req.user.role}`);
-        if (!expanded.includes(req.user.role)) {
-            console.log(`[AUTH DEBUG] Forbidden: User role ${req.user.role} not in expanded roles [${expanded.join(',')}]`);
-            return res.status(403).json({ message: 'Forbidden' });
+        
+        let userRole = req.user.role ? String(req.user.role).toLowerCase().trim() : '';
+        if (userRole === 'propertyowner' || userRole === 'property_owner') userRole = 'owner';
+
+        const expanded = new Set(roles.map(r => String(r).toLowerCase().trim()));
+        
+        if (expanded.has('superadmin') || expanded.has('admin')) {
+            ['superadmin', 'admin', 'employee', 'areamanager', 'area_manager', 'area_admin', 'manager', 'staff', 'field_executive', 'verification_officer'].forEach(r => expanded.add(r));
+        }
+
+        if (expanded.has('owner') || expanded.has('property_owner') || expanded.has('propertyowner')) {
+            expanded.add('owner');
+            expanded.add('property_owner');
+            expanded.add('propertyowner');
+        }
+
+        const expandedArray = Array.from(expanded);
+        console.log(`[AUTH DEBUG] Path: ${req.method} ${req.originalUrl} | Required: ${roles.join(',')} | User Role: ${userRole}`);
+        
+        if (!expanded.has(userRole) && !expanded.has(req.user.role)) {
+            console.log(`[AUTH DEBUG] Forbidden: User role ${req.user.role} not in expanded roles [${expandedArray.join(',')}]`);
+            return res.status(403).json({ message: `Forbidden: User role ${req.user.role} not in expanded roles [${expandedArray.join(',')}]` });
         }
         next();
     };

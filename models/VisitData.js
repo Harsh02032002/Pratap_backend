@@ -51,9 +51,14 @@ const VisitDataSchema = new mongoose.Schema({
     occupiedRooms: { type: Number, default: 0 },
     occupiedBeds: { type: Number, default: 0 },
     
-    // Photos
+    // Photos & Gallery Views
     photos: [String],
     professionalPhotos: [String],
+    photoDetails: [mongoose.Schema.Types.Mixed],
+    propertyViews: [{
+        label: { type: String },
+        images: [{ type: String }]
+    }],
     
     // Ratings and Reviews
     studentReviewsRating: Number,

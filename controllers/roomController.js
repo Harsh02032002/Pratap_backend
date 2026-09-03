@@ -212,13 +212,42 @@ exports.getRoomsByProperty = async (req, res) => {
                     mongoose.Types.ObjectId.isValid(propertyId) ? { _id: new mongoose.Types.ObjectId(propertyId) } : null,
                     { propertyId: propertyId },
                     { visitId: propertyId },
+                    { ownerLoginId: String(propertyId).toUpperCase() },
                     { title: propertyId }
                 ].filter(Boolean)
             }).lean();
         }
 
-        const resolvedObjectId = propDoc ? propDoc._id : (mongoose.Types.ObjectId.isValid(propertyId) ? new mongoose.Types.ObjectId(propertyId) : null);
-        const resolvedPropIdString = propDoc?.propertyId || propertyId;
+        // Also check ApprovedProperty and VisitData for fallback roomTypes & occupancy
+        const ApprovedProperty = require('../models/ApprovedProperty');
+        const VisitData = require('../models/VisitData');
+
+        const appDoc = await ApprovedProperty.findOne({
+            $or: [
+                mongoose.Types.ObjectId.isValid(propertyId) ? { _id: new mongoose.Types.ObjectId(propertyId) } : null,
+                { propertyId: propertyId },
+                { visitId: propertyId },
+                { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
+            ].filter(Boolean)
+        }).sort({ updatedAt: -1 }).lean();
+
+        const visitDoc = await VisitData.findOne({
+            $or: [
+                { visitId: propertyId },
+                { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
+            ]
+        }).sort({ updatedAt: -1 }).lean();
+
+        const roomTypesFromAny = (propDoc?.roomTypes?.length ? propDoc.roomTypes : null) || 
+                                (appDoc?.roomTypes?.length ? appDoc.roomTypes : null) || 
+                                (visitDoc?.roomTypes?.length ? visitDoc.roomTypes : null) || 
+                                [];
+
+        const totalRoomsFromVisit = Number(visitDoc?.vacantRooms || 0) + Number(visitDoc?.occupiedRooms || 0);
+        const monthlyRentFromVisit = Number(visitDoc?.monthlyRent || propDoc?.monthlyRent || appDoc?.propertyInfo?.rent || 0);
+
+        const resolvedObjectId = propDoc ? propDoc._id : (appDoc ? appDoc._id : (mongoose.Types.ObjectId.isValid(propertyId) ? new mongoose.Types.ObjectId(propertyId) : null));
+        const resolvedPropIdString = propDoc?.propertyId || appDoc?.propertyId || propertyId;
 
         // Build room query matching either ObjectId or string ID
         const queryOr = [];
@@ -235,26 +264,45 @@ exports.getRoomsByProperty = async (req, res) => {
         
         let rooms = await roomsQuery.lean();
 
-        // Fallback generation: if no rooms found, generate from property roomTypes
-        if (rooms.length === 0 && propDoc) {
-            if (Array.isArray(propDoc.roomTypes)) {
-                propDoc.roomTypes.forEach(rt => {
-                    const count = parseInt(rt.totalRooms) || 0;
-                    const bedsCount = parseInt(rt.occupancy) || parseInt(rt.totalBeds) || 1;
-                    const priceVal = Number(rt.pricePerBed || rt.pricePerRoom || 0);
+        // Fallback generation: if no rooms found in Room collection, auto-generate from roomTypes or VisitData occupancy
+        if (rooms.length === 0) {
+            if (roomTypesFromAny.length > 0) {
+                let rIdx = 1;
+                roomTypesFromAny.forEach(rt => {
+                    const count = parseInt(rt.totalRooms) || 1;
+                    const bedsCount = parseInt(rt.totalBeds) || parseInt(rt.occupancy) || 1;
+                    const priceVal = Number(rt.pricePerBed || rt.pricePerRoom || monthlyRentFromVisit || 0);
                     const floorName = rt.floor || rt.floorNo || 'Ground Floor';
                     for (let i = 1; i <= count; i++) {
                         rooms.push({
-                            _id: `${rt.type}-${i}`,
-                            title: `${rt.type} - Room ${i}`,
-                            type: rt.type,
+                            _id: `${rt.type || 'Room'}-${rIdx}`,
+                            title: `${rt.type || 'Standard'} Room ${rIdx}`,
+                            type: rt.type || 'Standard',
                             beds: bedsCount,
                             price: priceVal,
                             floor: floorName,
+                            status: 'active',
+                            isAvailable: true,
                             property: resolvedObjectId || propertyId
                         });
+                        rIdx++;
                     }
                 });
+            } else if (totalRoomsFromVisit > 0) {
+                // Generate rooms based on VisitData total room count
+                for (let i = 1; i <= totalRoomsFromVisit; i++) {
+                    rooms.push({
+                        _id: `Room-${i}`,
+                        title: `Room ${100 + i}`,
+                        type: 'Standard',
+                        beds: 1,
+                        price: monthlyRentFromVisit,
+                        floor: 'Ground Floor',
+                        status: 'active',
+                        isAvailable: true,
+                        property: resolvedObjectId || propertyId
+                    });
+                }
             }
         }
 

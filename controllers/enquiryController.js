@@ -5,7 +5,8 @@ const {
   resolveOwnerPropertyIdentity,
   buildOwnerBookingQuery,
   loadMovedInIndex,
-  mapBookingToLead
+  mapBookingToLead,
+  dedupeBookingLeads
 } = require('../services/ownerLeads');
 const BookingRequest = require('../models/BookingRequest');
 
@@ -109,7 +110,7 @@ exports.listEnquiries = async (req, res) => {
     // previously had none of this and showed no website leads at all.
     const identity = await resolveOwnerPropertyIdentity(ownerIdCandidates, normalizedOwnerId);
     const bookingRequests = await BookingRequest
-        .find(buildOwnerBookingQuery({ ownerIdCandidates, identity }))
+        .find(buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity }))
         .sort({ created_at: -1 })
         .lean();
 
@@ -117,7 +118,7 @@ exports.listEnquiries = async (req, res) => {
     const activeTenantPhones = movedIn.phones;
     const activeTenantEmails = movedIn.emails;
 
-    const mappedBookings = bookingRequests.map(b => mapBookingToLead(b, movedIn));
+    const mappedBookings = dedupeBookingLeads(bookingRequests).map(b => mapBookingToLead(b, movedIn));
 
     // 5. Also check Enquiries for moved in status
     const mappedEnquiries = enquiries.map(e => {

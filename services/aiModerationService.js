@@ -18,6 +18,19 @@ const axios = require('axios');
  * @returns {Promise<object>} Returns { violation: boolean, type: string, confidence: number, reason: string }
  */
 async function moderateMessage(text, senderRole, receiverRole, contextHistory, combinedSenderText) {
+    const textLower = String(text || '').toLowerCase();
+    if (
+      textLower.includes('cashfree.com') ||
+      textLower.includes('cashfree') ||
+      textLower.includes('roomhy.com') ||
+      textLower.includes('/website/pay') ||
+      textLower.includes('bookingid=') ||
+      textLower.includes('token payment')
+    ) {
+      console.log('ℹ️ Skipping AI moderation for official Roomhy / Cashfree payment message.');
+      return { violation: false, type: 'none', confidence: 0, reason: 'Official Roomhy payment message' };
+    }
+
     // 1. Resolve Provider
     const provider = (process.env.AI_MODERATION_PROVIDER || 'groq').toLowerCase().trim();
 
@@ -54,14 +67,34 @@ async function moderateMessage(text, senderRole, receiverRole, contextHistory, c
     const completionsUrl = `${baseURL}/chat/completions`;
 
     // 4. Resolve Model
+    //
+    // Groq's default was 'llama-3.3-70b-versatile' until that model was
+    // DECOMMISSIONED by the provider. Every call then returned 404, and because
+    // this service fails open (see the catch at the bottom) the entire AI layer
+    // went silently dead: only the local regex in moderationHelper was still
+    // screening anything, so contextual Hinglish attempts — "dede paise mujhe",
+    // a phone number split across two messages — passed straight through.
+    //
+    // Measured against those exact messages plus a clean control set:
+    //   openai/gpt-oss-120b          5/5 caught, 0 false alarms  (~845ms)
+    //   openai/gpt-oss-20b           5/5 caught, 0 false alarms  (~631ms)
+    //   openai/gpt-oss-safeguard-20b 4/5 caught, 0 false alarms  (~475ms)
+    //
+    // 120b is chosen over the faster 20b because this runs in the background,
+    // off the request path, so latency costs the user nothing — and the threat
+    // here is deliberate evasion, where the stronger model generalises better
+    // than a ten-case sample can show.
+    //
+    // Override with AI_MODERATION_MODEL when the provider retires this one.
+    // `npm run check:moderation` reports whether the configured model still
+    // answers, so the next decommission surfaces as a failed check rather than
+    // as months of unscreened chat.
     let model = process.env.AI_MODERATION_MODEL;
     if (!model) {
-        if (provider === 'groq') {
-            model = 'llama-3.3-70b-versatile';
-        } else if (provider === 'openai') {
+        if (provider === 'openai') {
             model = 'gpt-4o-mini';
         } else {
-            model = 'llama-3.3-70b-versatile';
+            model = 'openai/gpt-oss-120b';
         }
     }
 
@@ -84,7 +117,13 @@ async function moderateMessage(text, senderRole, receiverRole, contextHistory, c
     const systemPrompt = `You are an AI Chat Moderator for Roomhy, a property rental and room booking platform.
 Your task is to analyze user chat messages (often written in Hinglish, Hindi, or split into multiple short consecutive messages like "paise", "naa", "de") to identify policy violations.
 
-The platform allows property negotiations, rent discussion, property address sharing, and room detail sharing. These are NOT violations.
+The platform allows property negotiations, rent discussion, price bargaining, property address sharing, and room detail sharing. These are 100% PERMITTED and NOT violations.
+
+CRITICAL - RENT NEGOTIATION & PRICE BARGAINING RULES (NOT VIOLATIONS):
+- Property rent negotiations, room price quotes, and bargaining (e.g., Tenant: "rent kam karo", Owner: "18000", Tenant: "aur kam karo", Owner: "12000") are 100% PERMITTED.
+- Do NOT merge separate rent quotes (like 18000 and 12000) to form a fake 10-digit phone number.
+- Numbers ending in 000/00 (like 18000, 15000, 12000, 10000, 8000, 5000, 25000) or sent after rent inquiries are RENT FIGURES, NOT phone numbers or contact sharing.
+- ALWAYS read the entire conversation history! If the tenant asks to lower the rent and the owner replies with numbers like 18000 or 12000, it is 100% legitimate RENT NEGOTIATION and NOT contact sharing or phone number evasion.
 
 Violations to look for:
 1. Contact Sharing: Sharing phone numbers, email addresses, personal UPI IDs, or direct payment details.
@@ -176,6 +215,9 @@ Receiver Role: ${receiver}`;
         }
 
         const moderationResult = JSON.parse(choice);
+        health.consecutiveFailures = 0;
+        health.lastSuccessAt = new Date();
+        health.model = model;
         return {
             violation: !!moderationResult.violation,
             type: moderationResult.type || 'none',
@@ -183,7 +225,38 @@ Receiver Role: ${receiver}`;
             reason: moderationResult.reason || ''
         };
     } catch (err) {
-        console.error(`❌ AI Chat Moderation API error (${provider}) after ${maxAttempts} attempt(s):`, err.message);
+        const status = err.response?.status;
+        health.consecutiveFailures += 1;
+        health.lastFailureAt = new Date();
+        health.lastFailureReason = `${status || 'network'}: ${err.message}`;
+        health.model = model;
+
+        // A 404/400 is a CONFIGURATION failure, not a blip: the model is gone or
+        // the request shape is wrong, and it will fail identically forever. That
+        // is exactly how this layer died unnoticed, so it is logged distinctly
+        // from a transient outage and repeated on every message rather than
+        // being lost in the noise once.
+        if (status === 404 || status === 400) {
+            console.error(
+                `🚨 AI MODERATION IS DOWN — provider ${provider} rejected model "${model}" (HTTP ${status}). ` +
+                `Chat is running on regex screening ONLY. Set AI_MODERATION_MODEL to a model this key can reach ` +
+                `and restart. Run "npm run check:moderation" to list working models.`
+            );
+        } else if (status === 401 || status === 403) {
+            console.error(
+                `🚨 AI MODERATION IS DOWN — provider ${provider} rejected the API key (HTTP ${status}). ` +
+                `Chat is running on regex screening ONLY.`
+            );
+        } else {
+            console.error(`❌ AI Chat Moderation API error (${provider}) after ${maxAttempts} attempt(s):`, err.message);
+            if (health.consecutiveFailures === FAILURE_ALERT_THRESHOLD) {
+                console.error(
+                    `🚨 AI MODERATION has failed ${FAILURE_ALERT_THRESHOLD} times in a row (${health.lastFailureReason}). ` +
+                    `Chat is running on regex screening ONLY.`
+                );
+            }
+        }
+
         // Fail-safe: Allow the message to proceed in case of API failure to avoid
         // user disruption. `failed` records that this message was NOT actually
         // screened, so an unscreened message is distinguishable from a clean one.
@@ -191,6 +264,34 @@ Receiver Role: ${receiver}`;
     }
 }
 
+// ── Health ───────────────────────────────────────────────────────────────────
+// Fail-open is the right call for a background screener — a provider outage
+// must not stop tenants and owners talking. The danger is that it is SILENT:
+// this layer was dead for as long as the model had been decommissioned and
+// nothing anywhere said so. This makes the state readable.
+const health = {
+    consecutiveFailures: 0,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    lastFailureReason: null,
+    model: null
+};
+
+const FAILURE_ALERT_THRESHOLD = 3;
+
+/**
+ * Current state of the AI screening layer, for a health endpoint or a boot check.
+ * `degraded` means messages are passing on regex screening alone.
+ */
+function getModerationHealth() {
+    return {
+        ...health,
+        degraded: health.consecutiveFailures >= FAILURE_ALERT_THRESHOLD ||
+            (health.consecutiveFailures > 0 && !health.lastSuccessAt)
+    };
+}
+
 module.exports = {
-    moderateMessage
+    moderateMessage,
+    getModerationHealth
 };

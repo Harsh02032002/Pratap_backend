@@ -457,6 +457,27 @@ exports.createBookingRequest = async (req, res) => {
         const ownerEmail = owner?.email || ownerProfile?.email || ownerProfile?.profile?.email || propertyOwnerEmail || '';
         const ownerPhone = owner?.phone || owner?.mobile || owner?.checkinPhone || ownerProfile?.phone || ownerProfile?.mobile || ownerProfile?.profile?.phone || ownerProfile?.checkinPhone || propertyOwnerPhone || '';
         console.log(`📍 Owner found: ${ownerName} (${ownerLoginId}) | Email: ${ownerEmail || 'N/A'} | Phone: ${ownerPhone || 'N/A'}`);
+
+        if (request_type === 'bid') {
+            const duplicate = await BookingRequest.findOne({
+                property_id: String(property_id),
+                owner_id: new RegExp(`^${String(resolvedOwnerId || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+                $or: [
+                    { user_id: String(user_id) },
+                    { email: email }
+                ],
+                request_type: 'bid',
+                status: { $nin: ['rejected', 'cancelled'] }
+            }).sort({ created_at: -1, createdAt: -1 });
+            if (duplicate) {
+                duplicate.bid_amount = Number(bid_amount || duplicate.bid_amount || 0);
+                duplicate.bid_max = bid_max || duplicate.bid_max || null;
+                duplicate.message = message || duplicate.message || '';
+                duplicate.updatedAt = new Date();
+                await duplicate.save();
+                return res.status(200).json({ success: true, duplicate: true, message: 'Existing bid updated', data: duplicate });
+            }
+        }
         
         // Generate unique chat room ID
         const chatRoomId = `chat_${property_id}_${Date.now()}`;
@@ -491,6 +512,28 @@ exports.createBookingRequest = async (req, res) => {
 
         await newRequest.save();
         console.log(`✅ Booking saved with ID: ${newRequest._id}`);
+
+        if (request_type === 'bid' && resolvedOwnerId && email) {
+            try {
+                const tenantChatId = generateWebsiteUserIdFromEmail(email) || String(user_id);
+                const ownerChatId = String(resolvedOwnerId).trim().toUpperCase();
+                const pairKey = [ownerChatId, tenantChatId].sort().join(':').toUpperCase();
+                await ChatMessage.create({
+                    room_id: ownerChatId,
+                    conversation_id: pairKey,
+                    sender_login_id: tenantChatId,
+                    sender_name: name || 'Website Tenant',
+                    sender_role: 'website_user',
+                    message: `New bid received for ${property_name}: ₹${Number(bid_amount || 0).toLocaleString('en-IN')}/month`,
+                    message_type: 'text',
+                    is_read: false,
+                    created_at: new Date(),
+                    updated_at: new Date()
+                });
+            } catch (chatErr) {
+                console.warn('Failed to create bid chat notification:', chatErr.message);
+            }
+        }
 
         // Create owner in-app notification for real-time panel alerts.
         try {
@@ -1140,32 +1183,32 @@ exports.approveBooking = async (req, res) => {
                 try {
                     const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
                     const pairKey = [String(chat.ownerRoomId).toUpperCase(), String(chat.userRoomId)].sort().join(':').toUpperCase();
+                    const ownerRoomId = String(chat.ownerRoomId || '').toUpperCase();
+                    const userRoomId = String(chat.userRoomId || '').toLowerCase();
+                    const messageSpecs = [
+                        { room_id: userRoomId, sender_login_id: ownerRoomId, sender_name: ownerName, sender_role: 'property_owner' },
+                        { room_id: ownerRoomId, sender_login_id: userRoomId, sender_name: tenantName, sender_role: 'website_user' }
+                    ];
 
-                    await Promise.all([
-                        ChatMessage.create({
-                            room_id: chat.userRoomId,
+                    for (const spec of messageSpecs) {
+                        const existingWelcome = await ChatMessage.exists({
+                            room_id: spec.room_id,
                             conversation_id: pairKey,
-                            sender_login_id: String(chat.ownerRoomId || '').toUpperCase(),
-                            sender_name: ownerName,
-                            sender_role: 'property_owner',
-                            message: welcomeMsg,
-                            message_type: 'text',
-                            created_at: new Date(),
-                            updated_at: new Date()
-                        }),
-                        ChatMessage.create({
-                            room_id: String(chat.ownerRoomId || '').toUpperCase(),
-                            conversation_id: pairKey,
-                            sender_login_id: String(chat.userRoomId || '').toLowerCase(),
-                            sender_name: tenantName,
-                            sender_role: 'website_user',
-                            message: welcomeMsg,
-                            message_type: 'text',
-                            created_at: new Date(),
-                            updated_at: new Date()
-                        })
-                    ]);
-                    console.log('✅ Automated chat welcome messages created for owner & tenant rooms');
+                            sender_login_id: spec.sender_login_id,
+                            message: welcomeMsg
+                        });
+                        if (!existingWelcome) {
+                            await ChatMessage.create({
+                                ...spec,
+                                conversation_id: pairKey,
+                                message: welcomeMsg,
+                                message_type: 'text',
+                                created_at: new Date(),
+                                updated_at: new Date()
+                            });
+                        }
+                    }
+                    console.log('✅ Automated chat welcome messages ensured for owner & tenant rooms');
                 } catch (chatMsgErr) {
                     console.error('⚠️ Failed to send automated welcome chat message:', chatMsgErr.message);
                 }

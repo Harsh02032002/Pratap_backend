@@ -96,7 +96,10 @@ const syncToApprovedProperty = async (property) => {
             },
             // Sync root level fields for premium UI
             amenities: property.amenities || [],
-            propertyViews: property.propertyViews || [],
+            propertyViews: (property.propertyViews || []).filter((v) => {
+                const label = String(v?.label || '').toLowerCase();
+                return !label.includes('camera') && !label.includes('live');
+            }),
             facilities: property.facilities || {},
             exclusiveBenefits: property.exclusiveBenefits || [],
             roomTypes: property.roomTypes || [],
@@ -304,9 +307,14 @@ exports.getPropertyById = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ success: false, message: 'Invalid property ID format' });
     }
-    const property = await Property.findById(req.params.id).populate('owner', 'name phone email');
-    if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
-    res.json({ success: true, property });
+    const propertyDoc = await Property.findById(req.params.id).populate('owner', 'name phone email');
+    if (!propertyDoc) return res.status(404).json({ success: false, message: 'Property not found' });
+    const { flattenListingImages } = require('../utils/propertyGallery');
+    const propertyObj = propertyDoc.toObject ? propertyDoc.toObject() : { ...propertyDoc };
+    const cleanImages = flattenListingImages(propertyObj);
+    propertyObj.images = cleanImages;
+    propertyObj.featuredImage = cleanImages[0] || '';
+    res.json({ success: true, property: propertyObj });
   } catch (err) {
     console.error('Get Property Error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -364,15 +372,25 @@ exports.getAllProperties = async (req, res) => {
         
         const pendingCount = total - (publishedCount + inactiveCount + rejectedCount);
  
+        const { flattenListingImages } = require('../utils/propertyGallery');
         const properties = await Property.find(filter)
             .populate('owner', 'name phone email')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
 
+        // Sanitize property images array to strictly exclude live camera photos
+        const cleanedProperties = properties.map(p => {
+            const obj = p.toObject ? p.toObject() : { ...p };
+            const cleanImages = flattenListingImages(obj);
+            obj.images = cleanImages;
+            obj.featuredImage = cleanImages[0] || '';
+            return obj;
+        });
+
         res.json({ 
             success: true, 
-            properties, 
+            properties: cleanedProperties, 
             total,
             page,
             totalPages: Math.ceil(total / limit),

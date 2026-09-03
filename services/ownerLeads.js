@@ -78,7 +78,7 @@ async function resolvePropertyIdentity(propertyId) {
 }
 
 /** Mongo query selecting every BookingRequest that belongs to this owner. */
-function buildOwnerBookingQuery({ ownerIdCandidates, identity }) {
+function buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity }) {
     const { propIds, propVisitIds, propNames, ownerCities } = identity;
 
     const query = {
@@ -87,6 +87,13 @@ function buildOwnerBookingQuery({ ownerIdCandidates, identity }) {
             { owner_ids: { $in: ownerIdCandidates } }
         ]
     };
+
+    const ownerIdPattern = normalizedOwnerId
+        ? new RegExp(`^${escapeRegex(normalizedOwnerId)}$`, 'i')
+        : null;
+    if (ownerIdPattern) {
+        query.$or.push({ owner_id: ownerIdPattern }, { owner_ids: ownerIdPattern });
+    }
 
     if (propIds.length > 0) query.$or.push({ property_id: { $in: propIds } });
     if (propVisitIds.length > 0) query.$or.push({ property_id: { $in: propVisitIds } });
@@ -130,6 +137,23 @@ function scopeBookingsToProperty(bookings, propertyIdentity) {
         const bName = String(b.property_name || '');
         return Boolean(bName) && namePatterns.some(re => re.test(bName));
     });
+}
+
+function dedupeBookingLeads(bookings = []) {
+    const latest = new Map();
+    for (const booking of bookings) {
+        const key = [
+            booking.request_type || 'request',
+            String(booking.owner_id || '').toLowerCase(),
+            String(booking.property_id || booking.property_name || '').toLowerCase(),
+            String(booking.user_id || booking.email || booking.phone || '').toLowerCase()
+        ].join('|');
+        const previous = latest.get(key);
+        if (!previous || new Date(booking.created_at || booking.createdAt || 0) > new Date(previous.created_at || previous.createdAt || 0)) {
+            latest.set(key, booking);
+        }
+    }
+    return Array.from(latest.values());
 }
 
 /** Phone/email of everyone who already moved in, so their lead reads "confirmed". */
@@ -214,12 +238,12 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
 async function fetchOwnerBookingLeads({ ownerIdCandidates, normalizedOwnerId, propertyId = null, limit = 100, wrap = (q) => q }) {
     const identity = await resolveOwnerPropertyIdentity(ownerIdCandidates, normalizedOwnerId);
     const [bookings, movedIn, propertyIdentity] = await Promise.all([
-        wrap(BookingRequest.find(buildOwnerBookingQuery({ ownerIdCandidates, identity })).sort({ created_at: -1 }).limit(limit)).lean(),
+        wrap(BookingRequest.find(buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity })).sort({ created_at: -1 }).limit(limit)).lean(),
         loadMovedInIndex(ownerIdCandidates),
         propertyId ? resolvePropertyIdentity(propertyId) : Promise.resolve(null)
     ]);
 
-    return scopeBookingsToProperty(bookings, propertyIdentity).map(b => mapBookingToLead(b, movedIn));
+    return dedupeBookingLeads(scopeBookingsToProperty(bookings, propertyIdentity)).map(b => mapBookingToLead(b, movedIn));
 }
 
 module.exports = {
@@ -230,5 +254,6 @@ module.exports = {
     scopeBookingsToProperty,
     loadMovedInIndex,
     mapBookingToLead,
+    dedupeBookingLeads,
     fetchOwnerBookingLeads
 };

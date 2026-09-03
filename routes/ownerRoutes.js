@@ -229,8 +229,23 @@ router.get('/subscription-status', async (req, res) => {
 // 2c. Approve owner request (Super Admin Action)
 router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
-// 3. Get owner by loginId (Preserved with Scope Protection)
-router.get('/:loginId', protect, applyEmployeeScope, requireOwnerInScope('loginId'), ownerController.getOwnerById);
+// 3. Get owner by loginId (Public endpoint for Digital Check-in + Authorized endpoint for Admin Panel)
+router.get('/public/:loginId', ownerController.getOwnerById);
+
+router.get('/:loginId', (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return ownerController.getOwnerById(req, res);
+    }
+    return protect(req, res, () => {
+        applyEmployeeScope(req, res, () => {
+            requireOwnerInScope('loginId')(req, res, (err) => {
+                if (err) return res.status(403).json({ message: err.message });
+                return ownerController.getOwnerById(req, res);
+            });
+        });
+    });
+}, ownerController.getOwnerById);
 
 // 3b. Delete owner by loginId (Soft Delete)
 router.delete('/:loginId', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {

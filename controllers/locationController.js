@@ -12,17 +12,22 @@ const { uploadImage, deleteImage, getCloudinaryConfig } = require('../utils/clou
 exports.getCities = async (req, res) => {
     try {
         const dbCities = await City.find({ status: { $in: ['Active', 'active', null, undefined] } }).select('_id name slug state colleges population imageUrl propertyCount status').sort({ createdAt: -1 });
-        const dbCityNames = dbCities.map(c => c.name);
 
-        // Extract cities from all active property & owner models
-        const propCities = await ApprovedProperty.distinct('city');
-        const propInfoCities = await ApprovedProperty.distinct('propertyInfo.city');
+        // Extract cities and states from all active property & owner models
+        const propCities = await ApprovedProperty.aggregate([
+            { $group: { _id: { name: "$city", state: "$state" } } }
+        ]);
+        const propInfoCities = await ApprovedProperty.aggregate([
+            { $group: { _id: { name: "$propertyInfo.city", state: "$state" } } }
+        ]);
 
         let propertyModelCities = [];
         try {
             const PropertyModel = require('../models/Property');
             if (PropertyModel) {
-                propertyModelCities = await PropertyModel.distinct('city');
+                propertyModelCities = await PropertyModel.aggregate([
+                    { $group: { _id: { name: "$city", state: "$state" } } }
+                ]);
             }
         } catch (e) {}
 
@@ -30,26 +35,63 @@ exports.getCities = async (req, res) => {
         try {
             const OwnerModel = require('../models/Owner');
             if (OwnerModel) {
-                ownerCities = await OwnerModel.distinct('locationCode');
+                ownerCities = await OwnerModel.aggregate([
+                    { $group: { _id: { name: "$locationCode", state: "$checkinState" } } }
+                ]);
             }
         } catch (e) {}
 
-        const defaultCities = ['Kota', 'Sikar', 'Indore'];
+        // State map lookup helper
+        const cityStateMap = {};
+        dbCities.forEach(c => {
+            if (c.name && c.state) cityStateMap[c.name.toLowerCase().trim()] = c.state;
+        });
+
+        [...propCities, ...propInfoCities, ...propertyModelCities, ...ownerCities].forEach(item => {
+            const name = item._id?.name;
+            const state = item._id?.state;
+            if (name && state && !cityStateMap[String(name).toLowerCase().trim()]) {
+                cityStateMap[String(name).toLowerCase().trim()] = state;
+            }
+        });
+
+        // Add default state mappings if missing
+        const defaultStateMap = {
+            'kota': 'Rajasthan',
+            'sikar': 'Rajasthan',
+            'jaipur': 'Rajasthan',
+            'indore': 'Madhya Pradesh',
+            'chandigarh': 'Punjab',
+            'mohali': 'Punjab',
+            'panchkula': 'Haryana',
+            'delhi': 'Delhi NCR',
+            'noida': 'Uttar Pradesh',
+            'gurgaon': 'Haryana',
+            'pune': 'Maharashtra',
+            'mumbai': 'Maharashtra',
+            'bangalore': 'Karnataka'
+        };
+        Object.entries(defaultStateMap).forEach(([k, v]) => {
+            if (!cityStateMap[k]) cityStateMap[k] = v;
+        });
 
         // Merge all distinct city names
+        const dbCityNames = dbCities.map(c => c.name);
+        const propCityNames = propCities.map(c => c._id?.name);
+        const propInfoCityNames = propInfoCities.map(c => c._id?.name);
+        const propModelCityNames = propertyModelCities.map(c => c._id?.name);
+        const ownerCityNames = ownerCities.map(c => c._id?.name);
+
         const allCityNames = [...new Set([
             ...dbCityNames,
-            ...propCities,
-            ...propInfoCities,
-            ...propertyModelCities,
-            ...ownerCities,
-            ...defaultCities
+            ...propCityNames,
+            ...propInfoCityNames,
+            ...propModelCityNames,
+            ...ownerCityNames,
+            'Kota', 'Sikar', 'Indore', 'Chandigarh', 'Jaipur'
         ].filter(Boolean).map(c => String(c).trim()))];
 
-        // Show all cities - no restriction
-        const filteredCityNames = allCityNames;
-
-        // Fast 1-pass aggregation for all city property counts (prevents N parallel regex queries)
+        // Fast 1-pass aggregation for all city property counts
         const countAgg = await ApprovedProperty.aggregate([
             {
                 $group: {
@@ -63,17 +105,20 @@ exports.getCities = async (req, res) => {
             if (item._id) cityCountMap[String(item._id).trim()] = item.count;
         });
 
-        const cityDataWithCounts = filteredCityNames.map((cityName) => {
+        const cityDataWithCounts = allCityNames.map((cityName) => {
             const dbMatch = dbCities.find(c => c.name.toLowerCase() === cityName.toLowerCase());
             const count = cityCountMap[cityName.toLowerCase().trim()] || 0;
+            const state = cityStateMap[cityName.toLowerCase().trim()] || (dbMatch?.state || '');
 
             if (dbMatch) {
                 const obj = dbMatch.toObject ? dbMatch.toObject() : { ...dbMatch };
                 obj.propertyCount = count;
+                obj.state = state || obj.state;
                 return obj;
             } else {
                 return {
                     name: cityName,
+                    state: state,
                     status: 'Active',
                     propertyCount: count
                 };
@@ -85,11 +130,8 @@ exports.getCities = async (req, res) => {
             data: cityDataWithCounts
         });
     } catch (error) {
-        console.error('Error fetching cities:', error);
-        res.status(500).json({
-            success: false,
-            message: error.message
-        });
+        console.error('Error in getCities:', error);
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 
@@ -453,6 +495,29 @@ exports.getAreasByCity = async (req, res) => {
             });
             
             areas = Array.from(areaMap.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        }
+        
+        if (!areas || areas.length === 0) {
+            const defaultCityAreasMap = {
+                'kota': ['Kunhari', 'Landmark City', 'Rajeev Gandhi Nagar', 'Talwandi', 'Vigyan Nagar', 'Dadabari', 'Jawahar Nagar', 'Mahaveer Nagar', 'Coral Park', 'Indira Vihar', 'Chawani'],
+                'sikar': ['Piprali Road', 'Nawalgarh Road', 'Station Road', 'Palwas Road', 'Bajrang Kanta', 'Fatehpur Road'],
+                'indore': ['Vijay Nagar', 'Bhawarkua', 'Palasia', 'Geeta Bhawan', 'Scheme 54', 'LIG Colony', 'Rau', 'Old Palasia'],
+                'jaipur': ['Malviya Nagar', 'Mansarovar', 'Raja Park', 'Tonk Road', 'Jagatpura', 'Gopalpura Bypass', 'Vaishali Nagar'],
+                'chandigarh': ['Sector 37', 'Sector 34', 'Sector 15', 'Sector 22', 'Sector 35', 'Sector 20', 'Sector 36', 'Sector 21', 'Sector 38', 'Buterla', 'Attawa'],
+                'mohali': ['Phase 7', 'Phase 3B2', 'Phase 5', 'Phase 10', 'Sector 70', 'Sector 68'],
+                'delhi': ['Laxmi Nagar', 'Mukherjee Nagar', 'GTB Nagar', 'Satya Niketan', 'Karol Bagh', 'Hauz Khas'],
+                'noida': ['Sector 62', 'Sector 18', 'Sector 63', 'Sector 15', 'Knowledge Park Greater Noida'],
+                'gurgaon': ['DLF Phase 3', 'Cyber City', 'Sector 14', 'Sector 21', 'Sector 43']
+            };
+            const defaultList = defaultCityAreasMap[String(city).toLowerCase().trim()] || [];
+            areas = defaultList.map(aName => ({
+                _id: aName,
+                name: aName,
+                city: city,
+                cityName: city,
+                propertyCount: 0,
+                status: 'Active'
+            }));
         } else {
             // Fast 1-pass aggregation for areas in city
             const areaAggByCity = await ApprovedProperty.aggregate([

@@ -75,13 +75,20 @@ async function checkUserBlockStatus(loginId) {
     };
   }
 
-  // Check if remaining real violations >= 2
+  // Count only the violations this account actually COMMITTED.
+  //
+  // participantLoginId is the offender. ownerId is the owner of the
+  // CONVERSATION the violation happened in, which is a completely different
+  // thing: when a tenant shares a phone number, the violation is stored with
+  // participantLoginId = <tenant> and ownerId = <the owner they were talking
+  // to>. Counting the ownerId clause here charged that strike to the owner,
+  // so an owner reached "2 strikes" — a permanent block — from one strike of
+  // their own plus one committed by somebody else in their inbox.
+  //
+  // That is not a hypothetical: it is what silently 403'd every
+  // POST /api/chat/send for the owner whose messages "disappeared".
   const realViolationsCount = await ChatViolation.countDocuments({
-    $or: [
-      { ownerId: upperId },
-      { participantLoginId: cleanId },
-      { participantLoginId: upperId }
-    ]
+    participantLoginId: { $in: [cleanId, upperId] }
   });
 
   if (realViolationsCount < 2) {
@@ -106,6 +113,36 @@ async function checkUserBlockStatus(loginId) {
     blocked: true,
     reason: 'Your account has been blocked because of repeated chat-policy violations.'
   };
+}
+
+/**
+ * How far back the split-typing check may look when merging a sender's recent
+ * messages into one string to screen.
+ *
+ * Deliberately short. Anything longer stops being "one thought typed across a
+ * few messages" and becomes "everything this person has ever said", which made
+ * a single past violation taint every future message they sent.
+ */
+const SPLIT_CONTEXT_WINDOW_MS = Number(process.env.CHAT_SPLIT_CONTEXT_WINDOW_MS || 5 * 60 * 1000);
+
+// Helper to strip legitimate rent / deposit / token amounts from phone number screening
+function stripRentAndAmounts(text) {
+  if (!text || typeof text !== 'string') return '';
+  let clean = text;
+
+  // 1. Explicit currency / rent terms + numbers: ₹18000, Rs 18000, 18000/month, 18000/-, rent 18000, deposit 10000, 18k
+  clean = clean.replace(/(?:₹|rs\.?|inr|rent|deposit|kiraya|token|price|amount)\s*:?\s*\b\d{3,5}\b/gi, '[AMOUNT_TOKEN]');
+  clean = clean.replace(/\b\d{3,5}\s*(?:\/-|k|pm|\/mo|\/month|per\s*month|rent|deposit|kiraya)\b/gi, '[AMOUNT_TOKEN]');
+
+  // 2. Standalone 4-5 digit numbers that start with 1-5 OR end in 00/000 (e.g. 18000, 15000, 12000, 10000, 8000, 5000, 25000, 30000)
+  clean = clean.replace(/\b([1-5]\d{3,4}|[6-9]\d{2,3}00)\b/g, (match) => {
+    if (match.endsWith('00') || match.endsWith('000') || /^[1-5]/.test(match)) {
+      return '[AMOUNT_TOKEN]';
+    }
+    return match;
+  });
+
+  return clean;
 }
 
 // Detect violations in message content
@@ -159,7 +196,8 @@ function detectViolation(text, settings = {}) {
   if (blockPhone) {
     const phoneRegex = /(?:^|[^\d])((?:\+?91[-.\s]?)?[6-9](?:[-.\s]?\d){9})(?!\d)/g;
     const textWithoutUrls = msgText.replace(/(https?:\/\/[^\s]+|www\.[^\s]+)/gi, '');
-    const hasTenDigits = phoneRegex.test(textWithoutUrls);
+    const textWithoutAmounts = stripRentAndAmounts(textWithoutUrls);
+    const hasTenDigits = phoneRegex.test(textWithoutAmounts);
     phoneRegex.lastIndex = 0;
 
     const numWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ek', 'teen', 'chaar', 'char', 'paanch', 'panch', 'chhe', 'che', 'saat', 'aath', 'nau', 'noo', 'shunya', 'double', 'triple'];
@@ -171,7 +209,7 @@ function detectViolation(text, settings = {}) {
       if (matches) wordNumCount += matches.length;
     });
 
-    if (phoneRegex.test(msgText) || hasTenDigits || wordNumCount >= 4) {
+    if (phoneRegex.test(textWithoutAmounts) || hasTenDigits || wordNumCount >= 4) {
       if (!violationType) violationType = 'contact_sharing';
       msgText = msgText.replace(phoneRegex, '[MASKED PHONE]')
                        .replace(/\b(?:[6-9]\d{9})\b/g, '[MASKED PHONE]');
@@ -276,13 +314,31 @@ function detectViolation(text, settings = {}) {
     /\bbina\s+([a-zA-Z]*\s+){0,2}beech\b/i,
     /\b(owner|malik)\s+([a-zA-Z]*\s+){0,2}(naam|name)\b/i,
     /\b(app|platform)\s+([a-zA-Z]*\s+){0,2}bina\b/i,
-    /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i
+    /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i,
+
+    // "give me the money" in Hinglish, either word order:
+    //   "dede paise mujhe" / "paise de do" / "paisa dedo bhai"
+    //
+    // This slipped past every pattern above. The money-word list already
+    // existed, but each rule paired it with a channel word (direct, offline,
+    // cash, transfer) and this phrasing names no channel at all — it is a bare
+    // demand for a handover, which is the most common way an owner opens an
+    // off-platform payment.
+    //
+    // Both a money word AND a give word are required, within two words of each
+    // other, so ordinary rent talk is untouched: "8000 rent hai monthly" has no
+    // give word, "de dena" alone has no money word, and "paise online bhej do"
+    // is a legitimate on-platform instruction the AI layer judges in context.
+    /\b(paise|paisa|rupay|rupaye|amount|cash)\s+([a-zA-Z]*\s+){0,2}(de\s?de|de\s?do|dedo|dede|dena|de\s?dena|bhej\s?de|bhej\s?do)\b/i,
+    /\b(de\s?de|de\s?do|dedo|dede|dena|de\s?dena|bhej\s?de|bhej\s?do)\s+([a-zA-Z]*\s+){0,2}(paise|paisa|rupay|rupaye|amount|cash)\b/i
   ];
 
   // Clean payment links and safe phrases before bypass check
   let cleanBypassText = msgText;
   const officialUrls = [
     /https?:\/\/(www\.)?roomhy\.com\/website\/pay[^\s]*/gi,
+    /https?:\/\/(www\.)?payments\.cashfree\.com[^\s]*/gi,
+    /https?:\/\/(www\.)?payments-test\.cashfree\.com[^\s]*/gi,
     /https?:\/\/localhost(:\d+)?\/website\/pay[^\s]*/gi,
     /https?:\/\/127\.0\.0\.1(:\d+)?\/website\/pay[^\s]*/gi
   ];
@@ -291,6 +347,8 @@ function detectViolation(text, settings = {}) {
   });
   cleanBypassText = cleanBypassText
     .replace(/\bpayment\s+link\b/gi, '')
+    .replace(/\btoken\s+payment\b/gi, '')
+    .replace(/\bcashfree\b/gi, '')
     .replace(/\bpasand\s+aay\w*\b/gi, '');
 
   const hasBypass = bypassKeywords.some(rx => rx.test(cleanBypassText));
@@ -423,13 +481,17 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         global.io.to(senderLoginId).emit('receive_message', strike1Msg);
       }
     } else if (attemptNumber >= 2 && isNewAttempt) {
-      // Strike 2: Auto block owner and user account after 2 genuine attempts
-      const isOwnerObjId = mongoose.Types.ObjectId.isValid(ownerId) && String(ownerId).match(/^[0-9a-fA-F]{24}$/);
-      const ownerConds = [{ loginId: ownerId }, { loginId: String(ownerId).toUpperCase() }];
-      if (isOwnerObjId) ownerConds.push({ _id: ownerId });
+      // Strike 2: auto-block the account that actually sent the message.
+      // senderLoginId is the offender; ownerId is only the owner of the
+      // conversation it happened in. Blocking ownerId here punished the owner
+      // for a tenant's violation.
+      const offenderId = senderLoginId;
+      const isOffenderObjId = mongoose.Types.ObjectId.isValid(offenderId) && String(offenderId).match(/^[0-9a-fA-F]{24}$/);
+      const offenderConds = [{ loginId: offenderId }, { loginId: String(offenderId).toUpperCase() }];
+      if (isOffenderObjId) offenderConds.push({ _id: offenderId });
       await Promise.allSettled([
-        Owner.updateOne({ $or: ownerConds }, { isActive: false }),
-        User.updateOne({ $or: ownerConds }, { status: 'blocked', isActive: false })
+        Owner.updateOne({ $or: offenderConds }, { isActive: false }),
+        User.updateOne({ $or: offenderConds }, { status: 'blocked', isActive: false })
       ]);
 
       const blockWarningMsg = new ChatMessage({
@@ -437,7 +499,9 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
-        message: `🚨 ACCOUNT BLOCKED (Attempt 2 of 2): Account (${ownerName}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
+        // Names the account that was actually suspended. It previously always
+        // named the owner, even when the tenant was the one who was blocked.
+        message: `🚨 ACCOUNT BLOCKED (Attempt 2 of 2): Account (${sender.name || offenderId}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
         message_type: 'system',
         is_read: false
       });
@@ -540,9 +604,9 @@ async function notifySuperAdminAlert(violation) {
   }
 }
 
-// Asynchronous background moderation function using Groq AI & local detection
 async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
   try {
+    const textLower = String(messageDoc?.message || '').toLowerCase();
     if (
       !messageDoc ||
       messageDoc.sender_login_id === 'system' ||
@@ -550,7 +614,13 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       messageDoc.sender_role === 'superadmin' ||
       messageDoc.message_type === 'image' ||
       messageDoc.message_type === 'file' ||
-      messageDoc.message_type === 'video'
+      messageDoc.message_type === 'video' ||
+      textLower.includes('cashfree.com') ||
+      textLower.includes('cashfree') ||
+      textLower.includes('roomhy.com') ||
+      textLower.includes('/website/pay') ||
+      textLower.includes('bookingid=') ||
+      textLower.includes('token payment')
     ) {
       return;
     }
@@ -579,12 +649,30 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     const senderVariants = [...new Set([sender, sender.toLowerCase(), sender.toUpperCase()])];
     const receiverVariants = [...new Set([receiver, receiver.toLowerCase(), receiver.toUpperCase()])];
 
+    // Only messages from the last few minutes count as context.
+    //
+    // This window did not exist, and its absence was a false-positive engine.
+    // The split-typing check below merges the sender's recent messages into one
+    // string and screens that, so it could catch someone typing "paise" / "naa"
+    // / "de" as separate messages. With no lower bound it merged the last 8
+    // messages no matter how old they were: once anything flagged sat in that
+    // history, EVERY later message inherited it forever. An owner typing "hi"
+    // was screened as "...453534545454 5000 7845 dede paise mujhe ... hi",
+    // flagged, and struck — twice, which suspends the account.
+    //
+    // Split typing means messages sent back-to-back in one breath, so a few
+    // minutes is the honest span. It matches ATTEMPT_SESSION_WINDOW, which
+    // already groups consecutive messages into a single attempt.
+    const contextSince = new Date(
+      new Date(messageDoc.created_at).getTime() - SPLIT_CONTEXT_WINDOW_MS
+    );
+
     const recentMessages = await ChatMessage.find({
       $or: [
         { room_id: { $in: receiverVariants }, sender_login_id: { $in: senderVariants } },
         { room_id: { $in: senderVariants }, sender_login_id: { $in: receiverVariants } }
       ],
-      created_at: { $lt: messageDoc.created_at }
+      created_at: { $lt: messageDoc.created_at, $gte: contextSince }
     })
       .sort({ created_at: -1 })
       .limit(8)
@@ -621,7 +709,7 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     const combinedSenderText = senderRecentTexts.join(' ');
 
     if (!localCheck.violation) {
-      const combinedCheck = detectViolation(combinedSenderText, settings || {});
+      const combinedCheck = detectViolation(stripRentAndAmounts(combinedSenderText), settings || {});
       if (combinedCheck.violation) {
         localCheck = combinedCheck;
         console.log(`⚡ Multi-message Split Evasion Violation Detected on message ${messageDoc._id}:`, combinedCheck.violation);
@@ -644,7 +732,7 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
         senderRole,
         receiverRole,
         contextHistory,
-        combinedSenderText
+        stripRentAndAmounts(combinedSenderText)
       );
     }
 
@@ -722,24 +810,40 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
 
         if (isRepeatedOrSevere) {
           console.log(`🚨 Auto-blocking offender ${offenderId} (Genuine Attempt 2 failed)`);
+          // Block the OFFENDER only. The previous `$or: [offenderId, ownerId]`
+          // matched a single document, and when the offender was the tenant
+          // (who has no Owner record) the only thing it could match was the
+          // owner — so a tenant's violation blocked the owner's account.
+          const offenderConds = [
+            { loginId: offenderId },
+            { loginId: String(offenderId).toUpperCase() }
+          ];
           await Promise.allSettled([
-            Owner.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' }),
-            User.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { status: 'blocked', isActive: false })
+            Owner.updateOne({ $or: offenderConds }, { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' }),
+            User.updateOne({ $or: offenderConds }, { status: 'blocked', isActive: false })
           ]);
           if (global.io) {
-            global.io.to(offenderId).to(ownerId).emit('account_blocked', {
+            global.io.to(offenderId).emit('account_blocked', {
               blocked: true,
               accountBlocked: true,
               reason: 'Your account has been permanently blocked due to repeated commission bypass attempts.'
             });
           }
         } else {
-          // New Attempt 1 — emit warning
+          // New Attempt 1 — emit warning to the OFFENDER only.
+          //
+          // This used to be `.to(offenderId).to(ownerId)`, so when the tenant
+          // was the offender the owner also got a "1st Warning: your account
+          // will be blocked" popup for something they did not send.
           if (global.io) {
-            global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+            global.io.to(offenderId).emit('message_blocked', {
               warning: true,
               warningType: '1st_warning',
               attemptCount: 1,
+              // The offending text, so the UI can show what was actually
+              // withheld instead of labelling this warning as the user's
+              // own message.
+              snippet: String(messageText || '').slice(0, 300),
               message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
             });
           }
@@ -795,10 +899,14 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       } else {
         // Grouped consecutive message — STILL show warning if it's Attempt 1 session
         if (attemptNumber < 2 && global.io) {
-          global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+          // Offender only — see the note on the other message_blocked emit.
+          // Warning somebody about a message they did not send is both
+          // confusing and, since it names account suspension, alarming.
+          global.io.to(offenderId).emit('message_blocked', {
             warning: true,
             warningType: '1st_warning',
             attemptCount: 1,
+            snippet: String(messageText || '').slice(0, 300),
             message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
           });
         }
@@ -820,7 +928,12 @@ setInterval(async () => {
     const toDeleteIds = [];
 
     for (const v of allViolations) {
-      const key = v.ownerId || v.participantLoginId;
+      // Group by the OFFENDER, matching what checkUserBlockStatus() counts.
+      // Keying on ownerId first bucketed a tenant's violation under the owner,
+      // so an owner with one real strike looked like two and this loop —
+      // whose whole job is to heal accounts below two genuine strikes — never
+      // unblocked them.
+      const key = v.participantLoginId;
       if (!key) continue;
       if (!userGroups.has(key)) {
         userGroups.set(key, [v]);
@@ -843,13 +956,16 @@ setInterval(async () => {
     }
 
     // Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
-    for (const [ownerKey, list] of userGroups.entries()) {
+    for (const [offenderKey, list] of userGroups.entries()) {
       if (list.length < 2) {
-        const isKeyObjId = mongoose.Types.ObjectId.isValid(ownerKey) && String(ownerKey).match(/^[0-9a-fA-F]{24}$/);
-        const ownerConds = [{ loginId: ownerKey }, { loginId: String(ownerKey).toUpperCase() }];
-        if (isKeyObjId) ownerConds.push({ _id: ownerKey });
-        await Owner.updateMany({ $or: ownerConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
-        await User.updateMany({ loginId: ownerKey }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
+        const isKeyObjId = mongoose.Types.ObjectId.isValid(offenderKey) && String(offenderKey).match(/^[0-9a-fA-F]{24}$/);
+        const offenderConds = [{ loginId: offenderKey }, { loginId: String(offenderKey).toUpperCase() }];
+        if (isKeyObjId) offenderConds.push({ _id: offenderKey });
+        await Owner.updateMany({ $or: offenderConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
+        // Matched on the exact-case loginId only, so a stored id whose case
+        // differed from the violation's stayed blocked forever while the Owner
+        // record beside it was healed.
+        await User.updateMany({ $or: offenderConds }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
       }
     }
   } catch (_) {}
