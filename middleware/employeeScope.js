@@ -116,7 +116,9 @@ async function applyEmployeeScope(req, res, next) {
       ]
     }).select('-password').lean() || req.user;
 
-    // Query visit reports submitted/added by this employee to grant scope on visit-added properties
+    // Scope is visit-report based: employee → VisitData/VisitReport → property → owner.
+    // Do NOT match ownerInfo.phone/email to the employee — empty strings match every
+    // report with a blank owner phone, which leaked other employees' records.
     let visitPropNames = [];
     let visitOwnerIds = [];
     let visitIds = [];
@@ -124,26 +126,36 @@ async function applyEmployeeScope(req, res, next) {
     try {
       const VisitData = require('../models/VisitData');
       const VisitReport = require('../models/VisitReport');
+      const Property = require('../models/Property');
+      const Owner = require('../models/Owner');
       const empLoginId = String(emp.loginId || '').trim();
       const empIdStr = String(emp._id || '').trim();
+      const staffValues = [...new Set([
+        empLoginId,
+        empLoginId.toUpperCase(),
+        empLoginId.toLowerCase(),
+        empIdStr,
+        String(emp.employeeId || '').trim()
+      ].filter(Boolean))];
+
+      const visitStaffFilter = staffValues.length
+        ? {
+            $or: [
+              { staffId: { $in: staffValues } },
+              { submittedByLoginId: { $in: staffValues } },
+              { submittedBy: { $in: staffValues } },
+              { submittedById: { $in: staffValues } }
+            ]
+          }
+        : { _id: { $exists: false } };
 
       const [myVisits, myVisitReports] = await Promise.all([
-        VisitData.find({
-          $or: [
-            { staffId: empLoginId },
-            { submittedByLoginId: empLoginId },
-            { submittedBy: empLoginId },
-            { submittedById: empIdStr },
-            { staffId: empIdStr }
-          ]
-        }).select('visitId propertyName ownerLoginId generatedCredentials').lean(),
-        VisitReport.find({
-          $or: [
-            { areaManager: emp._id },
-            { 'ownerInfo.phone': emp.phone || '' },
-            { 'ownerInfo.email': emp.email || '' }
-          ]
-        }).select('_id propertyInfo ownerInfo generatedCredentials property').lean()
+        VisitData.find(visitStaffFilter)
+          .select('visitId propertyName ownerLoginId generatedCredentials')
+          .lean(),
+        VisitReport.find({ areaManager: emp._id })
+          .select('_id propertyInfo generatedCredentials property')
+          .lean()
       ]);
 
       visitPropNames = [
@@ -159,6 +171,24 @@ async function applyEmployeeScope(req, res, next) {
         ...myVisitReports.map(vr => String(vr._id)).filter(Boolean)
       ];
       visitPropObjectIds = myVisitReports.map(vr => vr.property).filter(Boolean);
+
+      if (visitIds.length > 0) {
+        const linkedProps = await Property.find({ visitId: { $in: visitIds } })
+          .select('_id ownerLoginId')
+          .lean();
+        visitPropObjectIds = [...visitPropObjectIds, ...linkedProps.map(p => p._id)];
+        visitOwnerIds = [
+          ...visitOwnerIds,
+          ...linkedProps.map(p => p.ownerLoginId).filter(Boolean)
+        ];
+      }
+
+      visitOwnerIds = [...new Set(visitOwnerIds.map(id => String(id).trim().toUpperCase()).filter(Boolean))];
+
+      if (visitOwnerIds.length > 0) {
+        const ownerDocs = await Owner.find({ loginId: { $in: visitOwnerIds } }).select('_id').lean();
+        emp.assignedOwners = [...(emp.assignedOwners || []), ...ownerDocs.map(o => o._id)];
+      }
     } catch (vErr) {
       console.warn('[employeeScope] VisitData/VisitReport scope resolution warning:', vErr.message);
     }
@@ -167,11 +197,14 @@ async function applyEmployeeScope(req, res, next) {
 
     req.employeeScope = {
       isEmployee:         true,
+      isSuperadmin:       false,
       employeeId:         emp._id,
       loginId:            emp.loginId,
       city:               emp.city               || '',
       area:               emp.area               || '',
       areaCode:           emp.areaCode           || '',
+      locationCode:       emp.locationCode       || '',
+      locality:           emp.locality           || emp.area || '',
       cityId:             emp.cityId             || null,
       areaId:             emp.areaId             || null,
       assignedProperties: mergedAssignedProps,

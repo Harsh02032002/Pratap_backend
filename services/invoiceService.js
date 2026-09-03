@@ -13,16 +13,23 @@ const { calculatePenalties, determinePhase, calcDaysSinceDue } = require('../eng
 
 async function getEffectiveConfig(ownerId, propertyId, unitId) {
   let cfg = null;
+  const isOwnerObjId = ownerId && mongoose.Types.ObjectId.isValid(ownerId) && String(ownerId).match(/^[0-9a-fA-F]{24}$/);
+  const isPropObjId = propertyId && mongoose.Types.ObjectId.isValid(propertyId) && String(propertyId).match(/^[0-9a-fA-F]{24}$/);
+  const isUnitObjId = unitId && mongoose.Types.ObjectId.isValid(unitId) && String(unitId).match(/^[0-9a-fA-F]{24}$/);
 
-  if (unitId) {
-    cfg = await PenaltyConfig.findOne({ ownerId, propertyId, unitId, isActive: true }).lean();
-  }
-  if (!cfg && propertyId) {
-    cfg = await PenaltyConfig.findOne({ ownerId, propertyId, unitId: null, isActive: true }).lean();
-  }
-  if (!cfg) {
-    cfg = await PenaltyConfig.findOne({ ownerId, propertyId: null, unitId: null, isDefault: true, isActive: true }).lean();
-  }
+  try {
+    if (isOwnerObjId) {
+      if (isUnitObjId && isPropObjId) {
+        cfg = await PenaltyConfig.findOne({ ownerId, propertyId, unitId, isActive: true }).lean().catch(() => null);
+      }
+      if (!cfg && isPropObjId) {
+        cfg = await PenaltyConfig.findOne({ ownerId, propertyId, unitId: null, isActive: true }).lean().catch(() => null);
+      }
+      if (!cfg) {
+        cfg = await PenaltyConfig.findOne({ ownerId, propertyId: null, unitId: null, isDefault: true, isActive: true }).lean().catch(() => null);
+      }
+    }
+  } catch (_) {}
 
   if (cfg) return mergeWithGlobal(cfg);
   return buildGlobalConfig();
@@ -375,19 +382,30 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
   try {
     const Owner = require('../models/Owner');
     const Property = require('../models/Property');
+    const Tenant = require('../models/Tenant');
 
-    let loginId = reqUser?.loginId || (typeof ownerIdInput === 'string' && ownerIdInput.startsWith('ROOMHY') ? ownerIdInput : null);
-    
-    let ownerDoc = null;
-    if (loginId) {
-      ownerDoc = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).lean();
-    }
-    if (!ownerDoc && ownerIdInput) {
-      ownerDoc = await Owner.findOne({ $or: [{ _id: ownerIdInput }, { loginId: String(ownerIdInput).toUpperCase() }] }).lean();
+    if (!ownerIdInput && !reqUser) return { success: false, message: 'No owner parameter provided' };
+
+    const rawOwnerId = String(reqUser?.loginId || ownerIdInput || '').trim();
+    if (!rawOwnerId) return { success: false, message: 'Invalid owner ID' };
+
+    const isObjId = mongoose.Types.ObjectId.isValid(rawOwnerId) && String(rawOwnerId).match(/^[0-9a-fA-F]{24}$/);
+
+    const ownerOrConds = [
+      { loginId: rawOwnerId.toUpperCase() },
+      { loginId: rawOwnerId }
+    ];
+    if (isObjId) {
+      ownerOrConds.push({ _id: rawOwnerId });
     }
 
-    const ownerObjId = ownerDoc?._id || ownerIdInput;
-    const ownerLoginId = ownerDoc?.loginId || loginId || String(ownerIdInput).toUpperCase();
+    const ownerDoc = await Owner.findOne({ $or: ownerOrConds }).lean();
+    if (!ownerDoc) {
+      return { success: false, message: `Owner not found for ${rawOwnerId}` };
+    }
+
+    const ownerObjId = ownerDoc._id;
+    const ownerLoginId = ownerDoc.loginId || rawOwnerId.toUpperCase();
 
     // Find properties owned by this owner
     const properties = await Property.find({
@@ -400,7 +418,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
     const tenants = await Tenant.find({
       $or: [
         { ownerLoginId },
-        { property: { $in: propertyIds } },
+        ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : []),
         { assignedBy: ownerObjId }
       ],
       isDeleted: { $ne: true },

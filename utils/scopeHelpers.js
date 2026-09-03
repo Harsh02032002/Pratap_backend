@@ -61,7 +61,6 @@ function _toObjectIdArray(ids = []) {
 function _buildScopedPropertyOrClauses(scope) {
   const assignedIds = _toObjectIdArray(scope.assignedProperties);
   const rawAssigned = (scope.assignedProperties || []).map(String).filter(Boolean);
-  const visitPropNames = scope.visitPropNames || [];
   const visitOwnerIds = scope.visitOwnerIds || [];
   const visitIds = scope.visitIds || [];
   const empLoginId = String(scope.loginId || '').trim();
@@ -94,16 +93,12 @@ function _buildScopedPropertyOrClauses(scope) {
   if (visitIds.length > 0) {
     orConditions.push({ visitId: { $in: visitIds } });
   }
-  if (visitPropNames.length > 0) {
-    orConditions.push({ title: { $in: visitPropNames } });
-    orConditions.push({ propertyName: { $in: visitPropNames } });
-    orConditions.push({ property_name: { $in: visitPropNames } });
-  }
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = _idListCandidates(visitOwnerIds);
-    orConditions.push({ ownerLoginId: { $in: ownerRegexes } });
-    orConditions.push({ owner_id: { $in: ownerRegexes } });
-    orConditions.push({ ownerId: { $in: ownerRegexes } });
+    const ownerIds = _idListCandidates(visitOwnerIds);
+    orConditions.push({ ownerLoginId: { $in: ownerIds } });
+    orConditions.push({ owner_id: { $in: ownerIds } });
+    orConditions.push({ ownerId: { $in: ownerIds } });
+    orConditions.push({ 'generatedCredentials.loginId': { $in: ownerIds } });
   }
 
   return orConditions;
@@ -223,7 +218,6 @@ function applyPropertyScope(req, baseFilter = {}) {
   if (!scope || !scope.isEmployee) return { ...baseFilter };
 
   const assignedIds = _toObjectIdArray(scope.assignedProperties);
-  const visitPropNames = scope.visitPropNames || [];
   const visitOwnerIds  = scope.visitOwnerIds  || [];
   const visitIds       = scope.visitIds       || [];
   const empLoginId     = String(scope.loginId || '').trim();
@@ -231,7 +225,7 @@ function applyPropertyScope(req, baseFilter = {}) {
 
   const orConditions = [];
 
-  // 1. Explicitly assigned property ObjectIds
+  // 1. Explicitly assigned property ObjectIds (includes properties linked from this employee's visits)
   if (assignedIds.length > 0) {
     orConditions.push({ _id: { $in: assignedIds } });
   }
@@ -250,24 +244,16 @@ function applyPropertyScope(req, baseFilter = {}) {
     orConditions.push({ assignedTo: new mongoose.Types.ObjectId(empIdStr) });
   }
 
-  // 3. Properties from Visit Reports submitted by this employee
+  // 3. Properties created from this employee's visit reports (visitId / owner login)
+  // Title/city/area matching is intentionally omitted: two properties can share a
+  // name or city and that used to leak Employee B's records to Employee A.
   if (visitIds.length > 0) {
     orConditions.push({ visitId: { $in: visitIds } });
   }
-  if (visitPropNames.length > 0) {
-    orConditions.push({ title: { $in: visitPropNames } });
-  }
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = _idListCandidates(visitOwnerIds);
-    orConditions.push({ ownerLoginId: { $in: ownerRegexes } });
-  }
-
-  // 4. Properties matching employee's assigned Area/City/Zone
-  if (scope.area || scope.areaCode || scope.city) {
-    const locPattern = new RegExp(`^${String(scope.area || scope.areaCode || scope.city).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
-    orConditions.push({ locationCode: locPattern });
-    orConditions.push({ area: locPattern });
-    orConditions.push({ city: locPattern });
+    const ownerIds = _idListCandidates(visitOwnerIds);
+    orConditions.push({ ownerLoginId: { $in: ownerIds } });
+    orConditions.push({ 'generatedCredentials.loginId': { $in: ownerIds } });
   }
 
   // If employee has NO assigned properties and NO visit properties, block unscoped access
@@ -311,8 +297,8 @@ function applyOwnerScope(req, baseFilter = {}) {
   }
 
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = _idListCandidates(visitOwnerIds);
-    orConditions.push({ loginId: { $in: ownerRegexes } });
+    const ownerIds = _idListCandidates(visitOwnerIds);
+    orConditions.push({ loginId: { $in: ownerIds } });
   }
 
   if (empLoginId) {
@@ -326,18 +312,8 @@ function applyOwnerScope(req, baseFilter = {}) {
     orConditions.push({ addedByStaffId: empIdStr });
   }
 
-  if (scope.area || scope.areaCode || scope.city) {
-    // Intentional prefix search on a human-entered location name — kept as a
-    // regex. Escaped so metacharacters in the value cannot alter the match
-    // (matches the sibling helper's handling above).
-    const locPattern = new RegExp(`^${escapeRegex(scope.area || scope.areaCode || scope.city)}`, 'i');
-    orConditions.push({ locationCode: locPattern });
-    orConditions.push({ area: locPattern });
-    orConditions.push({ city: locPattern });
-  }
-
   if (orConditions.length === 0) {
-    return { ...baseFilter, isDeleted: { $ne: true } };
+    return { ...baseFilter, _id: { $exists: false } };
   }
 
   if (baseFilter.$or) {
@@ -466,15 +442,27 @@ function applyVisitScope(req, baseFilter = {}) {
   const scope = req.employeeScope;
   if (!scope || !scope.isEmployee) return { ...baseFilter };
 
-  return {
-    ...baseFilter,
-    $or: [
-      { assignedEmployee: scope.employeeId },
-      { assignedTo:       scope.employeeId },
-      { employeeId:       scope.employeeId },
-      { submittedBy:      scope.loginId    },
-    ],
-  };
+  const loginIds = _idCandidates(scope.loginId);
+  const empIdStr = String(scope.employeeId || '').trim();
+  const orClauses = [];
+
+  if (loginIds.length) {
+    orClauses.push({ staffId: { $in: loginIds } });
+    orClauses.push({ submittedByLoginId: { $in: loginIds } });
+    orClauses.push({ submittedBy: { $in: loginIds } });
+    orClauses.push({ submittedById: { $in: loginIds } });
+  }
+  if (empIdStr) {
+    orClauses.push({ submittedById: empIdStr });
+    orClauses.push({ assignedEmployee: scope.employeeId });
+    orClauses.push({ assignedTo: scope.employeeId });
+    orClauses.push({ employeeId: scope.employeeId });
+  }
+  if ((scope.visitIds || []).length > 0) {
+    orClauses.push({ visitId: { $in: scope.visitIds } });
+  }
+
+  return _scopedOrFilter(req, baseFilter, orClauses);
 }
 
 // ─── Report Filter ────────────────────────────────────────────────────────────
@@ -615,15 +603,10 @@ function applyLeadScope(req, baseFilter = {}) {
     orClauses.push({ property: { $in: assignedIds } });
   }
 
-  if (visitPropNames.length > 0) {
-    orClauses.push({ property_name: { $in: visitPropNames } });
-    orClauses.push({ propertyName: { $in: visitPropNames } });
-  }
-
   if (visitOwnerIds.length > 0) {
-    const ownerRegexes = _idListCandidates(visitOwnerIds);
-    orClauses.push({ owner_name: { $in: ownerRegexes } });
-    orClauses.push({ ownerLoginId: { $in: ownerRegexes } });
+    const ownerIds = _idListCandidates(visitOwnerIds);
+    orClauses.push({ ownerLoginId: { $in: ownerIds } });
+    orClauses.push({ owner_id: { $in: ownerIds } });
   }
 
   if (orClauses.length === 0) {
@@ -675,6 +658,107 @@ function applyRentScope(req, baseFilter = {}) {
   return _scopedOrFilter(req, baseFilter, orClauses);
 }
 
+function applyKycSignupScope(req, baseFilter = {}) {
+  const scope = req.employeeScope;
+  if (!scope || !scope.isEmployee) return { ...baseFilter };
+
+  const ownerIds = _idListCandidates(scope.visitOwnerIds || []);
+  const orClauses = [];
+  if (ownerIds.length) {
+    orClauses.push({ loginId: { $in: ownerIds } });
+  }
+  return _scopedOrFilter(req, baseFilter, orClauses);
+}
+
+/**
+ * True when this VisitData document belongs to the authenticated employee.
+ * Superadmin / non-employee callers are always allowed (returns true).
+ */
+function visitBelongsToEmployee(visit, scope) {
+  if (!scope || !scope.isEmployee) return true;
+  if (!visit) return false;
+
+  const loginIds = new Set(_idCandidates(scope.loginId));
+  const empId = String(scope.employeeId || '');
+  const fieldValues = [
+    visit.staffId,
+    visit.submittedByLoginId,
+    visit.submittedBy,
+    visit.submittedById
+  ];
+  for (const value of fieldValues) {
+    if (!value) continue;
+    const raw = String(value);
+    if (loginIds.has(raw) || loginIds.has(raw.toUpperCase()) || raw === empId) return true;
+  }
+  if (empId) {
+    const assigned = [visit.assignedEmployee, visit.assignedTo, visit.employeeId];
+    if (assigned.some((id) => id && String(id) === empId)) return true;
+  }
+  const visitIds = scope.visitIds || [];
+  if (visit.visitId && visitIds.includes(visit.visitId)) return true;
+  if (visit._id && visitIds.includes(String(visit._id))) return true;
+  return false;
+}
+
+function requireOwnerInScope(paramName = 'loginId') {
+  return async function (req, res, next) {
+    if (!isScopedEmployee(req)) return next();
+    const raw = req.params[paramName] || req.params.ownerLoginId || req.params.loginId;
+    const loginId = String(raw || '').trim().toUpperCase();
+    if (!loginId) {
+      return res.status(404).json({ success: false, message: 'Owner not found' });
+    }
+    const Owner = require('../models/Owner');
+    const found = await Owner.findOne(applyOwnerScope(req, {
+      loginId,
+      isDeleted: { $ne: true }
+    })).select('_id').lean();
+    if (!found) {
+      return res.status(404).json({ success: false, message: 'Owner not found or access denied' });
+    }
+    return next();
+  };
+}
+
+function requirePropertyInScope(paramName = 'id') {
+  return async function (req, res, next) {
+    if (!isScopedEmployee(req)) return next();
+    const id = String(req.params[paramName] || '').trim();
+    if (!id) {
+      return res.status(404).json({ success: false, message: 'Property not found' });
+    }
+    const Property = require('../models/Property');
+    const extra = (mongoose.Types.ObjectId.isValid(id) && id.length === 24)
+      ? { $or: [{ _id: id }, { visitId: id }, { propertyId: id }] }
+      : { $or: [{ visitId: id }, { propertyId: id }] };
+    const found = await Property.findOne(applyPropertyScope(req, extra)).select('_id').lean();
+    if (!found) {
+      return res.status(404).json({ success: false, message: 'Property not found or access denied' });
+    }
+    return next();
+  };
+}
+
+function requireVisitInScope(paramName = 'visitId') {
+  return async function (req, res, next) {
+    if (!isScopedEmployee(req)) return next();
+    const id = String(req.params[paramName] || req.params.id || '').trim();
+    if (!id) {
+      return res.status(404).json({ success: false, message: 'Visit not found' });
+    }
+    const VisitData = require('../models/VisitData');
+    const extra = (mongoose.Types.ObjectId.isValid(id) && id.length === 24)
+      ? { $or: [{ _id: id }, { visitId: id }] }
+      : { visitId: id };
+    const found = await VisitData.findOne(applyVisitScope(req, extra)).select('_id').lean();
+    if (!found) {
+      return res.status(404).json({ success: false, message: 'Visit report not found or access denied' });
+    }
+    return next();
+  };
+}
+
 module.exports = {
   isScopedEmployee,
   employeeBlocksRevenue,
@@ -694,5 +778,10 @@ module.exports = {
   applySupportScope,
   applyTransactionScope,
   applyRentScope,
+  applyKycSignupScope,
+  visitBelongsToEmployee,
+  requireOwnerInScope,
+  requirePropertyInScope,
+  requireVisitInScope,
 };
 

@@ -38,6 +38,7 @@ async function notifySuperadmin({
 }) {
     if (!type) return null;
 
+    // Create in-app notification for Superadmin Dashboard panel
     const notification = await Notification.create({
         toRole: 'superadmin',
         toLoginId: 'superadmin',
@@ -49,22 +50,25 @@ async function notifySuperadmin({
         read: false
     });
 
-    try {
-        const emails = await getSuperadminEmails();
-        if (emails.length) {
-            const html = `
-                <div style="font-family: Arial, sans-serif; font-size: 14px;">
-                    <h2>RoomHy Superadmin Notification</h2>
-                    <p>${escapeHtml(message)}</p>
-                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
-                        ${buildMetaHtml(meta)}
+    // Only send email to superadmin if explicitly configured via env
+    if (process.env.SEND_ADMIN_EMAIL_NOTIFICATIONS === 'true') {
+        try {
+            const emails = await getSuperadminEmails();
+            if (emails.length) {
+                const html = `
+                    <div style="font-family: Arial, sans-serif; font-size: 14px;">
+                        <h2>RoomHy Superadmin Notification</h2>
+                        <p>${escapeHtml(message)}</p>
+                        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
+                            ${buildMetaHtml(meta)}
+                        </div>
                     </div>
-                </div>
-            `;
-            await mailer.sendMail(emails, subject, message, html);
+                `;
+                await mailer.sendMail(emails, subject, message, html);
+            }
+        } catch (mailError) {
+            console.warn('notifySuperadmin email failed:', mailError.message);
         }
-    } catch (mailError) {
-        console.warn('notifySuperadmin email failed:', mailError.message);
     }
 
     return notification;

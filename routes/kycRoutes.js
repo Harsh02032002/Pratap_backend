@@ -8,6 +8,8 @@ const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { formLimiter, otpLimiter, otpIpLimiter, captchaProtection } = require('../middleware/security');
 const { sendOTPSMS, formatPhoneNumber } = require('../utils/smsService');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { applyKycSignupScope } = require('../utils/scopeHelpers');
 
 // Temporary OTP store (for production, move to Redis/database)
 const signupOtpStore = new Map();
@@ -448,10 +450,11 @@ router.post('/login/verify-otp', async (req, res) => {
     }
 });
 
-// Get all signups from MongoDB
-router.get('/', protect, authorize('superadmin', 'areamanager', 'employee'), async (req, res) => {
+// Get all signups from MongoDB (Scoped for employees)
+router.get('/', protect, authorize('superadmin', 'areamanager', 'employee'), applyEmployeeScope, async (req, res) => {
     try {
-        const signups = await KYCVerification.find().select('-password');
+        const query = applyKycSignupScope(req, {});
+        const signups = await KYCVerification.find(query).select('-password');
         console.log(`✓ Retrieved ${signups.length} signups from MongoDB`);
         res.json(signups);
     } catch (error) {
@@ -539,12 +542,13 @@ router.post('/submit', formLimiter, captchaProtection({ required: false }), asyn
     }
 });
 
-// Get signup by ID
-router.get('/:id', protect, authorize('superadmin', 'areamanager', 'employee'), async (req, res) => {
+// Get signup by ID (Scoped for employees)
+router.get('/:id', protect, authorize('superadmin', 'areamanager', 'employee'), applyEmployeeScope, async (req, res) => {
     try {
-        const signup = await KYCVerification.findById(req.params.id).select('-password');
+        const query = applyKycSignupScope(req, { _id: req.params.id });
+        const signup = await KYCVerification.findOne(query).select('-password');
         if (!signup) {
-            return res.status(404).json({ message: 'Signup not found' });
+            return res.status(404).json({ message: 'Signup not found or access denied' });
         }
         res.json(signup);
     } catch (error) {

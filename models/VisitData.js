@@ -149,6 +149,19 @@ const VisitDataSchema = new mongoose.Schema({
     bankName:              { type: String },
     bankBranchName:        { type: String },
     bankUpiId:             { type: String },
+    ifscStatus:            { type: String, enum: ['valid', 'invalid', ''], default: '' },
+    bankAccountVerificationStatus: {
+        type: String,
+        enum: ['verified', 'failed', 'pending', 'not_configured'],
+        default: 'pending'
+    },
+    listingImages:         [{ type: String }],
+    propertyViews: [{
+        label: { type: String },
+        images: [{ type: String }],
+        description: { type: String }
+    }],
+    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' },
     photoTimestamps:       { type: mongoose.Schema.Types.Mixed },
     // Per-photo provenance.
     //

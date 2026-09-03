@@ -10,6 +10,8 @@ const Room = require('../models/Room');
 const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { requireOwnerInScope } = require('../utils/scopeHelpers');
 const { auditTrail } = require('../middleware/auditTrail');
 const { normalizeLoginId } = require('../utils/normalizeId');
 const { sumPaymentTransactions, sumRentPayments, sumEnquiryPaidAmounts } = require('../services/paymentTotalsService');
@@ -120,8 +122,6 @@ router.post('/', auditTrail('owners'), async (req, res) => {
     }
 });
 
-const { applyEmployeeScope } = require('../middleware/employeeScope');
-
 // 2. List all owners (Updated for Dashboard & Area Manager Filtering)
 // Supports: ?locationCode=KO (prefix match), ?kycStatus=verified, ?search=...
 router.get('/', protect, applyEmployeeScope, ownerController.getAllOwners);
@@ -229,8 +229,8 @@ router.get('/subscription-status', async (req, res) => {
 // 2c. Approve owner request (Super Admin Action)
 router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
-// 3. Get owner by loginId (Preserved)
-router.get('/:loginId', ownerController.getOwnerById);
+// 3. Get owner by loginId (Preserved with Scope Protection)
+router.get('/:loginId', protect, applyEmployeeScope, requireOwnerInScope('loginId'), ownerController.getOwnerById);
 
 // 3b. Delete owner by loginId (Soft Delete)
 router.delete('/:loginId', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {
@@ -337,7 +337,7 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
 });
 
 // 6. Get rooms for owner by loginId (Preserved - Used by Dashboard)
-router.get('/:loginId/rooms', async (req, res) => {
+router.get('/:loginId/rooms', protect, applyEmployeeScope, requireOwnerInScope('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -386,7 +386,7 @@ router.get('/:loginId/rooms', async (req, res) => {
 });
 
 // 7. Get properties for owner by loginId
-router.get('/:loginId/properties', async (req, res) => {
+router.get('/:loginId/properties', protect, applyEmployeeScope, requireOwnerInScope('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled

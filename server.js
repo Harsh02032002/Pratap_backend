@@ -459,6 +459,8 @@ try {
     console.log('  ✓ tenantRoutes');
     app.use('/api/visits', require('./routes/visitDataRoutes'));
     console.log('  ✓ visitDataRoutes');
+    app.use('/api/bank', require('./routes/bankRoutes'));
+    console.log('  ✓ bankRoutes');
     app.use('/api/rooms', require('./routes/roomRoutes'));
     console.log('  ✓ roomRoutes');
     app.use('/api/notifications', require('./routes/notificationRoutes'));

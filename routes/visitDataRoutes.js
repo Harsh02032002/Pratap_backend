@@ -10,6 +10,8 @@ const Property = require('../models/Property');
 const mailer = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { requireVisitInScope } = require('../utils/scopeHelpers');
 const { clearCache } = require('../middleware/apiCache');
 // Was 12000 — exactly the client timeout, so it could never fire before the
 // browser gave up. Now drawn from the shared hierarchy (7s read class), which
@@ -590,7 +592,6 @@ router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areaman
         const requestedStaffId = String(req.query.staffId || '').trim();
         const requestedStaffName = (req.query.staffName || '').toString().trim();
 
-        // Employees should only see their own visit reports.
         const isEmployee = requester?.role === 'employee' || requester?.role === 'staff' || requester?.role === 'areamanager';
         const enforcedStaffId = isEmployee
             ? String(requester?.loginId || requestedStaffId || '').trim()
@@ -601,11 +602,62 @@ router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areaman
         const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
         const skip = Math.max(0, parseInt(req.query.skip, 10) || 0);
 
-        const cacheKey = JSON.stringify({ staffId, staffName, limit, skip });
+        const cacheKey = JSON.stringify({ staffId, staffName, limit, skip, empRole: requester?.role, empCity: requester?.city, empArea: requester?.area });
 
         let query = {};
         let usesCaseInsensitiveMatch = false;
-        if (staffId || staffName) {
+
+        if (isEmployee && requester) {
+            const empCity = (requester.city || '').trim();
+            const empArea = (requester.area || requester.areaCode || '').trim();
+
+            const employeeFilters = [];
+
+            // 1. Explicitly assigned by staffId / loginId
+            if (staffId) {
+                const idValues = uniqueTruthy([
+                    staffId,
+                    String(staffId).toUpperCase(),
+                    String(staffId).toLowerCase()
+                ]);
+                employeeFilters.push(
+                    { staffId: { $in: idValues } },
+                    { submittedById: { $in: idValues } },
+                    { submittedByLoginId: { $in: idValues } }
+                );
+            }
+
+            // 2. City & Area matching for new verification requests in employee's assigned area
+            if (empCity) {
+                usesCaseInsensitiveMatch = true;
+                const cityRegex = new RegExp(`^${escapeRegex(empCity)}$`, 'i');
+                if (empArea) {
+                    const areaRegex = new RegExp(`^${escapeRegex(empArea)}$`, 'i');
+                    employeeFilters.push({
+                        city: cityRegex,
+                        $or: [
+                            { area: areaRegex },
+                            { landmark: areaRegex }
+                        ]
+                    });
+                } else {
+                    employeeFilters.push({ city: cityRegex });
+                }
+            }
+
+            // 3. Explicitly assigned properties
+            if (requester.assignedProperties && requester.assignedProperties.length > 0) {
+                employeeFilters.push({ _id: { $in: requester.assignedProperties } });
+            }
+
+            query = employeeFilters.length ? { $or: employeeFilters } : { staffId: staffId || 'NONE' };
+            console.log('[visits/GET] Fetching visits for employee with area scope:', {
+                staffId,
+                empCity,
+                empArea,
+                filtersCount: employeeFilters.length
+            });
+        } else if (staffId || staffName) {
             const or = [];
             if (staffId) {
                 const idValues = uniqueTruthy([
@@ -629,13 +681,9 @@ router.get('/', protect, authorize('superadmin', 'employee', 'manager', 'areaman
                 );
             }
             query = or.length ? { $or: or } : {};
-            console.log('[visits/GET] Fetching visits for staff filter:', {
-                staffId,
-                staffName,
-                enforcedByRole: isEmployee
-            });
+            console.log('[visits/GET] Fetching visits for superadmin staff filter:', { staffId, staffName });
         } else {
-            console.log('[visits/GET] Fetching all visits');
+            console.log('[visits/GET] Fetching all visits (Superadmin access)');
         }
 
         const fetchVisits = async () => {
@@ -1482,9 +1530,9 @@ router.post('/:visitId/send-kyc-link', protect, authorize('superadmin', 'employe
 // The token routes were never reachable and duplicated kycStatus handling.
 
 // ============================================================
-// GET: Get a single visit by ID
+// GET: Get a single visit by ID (Scoped for employees)
 // ============================================================
-router.get('/:visitId', async (req, res) => {
+router.get('/:visitId', protect, applyEmployeeScope, requireVisitInScope('visitId'), async (req, res) => {
     try {
         const visit = await VisitData.findOne({ visitId: req.params.visitId });
         

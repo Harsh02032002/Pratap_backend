@@ -124,8 +124,8 @@ async function resolvePhoneByEmailOrUserId({ phone, email, userId }) {
 
     try {
         if (normalizedEmail) {
-            const userDoc = await User.findOne({ email: normalizedEmail }).select('phone').lean();
-            const userPhone = normalizePhoneNumber(userDoc?.phone, cfg.defaultCountryCode);
+            const userDoc = await User.findOne({ email: normalizedEmail }).select('phone mobile checkinPhone').lean();
+            const userPhone = normalizePhoneNumber(userDoc?.phone || userDoc?.mobile || userDoc?.checkinPhone, cfg.defaultCountryCode);
             if (userPhone) return userPhone;
         }
     } catch (_) {}
@@ -134,8 +134,8 @@ async function resolvePhoneByEmailOrUserId({ phone, email, userId }) {
         if (normalizedEmail) {
             const ownerDoc = await Owner.findOne({
                 $or: [{ email: normalizedEmail }, { 'profile.email': normalizedEmail }]
-            }).select('phone profile.phone').lean();
-            const ownerPhone = normalizePhoneNumber(ownerDoc?.phone || ownerDoc?.profile?.phone, cfg.defaultCountryCode);
+            }).select('phone mobile checkinPhone profile.phone').lean();
+            const ownerPhone = normalizePhoneNumber(ownerDoc?.phone || ownerDoc?.mobile || ownerDoc?.checkinPhone || ownerDoc?.profile?.phone, cfg.defaultCountryCode);
             if (ownerPhone) return ownerPhone;
         }
     } catch (_) {}
@@ -145,21 +145,47 @@ async function resolvePhoneByEmailOrUserId({ phone, email, userId }) {
             const tenantDoc = await Tenant.findOne({
                 $or: [
                     normalizedEmail ? { email: normalizedEmail } : null,
-                    normalizedUserId ? { loginId: normalizedUserId.toUpperCase() } : null
+                    normalizedUserId ? { loginId: normalizedUserId.toUpperCase() } : null,
+                    normalizedUserId ? { loginId: normalizedUserId.toLowerCase() } : null
                 ].filter(Boolean)
-            }).select('phone').lean();
-            const tenantPhone = normalizePhoneNumber(tenantDoc?.phone, cfg.defaultCountryCode);
+            }).select('phone mobile').lean();
+            const tenantPhone = normalizePhoneNumber(tenantDoc?.phone || tenantDoc?.mobile, cfg.defaultCountryCode);
             if (tenantPhone) return tenantPhone;
         }
     } catch (_) {}
 
     try {
         if (normalizedUserId) {
+            const isUserObjId = mongoose.Types.ObjectId.isValid(normalizedUserId) && String(normalizedUserId).match(/^[0-9a-fA-F]{24}$/);
+            const userConds = [
+                { loginId: { $regex: new RegExp(`^${normalizedUserId.replace(/[^a-zA-Z0-9_-]/g, '')}$`, 'i') } },
+                { loginId: normalizedUserId.toUpperCase() },
+                { loginId: normalizedUserId.toLowerCase() }
+            ];
+            if (isUserObjId) userConds.push({ _id: normalizedUserId });
             const userDoc = await User.findOne({
-                $or: [{ loginId: normalizedUserId.toUpperCase() }, { _id: normalizedUserId }]
-            }).select('phone').lean();
-            const userPhone = normalizePhoneNumber(userDoc?.phone, cfg.defaultCountryCode);
+                $or: userConds
+            }).select('phone mobile checkinPhone').lean();
+            const userPhone = normalizePhoneNumber(userDoc?.phone || userDoc?.mobile || userDoc?.checkinPhone, cfg.defaultCountryCode);
             if (userPhone) return userPhone;
+        }
+    } catch (_) {}
+
+    try {
+        if (normalizedUserId) {
+            const isOwnerObjId = mongoose.Types.ObjectId.isValid(normalizedUserId) && String(normalizedUserId).match(/^[0-9a-fA-F]{24}$/);
+            const ownerConds = [
+                { loginId: { $regex: new RegExp(`^${normalizedUserId.replace(/[^a-zA-Z0-9_-]/g, '')}$`, 'i') } },
+                { loginId: normalizedUserId.toUpperCase() },
+                { loginId: normalizedUserId.toLowerCase() },
+                { owner_id: normalizedUserId }
+            ];
+            if (isOwnerObjId) ownerConds.push({ _id: normalizedUserId });
+            const ownerDoc = await Owner.findOne({
+                $or: ownerConds
+            }).select('phone mobile checkinPhone profile.phone').lean();
+            const ownerPhone = normalizePhoneNumber(ownerDoc?.phone || ownerDoc?.mobile || ownerDoc?.checkinPhone || ownerDoc?.profile?.phone, cfg.defaultCountryCode);
+            if (ownerPhone) return ownerPhone;
         }
     } catch (_) {}
 

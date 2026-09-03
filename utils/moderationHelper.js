@@ -429,9 +429,12 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
       }
     } else if (attemptNumber >= 2 && isNewAttempt) {
       // Strike 2: Auto block owner and user account after 2 genuine attempts
+      const isOwnerObjId = mongoose.Types.ObjectId.isValid(ownerId) && String(ownerId).match(/^[0-9a-fA-F]{24}$/);
+      const ownerConds = [{ loginId: ownerId }, { loginId: String(ownerId).toUpperCase() }];
+      if (isOwnerObjId) ownerConds.push({ _id: ownerId });
       await Promise.allSettled([
-        Owner.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { isActive: false }),
-        User.updateOne({ $or: [{ loginId: ownerId }, { _id: ownerId }] }, { status: 'blocked', isActive: false })
+        Owner.updateOne({ $or: ownerConds }, { isActive: false }),
+        User.updateOne({ $or: ownerConds }, { status: 'blocked', isActive: false })
       ]);
 
       const blockWarningMsg = new ChatMessage({
@@ -847,7 +850,10 @@ setInterval(async () => {
     // Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
     for (const [ownerKey, list] of userGroups.entries()) {
       if (list.length < 2) {
-        await Owner.updateMany({ $or: [{ loginId: ownerKey }, { _id: ownerKey }] }, { $set: { isActive: true, chatRestrictedUntil: null } });
+        const isKeyObjId = mongoose.Types.ObjectId.isValid(ownerKey) && String(ownerKey).match(/^[0-9a-fA-F]{24}$/);
+        const ownerConds = [{ loginId: ownerKey }, { loginId: String(ownerKey).toUpperCase() }];
+        if (isKeyObjId) ownerConds.push({ _id: ownerKey });
+        await Owner.updateMany({ $or: ownerConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
         await User.updateMany({ loginId: ownerKey }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
       }
     }

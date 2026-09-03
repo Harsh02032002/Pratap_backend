@@ -197,15 +197,36 @@ exports.getRoomsByProperty = async (req, res) => {
         const limit = parseInt(req.query.limit) || 0;
         console.log("Searching rooms for propertyId:", propertyId, "unassigned:", unassigned, "page:", page, "limit:", limit);
         
-        // Ensure propertyId is a valid ObjectId
-        if (!mongoose.Types.ObjectId.isValid(propertyId)) {
-          return res.status(400).json({ message: "Invalid Property ID format" });
+        if (!propertyId) {
+            return res.status(400).json({ message: "Property ID is required" });
         }
-        
-        // Read-only path. Occupancy counters are recalculated by room mutations
-        // and by the scheduled heal job — a GET must not write.
 
-        const query = { property: new mongoose.Types.ObjectId(propertyId), isDeleted: { $ne: true } };
+        // Resolve actual Property document and _id (supports ObjectId, visitId, propertyId string, or title)
+        let propDoc = null;
+        if (mongoose.Types.ObjectId.isValid(propertyId)) {
+            propDoc = await Property.findById(propertyId).lean();
+        }
+        if (!propDoc) {
+            propDoc = await Property.findOne({
+                $or: [
+                    mongoose.Types.ObjectId.isValid(propertyId) ? { _id: new mongoose.Types.ObjectId(propertyId) } : null,
+                    { propertyId: propertyId },
+                    { visitId: propertyId },
+                    { title: propertyId }
+                ].filter(Boolean)
+            }).lean();
+        }
+
+        const resolvedObjectId = propDoc ? propDoc._id : (mongoose.Types.ObjectId.isValid(propertyId) ? new mongoose.Types.ObjectId(propertyId) : null);
+        const resolvedPropIdString = propDoc?.propertyId || propertyId;
+
+        // Build room query matching either ObjectId or string ID
+        const queryOr = [];
+        if (resolvedObjectId) queryOr.push({ property: resolvedObjectId });
+        if (resolvedPropIdString) queryOr.push({ propertyId: resolvedPropIdString }, { property: resolvedPropIdString });
+        queryOr.push({ property: propertyId });
+
+        const query = { $or: queryOr, isDeleted: { $ne: true } };
         let roomsQuery = Room.find(query).populate('property', 'title');
         
         if (limit > 0) {
@@ -213,31 +234,34 @@ exports.getRoomsByProperty = async (req, res) => {
         }
         
         let rooms = await roomsQuery.lean();
-// Fallback generation: if no rooms found, generate from property roomTypes
-if (rooms.length === 0) {
-    const selectedProp = await Property.findById(propertyId).lean();
-    if (selectedProp && Array.isArray(selectedProp.roomTypes)) {
-        selectedProp.roomTypes.forEach(rt => {
-            const count = parseInt(rt.totalRooms) || 0;
-            const bedsCount = parseInt(rt.occupancy) || parseInt(rt.totalBeds) || 1;
-            const priceVal = Number(rt.pricePerBed || rt.pricePerRoom || 0);
-            for (let i = 1; i <= count; i++) {
-                rooms.push({
-                    _id: `${rt.type}-${i}`,
-                    title: `${rt.type} - Room ${i}`,
-                    type: rt.type,
-                    beds: bedsCount,
-                    price: priceVal,
-                    property: propertyId
+
+        // Fallback generation: if no rooms found, generate from property roomTypes
+        if (rooms.length === 0 && propDoc) {
+            if (Array.isArray(propDoc.roomTypes)) {
+                propDoc.roomTypes.forEach(rt => {
+                    const count = parseInt(rt.totalRooms) || 0;
+                    const bedsCount = parseInt(rt.occupancy) || parseInt(rt.totalBeds) || 1;
+                    const priceVal = Number(rt.pricePerBed || rt.pricePerRoom || 0);
+                    const floorName = rt.floor || rt.floorNo || 'Ground Floor';
+                    for (let i = 1; i <= count; i++) {
+                        rooms.push({
+                            _id: `${rt.type}-${i}`,
+                            title: `${rt.type} - Room ${i}`,
+                            type: rt.type,
+                            beds: bedsCount,
+                            price: priceVal,
+                            floor: floorName,
+                            property: resolvedObjectId || propertyId
+                        });
+                    }
                 });
             }
-        });
-    }
-}
+        }
 
         if (unassigned === 'true') {
+            const tenantPropQuery = resolvedObjectId ? { $or: [{ property: resolvedObjectId }, { propertyId: resolvedPropIdString }] } : { propertyId: resolvedPropIdString };
             const tenants = await Tenant.find({
-                property: new mongoose.Types.ObjectId(propertyId),
+                ...tenantPropQuery,
                 status: { $in: ['active', 'pending'] }
             }).select('roomNo room bedNo').lean();
             
@@ -276,8 +300,9 @@ if (rooms.length === 0) {
             });
         }
         // Dynamically populate bed assignments & status from active/pending tenants
+        const tenantPropQuery = resolvedObjectId ? { $or: [{ property: resolvedObjectId }, { propertyId: resolvedPropIdString }] } : { propertyId: resolvedPropIdString };
         const activeTenants = await Tenant.find({
-            property: new mongoose.Types.ObjectId(propertyId),
+            ...tenantPropQuery,
             status: { $in: ['active', 'pending'] },
             isDeleted: { $ne: true }
         }).select('_id name loginId room roomNo bedNo createdAt').lean();

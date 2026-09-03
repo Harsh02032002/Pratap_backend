@@ -15,8 +15,8 @@ const bookingRequestSchema = new mongoose.Schema({
     property_image: { type: String },
     photos: [{ type: String }],
 
-    // Booking dates
-    check_in_date: { type: Date },
+    // Booking dates — check_in defaults to booking creation date, check_out defaults to +30 days
+    check_in_date: { type: Date, default: Date.now },
     checkInDate: { type: Date },
     start_date: { type: Date },
     check_out_date: { type: Date },
@@ -42,7 +42,7 @@ const bookingRequestSchema = new mongoose.Schema({
     user_id: { type: String, required: true, index: true },
     name: { type: String, required: true },
     phone: { type: String, default: null, sparse: true },
-    email: { type: String, required: true },
+    email: { type: String, default: '' },
 
     owner_id: { type: String, required: true, index: true },
     owner_name: { type: String },
@@ -126,9 +126,20 @@ const bookingRequestSchema = new mongoose.Schema({
     updated_at: { type: Date, default: Date.now }
 });
 
-// Middleware to update the updated_at timestamp
+// Middleware to update the updated_at timestamp and auto-set checkout date
 bookingRequestSchema.pre('save', function(next) {
     this.updated_at = Date.now();
+    // Auto-set check_in_date if missing
+    if (!this.check_in_date) {
+        this.check_in_date = this.created_at || new Date();
+    }
+    // Auto-set check_out_date = check_in_date + 30 days if not provided
+    if (!this.check_out_date && !this.checkOutDate && !this.end_date) {
+        const checkIn = new Date(this.check_in_date);
+        const checkOut = new Date(checkIn);
+        checkOut.setDate(checkOut.getDate() + 30);
+        this.check_out_date = checkOut;
+    }
     next();
 });
 

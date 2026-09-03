@@ -322,93 +322,103 @@ exports.createBookingRequest = async (req, res) => {
     try {
         console.log('📨 Booking Request Received:', JSON.stringify(req.body, null, 2));
         
-        const { 
-            property_id, property_name, area, property_type, rent_amount,
-            user_id, owner_id, name, phone, email, request_type, bid_amount, message,
-            bid_min, bid_max, filter_criteria, whatsapp_enabled, chat_enabled
-        } = req.body;
+        const property_id = req.body.property_id || req.body.propertyId || req.body._id;
+        const user_id = req.body.user_id || req.body.userId || req.body.email || 'guest';
+        const request_type = req.body.request_type || req.body.requestType || 'bid';
+        const property_name = req.body.property_name || req.body.propertyName || req.body.name || req.body.title || 'Property';
+        const area = req.body.area || req.body.locality || req.body.locationName || '';
+        const property_type = req.body.property_type || req.body.propertyType || req.body.type || 'PG';
+        const rent_amount = req.body.rent_amount || req.body.rentAmount || req.body.price || 0;
+        const owner_id = req.body.owner_id || req.body.ownerId;
+        const name = req.body.name || req.body.userName || req.body.fullName || 'Student';
+        const phone = req.body.phone || req.body.userPhone || req.body.mobile || '9999999999';
+        const rawEmail = req.body.email || req.body.userEmail || req.body.gmail || '';
+        const email = rawEmail.trim() || (user_id && user_id.includes('@') ? user_id : `${name.toLowerCase().replace(/[^a-z0-9]/g, '') || 'student'}@roomhy.com`);
+        const bid_amount = req.body.bid_amount || req.body.bidAmount || req.body.offeredAmount || req.body.proposedPrice || rent_amount;
+        const bid_min = req.body.bid_min || req.body.bidMin || null;
+        const bid_max = req.body.bid_max || req.body.bidMax || null;
+        const filter_criteria = req.body.filter_criteria || req.body.filterCriteria || {};
+        const whatsapp_enabled = req.body.whatsapp_enabled !== undefined ? req.body.whatsapp_enabled : true;
+        const message = req.body.message || req.body.note || '';
 
         // Validation
-        if (!property_id || !user_id || !request_type) {
-            console.warn('❌ Missing required fields');
+        if (!property_id) {
+            console.warn('❌ Missing property_id field');
             return res.status(400).json({ 
                 success: false, 
-                message: 'Missing required fields: property_id, user_id, request_type' 
+                message: 'Missing required field: property_id' 
             });
         }
 
-        // Resolve owner_id — if not sent by client or generic (like 'Verified Owner'), look it up from property record
+        // Resolve owner_id — if not sent by client or generic, look it up from property record
         let resolvedOwnerId = owner_id;
+        let propertyOwnerEmail = '';
+        let propertyOwnerPhone = '';
+        let propertyOwnerName = '';
+
         const isGenericOwnerId = (id) => {
             if (!id || typeof id !== 'string') return true;
             const clean = id.trim().toLowerCase();
-            return clean === 'own001' || clean === 'null' || clean === 'verified owner' || clean === 'undefined' || clean.includes('verified');
+            return clean === '' || clean === 'null' || clean === 'undefined' || clean === 'verified owner' || clean === 'admin';
         };
 
-        if (isGenericOwnerId(resolvedOwnerId)) {
-            try {
-                let prop = null;
-                const approvedOr = [];
-                if (property_id) {
-                    approvedOr.push({ visitId: property_id });
-                    approvedOr.push({ propertyId: property_id });
-                    if (mongoose.Types.ObjectId.isValid(property_id)) {
-                        approvedOr.push({ _id: property_id });
-                    }
+        // Find the property record first to extract exact property owner metadata
+        let propDoc = null;
+        try {
+            const approvedOr = [];
+            if (property_id) {
+                approvedOr.push({ visitId: property_id });
+                approvedOr.push({ propertyId: property_id });
+                if (mongoose.Types.ObjectId.isValid(property_id)) {
+                    approvedOr.push({ _id: property_id });
                 }
-                if (property_name) {
-                    approvedOr.push({ propertyName: property_name });
-                    approvedOr.push({ title: property_name });
-                    approvedOr.push({ 'propertyInfo.name': property_name });
-                }
-
-                if (approvedOr.length > 0) {
-                    prop = await ApprovedProperty.findOne({ $or: approvedOr }).select('generatedCredentials ownerLoginId owner_id owner contact propertyInfo');
-                }
-
-                if (!prop) {
-                    const PropertyModel = require('../models/Property');
-                    const propOr = [];
-                    if (property_id) {
-                        propOr.push({ visitId: property_id });
-                        propOr.push({ propertyId: property_id });
-                        if (mongoose.Types.ObjectId.isValid(property_id)) {
-                            propOr.push({ _id: property_id });
-                        }
-                    }
-                    if (property_name) {
-                        propOr.push({ title: property_name });
-                    }
-                    if (propOr.length > 0) {
-                        prop = await PropertyModel.findOne({ $or: propOr }).select('ownerLoginId owner_id owner');
-                    }
-                }
-
-                let foundOwner = prop?.generatedCredentials?.loginId || prop?.ownerLoginId || prop?.owner_id;
-                if (!foundOwner && prop?.owner) {
-                    if (typeof prop.owner === 'string') {
-                        foundOwner = prop.owner;
-                    } else if (mongoose.Types.ObjectId.isValid(prop.owner)) {
-                        const ownerUser = await User.findById(prop.owner).select('loginId').lean();
-                        foundOwner = ownerUser?.loginId || String(prop.owner);
-                    }
-                }
-
-                if (foundOwner) resolvedOwnerId = foundOwner;
-            } catch (lookupErr) {
-                console.warn('Owner lookup error:', lookupErr.message);
             }
+            if (property_name) {
+                approvedOr.push({ propertyName: property_name });
+                approvedOr.push({ title: property_name });
+                approvedOr.push({ 'propertyInfo.name': property_name });
+            }
+
+            if (approvedOr.length > 0) {
+                propDoc = await ApprovedProperty.findOne({ $or: approvedOr }).lean();
+            }
+
+            if (!propDoc) {
+                const PropertyModel = require('../models/Property');
+                const propOr = [];
+                if (property_id) {
+                    propOr.push({ visitId: property_id });
+                    propOr.push({ propertyId: property_id });
+                    if (mongoose.Types.ObjectId.isValid(property_id)) {
+                        propOr.push({ _id: property_id });
+                    }
+                }
+                if (property_name) propOr.push({ title: property_name });
+                if (propOr.length > 0) {
+                    propDoc = await PropertyModel.findOne({ $or: propOr }).lean();
+                }
+            }
+
+            if (propDoc) {
+                const foundOwner = propDoc.generatedCredentials?.loginId || propDoc.ownerLoginId || propDoc.owner_id || propDoc.owner;
+                if (foundOwner && (isGenericOwnerId(resolvedOwnerId) || !resolvedOwnerId)) {
+                    resolvedOwnerId = typeof foundOwner === 'string' ? foundOwner : String(foundOwner);
+                }
+                propertyOwnerEmail = propDoc.propertyInfo?.ownerEmail || propDoc.propertyInfo?.ownerGmail || propDoc.contact?.email || '';
+                propertyOwnerPhone = propDoc.propertyInfo?.ownerPhone || propDoc.contact?.number || '';
+                propertyOwnerName = propDoc.propertyInfo?.ownerName || propDoc.contact?.name || '';
+            }
+        } catch (lookupErr) {
+            console.warn('Property lookup warning:', lookupErr.message);
         }
 
+        // If owner is still missing or generic, search for any real active property owner in User DB (avoiding admin)
         if (!resolvedOwnerId || isGenericOwnerId(resolvedOwnerId)) {
-            // Fallback: try finding any active owner user in system or superadmin if owner is truly unknown
-            const firstOwner = await User.findOne({ role: 'owner', isActive: true, isDeleted: false }).select('loginId').lean();
-            if (firstOwner?.loginId) {
-                resolvedOwnerId = firstOwner.loginId;
-                console.log(`⚠️ Fallback assigned owner ID: ${resolvedOwnerId}`);
-            } else {
-                console.warn('❌ owner_id could not be resolved');
-                return res.status(400).json({ success: false, message: 'Property owner ID is required' });
+            const realOwner = await User.findOne({ role: 'owner', isActive: true, isDeleted: false, loginId: { $ne: 'admin' } }).select('loginId email phone').lean();
+            if (realOwner?.loginId) {
+                resolvedOwnerId = realOwner.loginId;
+                propertyOwnerEmail = propertyOwnerEmail || realOwner.email || '';
+                propertyOwnerPhone = propertyOwnerPhone || realOwner.phone || '';
             }
         }
 
@@ -417,15 +427,36 @@ exports.createBookingRequest = async (req, res) => {
         // Find area manager by area (for notifications)
         const manager = await User.findOne({ role: 'area_manager', area: area });
         
-        // Find owner to get owner name/email (supports both User and Owner collections)
-        const ownerLoginId = String(resolvedOwnerId || '').toUpperCase();
-        const owner = await User.findOne({ loginId: ownerLoginId });
-        const ownerProfile = await Owner.findOne({ loginId: ownerLoginId });
+        // Find owner to get owner name/email/phone (supports both User and Owner collections case-insensitively)
+        const rawOwnerId = String(resolvedOwnerId || '').trim();
+        const regexOwnerId = rawOwnerId ? new RegExp(`^${rawOwnerId.replace(/[^a-zA-Z0-9_-]/g, '')}$`, 'i') : null;
+
+        const ownerConds = [];
+        if (regexOwnerId) {
+            ownerConds.push({ loginId: regexOwnerId });
+            ownerConds.push({ loginId: rawOwnerId.toUpperCase() });
+            ownerConds.push({ loginId: rawOwnerId.toLowerCase() });
+        }
+        if (mongoose.Types.ObjectId.isValid(resolvedOwnerId)) {
+            ownerConds.push({ _id: resolvedOwnerId });
+        }
+
+        let owner = await User.findOne({ $or: ownerConds.length ? ownerConds : [{ loginId: rawOwnerId }] });
+        let ownerProfile = await Owner.findOne({ $or: ownerConds.length ? ownerConds : [{ loginId: rawOwnerId }] });
+
+        // Fallback by property contact email or phone if loginId search yields no user
+        if (!owner && !ownerProfile && propertyOwnerEmail) {
+            owner = await User.findOne({ email: propertyOwnerEmail.toLowerCase() });
+            ownerProfile = await Owner.findOne({ $or: [{ email: propertyOwnerEmail.toLowerCase() }, { 'profile.email': propertyOwnerEmail.toLowerCase() }] });
+        }
+
+        const ownerLoginId = owner?.loginId || ownerProfile?.loginId || rawOwnerId;
         const ownerName = owner
-            ? owner.fullName || owner.name || owner.loginId
-            : (ownerProfile?.profile?.name || ownerProfile?.name || ownerLoginId);
-        const ownerEmail = owner?.email || ownerProfile?.email || ownerProfile?.profile?.email || '';
-        console.log(`📍 Owner found: ${ownerName}`);
+            ? (owner.fullName || owner.name || owner.loginId)
+            : (ownerProfile?.profile?.name || ownerProfile?.name || propertyOwnerName || ownerLoginId);
+        const ownerEmail = owner?.email || ownerProfile?.email || ownerProfile?.profile?.email || propertyOwnerEmail || '';
+        const ownerPhone = owner?.phone || owner?.mobile || owner?.checkinPhone || ownerProfile?.phone || ownerProfile?.mobile || ownerProfile?.profile?.phone || ownerProfile?.checkinPhone || propertyOwnerPhone || '';
+        console.log(`📍 Owner found: ${ownerName} (${ownerLoginId}) | Email: ${ownerEmail || 'N/A'} | Phone: ${ownerPhone || 'N/A'}`);
         
         // Generate unique chat room ID
         const chatRoomId = `chat_${property_id}_${Date.now()}`;
@@ -472,7 +503,7 @@ exports.createBookingRequest = async (req, res) => {
                 toRole: 'owner',
                 toLoginId: ownerLoginId,
                 from: name || 'Interested User',
-                type: 'owner_new_booking_request', // Reverted from match type
+                type: 'owner_new_booking_request',
                 meta: {
                     title: request_type === 'bid' ? 'New Bid Received!' : 'New Booking Request!',
                     bookingId: String(newRequest._id || ''),
@@ -494,7 +525,7 @@ exports.createBookingRequest = async (req, res) => {
 
             // Store hold info in booking (simplified approach)
             newRequest.hold_expiry_date = holdExpiry;
-            newRequest.payment_status = 'pending'; // ✅ Use valid enum value
+            newRequest.payment_status = 'pending';
             await newRequest.save();
         }
 
@@ -502,44 +533,69 @@ exports.createBookingRequest = async (req, res) => {
         try {
             if (ownerEmail) {
                 const mailer = require('../utils/mailer');
-                const subject = `New ${request_type.charAt(0).toUpperCase() + request_type.slice(1)} Request`;
+                const subject = `🔔 New ${request_type.toUpperCase()} Received for ${property_name}`;
                 const html = `
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                        <h2 style="color: #333;">New Booking Request</h2>
-                        <p>You have received a new ${request_type} request for your property.</p>
-                        <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 15px 0;">
-                            <p><strong>Property:</strong> ${property_name}</p>
-                            <p><strong>Tenant:</strong> ${name}</p>
-                            <p><strong>Phone:</strong> ${phone || 'N/A'}</p>
-                            <p><strong>Email:</strong> ${email || 'N/A'}</p>
-                            <p><strong>Type:</strong> ${request_type.charAt(0).toUpperCase() + request_type.slice(1)}</p>
-                            ${request_type === 'bid' ? `<p><strong>Bid Amount:</strong> ₹${bid_amount || 0}</p>` : ''}
-                            ${message ? `<p><strong>Message:</strong> ${message}</p>` : ''}
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                        <div style="background: #0FA596; color: #ffffff; padding: 20px; text-align: center;">
+                            <h2 style="margin: 0; font-size: 22px;">New ${request_type === 'bid' ? 'Property Bid' : 'Booking Request'}</h2>
                         </div>
-                        <p>Please review this request in your booking requests panel.</p>
+                        <div style="padding: 24px; color: #1e293b; line-height: 1.6;">
+                            <p style="font-size: 16px; margin-top: 0;">Hi <strong>${ownerName}</strong>,</p>
+                            <p>You have received a new <strong>${request_type === 'bid' ? 'bid offer' : 'booking request'}</strong> for your property <strong>${property_name}</strong>.</p>
+                            
+                            <div style="background: #f8fafc; padding: 18px; border-radius: 10px; border-left: 4px solid #0FA596; margin: 20px 0;">
+                                <p style="margin: 4px 0;"><strong>Property:</strong> ${property_name}</p>
+                                <p style="margin: 4px 0;"><strong>Student / Tenant Name:</strong> ${name}</p>
+                                <p style="margin: 4px 0;"><strong>Tenant Phone:</strong> ${phone || 'N/A'}</p>
+                                <p style="margin: 4px 0;"><strong>Tenant Email:</strong> ${email || 'N/A'}</p>
+                                <p style="margin: 4px 0;"><strong>Request Type:</strong> ${request_type.toUpperCase()}</p>
+                                ${request_type === 'bid' ? `<p style="margin: 4px 0;"><strong>Offered Bid Amount:</strong> ₹${Number(bid_amount || 0).toLocaleString('en-IN')}/month</p>` : `<p style="margin: 4px 0;"><strong>Rent Amount:</strong> ₹${Number(rent_amount || 0).toLocaleString('en-IN')}/month</p>`}
+                                ${message ? `<p style="margin: 4px 0;"><strong>Note / Message:</strong> ${message}</p>` : ''}
+                            </div>
+
+                            <p>Please log in to your Roomhy Owner Dashboard to accept or respond to this request.</p>
+                        </div>
                     </div>
                 `;
-                await mailer.sendMail(ownerEmail, subject, '', html);
-            }
-            try {
-                await sendTemplateToResolvedUser({
-                    email: ownerEmail || '',
-                    userId: owner_id || '',
-                    templateName: 'roomhy_booking_received',
-                    options: {
-                        namedParams: {
-                            owner_name: ownerName || 'Owner',
-                            property_name: property_name || 'Property',
-                            guest_name: name || 'Guest',
-                            move_in_date: req.body.check_in_date || req.body.move_in_date || 'Not specified'
-                        }
-                    }
-                });
-            } catch (whatsAppErr) {
-                console.warn('booking received whatsapp failed:', whatsAppErr.message);
+                await mailer.sendMail(ownerEmail, subject, `New ${request_type} received for ${property_name}`, html);
+                console.log(`✅ Email alert dispatched to owner (${ownerEmail})`);
             }
         } catch (emailError) {
-            console.error('Failed to send booking request notification email/WhatsApp:', emailError);
+            console.error('Failed to send owner booking email:', emailError.message);
+        }
+
+        // Send WhatsApp notification to owner
+        try {
+            const { sendTemplateToResolvedUser: botSendTemplate, resolvePhoneByEmailOrUserId } = require('../utils/whatsappBot');
+            const { sendWhatsAppMessage: mailerWaMsg, getMailerConfig, isWhatsAppConfigured } = require('../utils/mailer');
+            
+            // 1. Send WhatsApp Template
+            await botSendTemplate({
+                phone: ownerPhone,
+                email: ownerEmail,
+                userId: resolvedOwnerId,
+                templateName: 'roomhy_booking_received',
+                options: {
+                    namedParams: {
+                        owner_name: ownerName || 'Owner',
+                        property_name: property_name || 'Property',
+                        guest_name: name || 'Guest',
+                        move_in_date: req.body.check_in_date || req.body.move_in_date || 'Not specified'
+                    }
+                }
+            }).catch(err => console.warn('WA template notice:', err.message));
+
+            // 2. Direct WhatsApp Text Alert (fallback)
+            const targetPhone = ownerPhone || await resolvePhoneByEmailOrUserId({ phone: ownerPhone, email: ownerEmail, userId: resolvedOwnerId });
+            const cfg = getMailerConfig ? getMailerConfig() : {};
+            
+            if (targetPhone && isWhatsAppConfigured && isWhatsAppConfigured(cfg)) {
+                const textMsg = `🔔 *Roomhy Alert: New ${request_type.toUpperCase()} Received!*\n\nHi ${ownerName},\n\nYou have received a new ${request_type === 'bid' ? 'bid offer' : 'booking request'} for *${property_name}*.\n\n👤 *Tenant:* ${name}\n📞 *Phone:* ${phone || 'N/A'}\n💰 *Amount:* ₹${Number(bid_amount || rent_amount || 0).toLocaleString('en-IN')}\n\nPlease check your Roomhy Owner Panel to respond.`;
+                await mailerWaMsg(targetPhone, textMsg, cfg).catch(err => console.warn('Direct WA notice:', err.message));
+            }
+            console.log(`✅ WhatsApp alert process completed for owner (${targetPhone || ownerEmail})`);
+        } catch (whatsAppErr) {
+            console.warn('booking received whatsapp failed:', whatsAppErr.message);
         }
 
         // Send superadmin in-app + email notification

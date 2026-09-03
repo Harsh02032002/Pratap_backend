@@ -6,6 +6,7 @@ const Notification = require('../models/Notification');
 const ApprovedProperty = require('../models/ApprovedProperty');
 const { geocodeAddress } = require('../utils/geocode');
 const { clearCache } = require('../middleware/apiCache');
+const { flattenListingImages } = require('../utils/propertyGallery');
 
 const deriveLocationCode = (input = {}) => {
   const candidates = [
@@ -64,6 +65,8 @@ const syncToApprovedProperty = async (property) => {
     if (!isPropertyLive(property)) return;
     try {
         const vId = property.visitId || property._id.toString();
+        const listingImages = flattenListingImages(property);
+        const featuredImage = property.featuredImage || listingImages[0] || "";
         const approvedPropertyData = {
             visitId: vId,
             propertyId: property.propertyId || property._id.toString(),
@@ -75,8 +78,8 @@ const syncToApprovedProperty = async (property) => {
             landmark: property.landmark || "",
             contact: property.contact || {},
             videoUrl: property.videoUrl || "",
-            images: property.images || [],
-            featuredImage: property.featuredImage || (property.images && property.images[0]) || "",
+            images: listingImages,
+            featuredImage,
             propertyInfo: {
                 name: property.title || 'Property',
                 city: property.city || 'Unknown',
@@ -86,7 +89,7 @@ const syncToApprovedProperty = async (property) => {
                 propertyType: property.propertyType || 'pg',
                 genderSuitability: property.gender || 'any',
                 amenities: property.amenities?.map(a => typeof a === 'string' ? a : a.name) || [],
-                photos: property.images || [],
+                photos: listingImages,
                 latitude: property.latitude,
                 longitude: property.longitude,
                 description: property.description || ''

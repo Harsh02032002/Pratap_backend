@@ -2,6 +2,7 @@ const PaymentTransaction = require('../models/PaymentTransaction');
 const Owner = require('../models/Owner');
 const BookingRequest = require('../models/BookingRequest');
 const Notification = require('../models/Notification');
+const mongoose = require('mongoose');
 
 /**
  * processHeldWalletReleases
@@ -51,8 +52,12 @@ async function processHeldWalletReleases() {
 
         // Update Owner balances
         if (tx.owner_id && tx.owner_amount > 0) {
+          const isObjId = mongoose.Types.ObjectId.isValid(tx.owner_id) && String(tx.owner_id).match(/^[0-9a-fA-F]{24}$/);
           const owner = await Owner.findOne({
-            $or: [{ loginId: tx.owner_id }, { _id: tx.owner_id }]
+            $or: [
+              { loginId: String(tx.owner_id).toUpperCase() },
+              ...(isObjId ? [{ _id: tx.owner_id }] : [])
+            ]
           });
 
           if (owner) {
