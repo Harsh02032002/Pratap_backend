@@ -867,6 +867,18 @@ function startServer() {
     server.requestTimeout = HTTP.requestTimeout;
     server.headersTimeout = HTTP.headersTimeout;
 
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.warn(`⚠️ Port ${PORT} in use. Retrying connection in 1.5s...`);
+            setTimeout(() => {
+                try { server.close(); } catch (_) {}
+                server.listen(PORT, '0.0.0.0');
+            }, 1500);
+        } else {
+            console.error('❌ Server error:', err);
+        }
+    });
+
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`\n✅ Backend API running on http://localhost:${PORT}\n`);
         

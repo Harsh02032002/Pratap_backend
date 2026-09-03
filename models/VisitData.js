@@ -22,6 +22,7 @@ const VisitDataSchema = new mongoose.Schema({
     // Property Information
     propertyName: String,
     propertyType: String,
+    state: String,
     city: String,
     area: String,
     address: String,

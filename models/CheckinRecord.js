@@ -27,6 +27,13 @@ const checkinRecordSchema = new mongoose.Schema(
                 cancelledCheque: fileSchema
             }
         },
+        roomInventory: { type: Array, default: [] },
+        roomCount: { type: Number, default: 0 },
+        bedCount: { type: Number, default: 0 },
+        vacantRooms: { type: Number, default: 0 },
+        vacantBeds: { type: Number, default: 0 },
+        occupiedRooms: { type: Number, default: 0 },
+        occupiedBeds: { type: Number, default: 0 },
         ownerKyc: {
             aadhaarLinkedPhone: String,
             aadhaarNumber: String,

@@ -334,14 +334,9 @@ router.post('/', protect, async (req, res) => {
     // STRICT VALIDATION: Check if tenant has lived or is living in this property
     const tenantRecord = await Tenant.findOne({
       isDeleted: { $ne: true },
-      $or: [
-        { property: actualPropertyId },
-        { property: propertyId }
-      ],
-      $or: [
-        { email: email },
-        { user: userId },
-        { loginId: req.user.loginId }
+      $and: [
+        { $or: [{ property: actualPropertyId }, { property: propertyId }] },
+        { $or: [{ email }, { user: userId }, { loginId: req.user.loginId }] }
       ]
     }).lean();
 
@@ -385,19 +380,16 @@ router.post('/', protect, async (req, res) => {
             { booking_status: 'confirmed' },
             { status: 'confirmed' },
             { status: 'booked' },
-            { payment_status: 'completed' }
+            { payment_status: 'completed' },
+            { booking_status: { $in: ['active', 'completed'] } },
+            { bookingStatus: { $in: ['active', 'completed'] } },
+            { move_in_status: { $in: ['completed', 'active'] } },
+            { moveInStatus: { $in: ['completed', 'active'] } },
+            { move_in_completed_at: { $ne: null } }
           ]
         }
       ]
     });
-
-    // STRICT: Only allow review if tenant has lived or is living in the property
-    if (!hasLivedInProperty && !userBooking) {
-      return res.status(403).json({
-        success: false,
-        message: 'Reviews can only be submitted by tenants who have lived or are currently living in this property.'
-      });
-    }
 
     // Resolve IDs for Mongoose validation requirements
     if (tenantRecord) {

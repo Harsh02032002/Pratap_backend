@@ -157,14 +157,10 @@ function detectViolation(text, settings = {}) {
 
   // 2. Phone Number Check (Raw 10 digits, spaced out, or word-based)
   if (blockPhone) {
-    const phoneRegex = /(\+?\d{1,4}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
+    const phoneRegex = /(?:^|[^\d])((?:\+?91[-.\s]?)?[6-9](?:[-.\s]?\d){9})(?!\d)/g;
     const textWithoutUrls = msgText.replace(/(https?:\/\/[^\s]+|www\.[^\s]+)/gi, '');
-    const cleanDigits = textWithoutUrls.replace(/[\s\-().,_/*]/g, '');
-    const hasTenDigits = /\d{10}/.test(cleanDigits);
-
-    const spacedDigitsRegex = /(\d[\s\-.,_*/]*){10,12}/g;
-    spacedDigitsRegex.lastIndex = 0;
-    const hasSpacedDigits = spacedDigitsRegex.test(msgText);
+    const hasTenDigits = phoneRegex.test(textWithoutUrls);
+    phoneRegex.lastIndex = 0;
 
     const numWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ek', 'teen', 'chaar', 'char', 'paanch', 'panch', 'chhe', 'che', 'saat', 'aath', 'nau', 'noo', 'shunya', 'double', 'triple'];
     let wordNumCount = 0;
@@ -175,11 +171,10 @@ function detectViolation(text, settings = {}) {
       if (matches) wordNumCount += matches.length;
     });
 
-    if (phoneRegex.test(msgText) || hasTenDigits || hasSpacedDigits || wordNumCount >= 4) {
+    if (phoneRegex.test(msgText) || hasTenDigits || wordNumCount >= 4) {
       if (!violationType) violationType = 'contact_sharing';
       msgText = msgText.replace(phoneRegex, '[MASKED PHONE]')
-                       .replace(spacedDigitsRegex, '[MASKED PHONE]')
-                       .replace(/\b\d{10}\b/g, '[MASKED PHONE]');
+                       .replace(/\b(?:[6-9]\d{9})\b/g, '[MASKED PHONE]');
     }
   }
 

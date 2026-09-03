@@ -572,6 +572,7 @@ router.get('/public/approved', async (req, res) => {
           // strip photos from propInfo to avoid sending them a second time inside the nested object
           const { photos: _photos, ownerGmail: _g, ownerPhone: _ph, ownerEmail: _em, ...safeInfo } = propInfo;
 
+          const reviewsCount = prop.reviewsCount || (Array.isArray(prop.reviews) ? prop.reviews.length : 0);
           return {
             _id: prop._id,
             visitId: prop.visitId,
@@ -589,8 +590,8 @@ router.get('/public/approved', async (req, res) => {
             images,
             professionalPhotos: prop.professionalPhotos || [],
             isVerified: true,
-            rating: 4.5,
-            reviewsCount: 10,
+            rating: reviewsCount > 0 ? (prop.rating || propInfo.rating || 0) : 0,
+            reviewsCount,
             propertyInfo: safeInfo,
             amenities: Array.isArray(prop.amenities) ? prop.amenities : (Array.isArray(propInfo.amenities) ? propInfo.amenities : []),
             propertyDetails: prop.propertyDetails || {},
@@ -765,9 +766,9 @@ router.get('/:visitId', async (req, res) => {
 
         const slugify = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
         const rawTargetSlug = slugify(visitId);
-        const cleanTargetSlug = rawTargetSlug.replace(/^(roomhyprop-crest-|roomhyprop-prime-|roomhyprop-|roomhy-|crest-|prime-)/i, '');
+        const cleanTargetSlug = rawTargetSlug.replace(/^(roomhyprop-crest-|roomhyprop-prime-|roomhyprop-essence-|roomhyprop-|roomhy-|crest-|prime-|essence-)/i, '');
 
-        // Support visitId strings, MongoDB ObjectIds, and property name slugs (e.g. paradise-residency or roomhyprop-crest-hl-residency)
+        // Support visitId strings, MongoDB ObjectIds, and property name slugs (e.g. paradise-residency or roomhyprop-essence-harsh-place)
         let query = {};
         if (mongoose.Types.ObjectId.isValid(visitId)) {
             query = { $or: [{ visitId }, { _id: visitId }, { propertyId: visitId }] };
@@ -818,11 +819,34 @@ router.get('/:visitId', async (req, res) => {
             const Property = require('../models/Property');
             const allProps = await Property.find({}).lean();
             property = allProps.find(p => {
-                const rawName = p.title || p.name || '';
+                const rawName = p.title || p.name || p.propertyName || p.propertyInfo?.name || '';
+                const tier = (p.tier || p.propertyCategory || '').toLowerCase();
+                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
                 const nameSlug = slugify(rawName);
+                const composedSlug = slugify(composedName);
                 return (
                     nameSlug === rawTargetSlug ||
                     nameSlug === cleanTargetSlug ||
+                    composedSlug === rawTargetSlug ||
+                    p.visitId === visitId ||
+                    String(p._id) === visitId
+                );
+            });
+        }
+
+        if (!property) {
+            const VisitReport = require('../models/VisitReport');
+            const allVisits = await VisitReport.find({}).lean();
+            property = allVisits.find(p => {
+                const rawName = p.propertyInfo?.name || p.propertyName || p.title || '';
+                const tier = (p.tier || '').toLowerCase();
+                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
+                const nameSlug = slugify(rawName);
+                const composedSlug = slugify(composedName);
+                return (
+                    nameSlug === rawTargetSlug ||
+                    nameSlug === cleanTargetSlug ||
+                    composedSlug === rawTargetSlug ||
                     p.visitId === visitId ||
                     String(p._id) === visitId
                 );

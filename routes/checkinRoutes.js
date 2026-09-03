@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const CheckinRecord = require('../models/CheckinRecord');
+const { normalizeRoomInventory, summarizeRoomInventory } = require('../utils/ownerOccupancy');
 const Owner = require('../models/Owner');
 const Tenant = require('../models/Tenant');
 const { sendMail } = require('../utils/mailer');
@@ -236,12 +237,29 @@ function isTenantKycVerified(record) {
 
 router.post('/owner/profile', async (req, res) => {
     try {
-        const { loginId, name, dob, email, phone, address, area, password, payment = {} } = req.body || {};
+        const {
+            loginId, name, dob, email, phone, address, area, password, payment = {},
+            roomInventory = [], occupiedRooms, occupiedBeds, vacantRooms, vacantBeds
+        } = req.body || {};
         if (!loginId || !name || !dob || !email || !phone || !address || !area || !payment.bankAccountNumber || !payment.ifscCode || !payment.accountHolderName) {
             return res.status(400).json({ success: false, message: 'Missing required owner profile fields' });
         }
+        const normalizedRooms = normalizeRoomInventory(roomInventory);
+        const inventorySummary = summarizeRoomInventory(normalizedRooms);
+        const occupancy = normalizedRooms.length
+            ? inventorySummary
+            : {
+                roomCount: Number(occupiedRooms || 0) + Number(vacantRooms || 0),
+                bedCount: Number(occupiedBeds || 0) + Number(vacantBeds || 0),
+                occupiedRooms: Number(occupiedRooms || 0),
+                occupiedBeds: Number(occupiedBeds || 0),
+                vacantRooms: Number(vacantRooms || 0),
+                vacantBeds: Number(vacantBeds || 0)
+            };
         const record = await upsertRecord(loginId, 'owner', {
-            ownerProfile: { name, dob, email, phone, address, area, password, payment }
+            ownerProfile: { name, dob, email, phone, address, area, password, payment },
+            ...(normalizedRooms.length ? { roomInventory: normalizedRooms } : {}),
+            ...occupancy
         });
 
         // Mirror to Owner collection so superadmin owner list can show this data
@@ -272,6 +290,8 @@ router.post('/owner/profile', async (req, res) => {
                     checkinBranchName: payment.branchName || '',
                     checkinUpiId: payment.upiId || '',
                     checkinCancelledCheque: payment.cancelledCheque || {},
+                    ...(normalizedRooms.length ? { roomInventory: normalizedRooms } : {}),
+                    ...occupancy,
                     // Also set top-level fields for backward compatibility
                     accountNumber: payment.bankAccountNumber || '',
                     ifscCode: payment.ifscCode || '',

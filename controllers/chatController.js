@@ -117,9 +117,22 @@ exports.getInbox = async (req, res) => {
       const sender = normalizeLoginId(msg.sender_login_id);
       const receiver = normalizeLoginId(msg.room_id);
       const isOutgoing = loginVariants.includes(sender);
-      const partnerId = isOutgoing ? receiver : sender;
+      let partnerId = isOutgoing ? receiver : sender;
 
-      if (!partnerId || partnerId.toLowerCase() === 'system') continue;
+      // Prevent owner self-matching (if partnerId matches owner loginVariants)
+      if (loginVariants.includes(partnerId)) {
+        if (loginVariants.includes(sender) && !loginVariants.includes(receiver)) {
+          partnerId = receiver;
+        } else if (loginVariants.includes(receiver) && !loginVariants.includes(sender)) {
+          partnerId = sender;
+        } else if (msg.conversation_id && msg.conversation_id.includes(':')) {
+          const parts = msg.conversation_id.split(':');
+          const other = parts.find(p => !loginVariants.includes(p.toUpperCase()) && !loginVariants.includes(p.toLowerCase()));
+          if (other) partnerId = other;
+        }
+      }
+
+      if (!partnerId || loginVariants.includes(partnerId) || partnerId.toLowerCase() === 'system') continue;
 
       const existing = summaryMap.get(partnerId) || {
         participant_login_id: partnerId,
@@ -158,6 +171,67 @@ exports.getInbox = async (req, res) => {
     const owners = await Owner.find({}).lean();
     const bookings = await BookingRequest.find({}).lean();
     const users = await User.find({}).lean();
+
+    // Include new property enquiries for property owner in chat inbox
+    try {
+      const Enquiry = require('../models/Enquiry');
+      const ownerEnquiries = await Enquiry.find({
+        $or: [
+          { ownerLoginId: { $in: loginVariants } },
+          { owner_id: { $in: loginVariants } },
+          { ownerEmail: { $in: loginVariants } }
+        ]
+      }).sort({ createdAt: -1 }).lean();
+
+      for (const enq of ownerEnquiries) {
+        const studentEmail = enq.studentEmail || enq.email || '';
+        const pid = studentEmail ? generateWebsiteUserIdFromEmail(studentEmail) : (enq.studentPhone || enq.phone || String(enq._id));
+        if (pid && !summaryMap.has(pid)) {
+          summaryMap.set(pid, {
+            participant_login_id: pid,
+            participant_name: enq.studentName || enq.name || "New Tenant Enquiry",
+            participant_email: studentEmail,
+            participant_phone: enq.studentPhone || enq.phone || "",
+            participant_property: enq.propertyName || enq.property_name || "",
+            last_message: enq.message || `Enquiry received for ${enq.propertyName || 'your property'}`,
+            last_message_at: enq.createdAt || enq.created_at || new Date(),
+            last_sender_login_id: pid,
+            unread_count: 1
+          });
+        }
+      }
+    } catch (_) {}
+
+    // Include booking requests for property owner in chat inbox
+    try {
+      const BookingRequestModel = require('../models/BookingRequest');
+      const ownerBookings = await BookingRequestModel.find({
+        $or: [
+          { owner_id: { $in: loginVariants } },
+          { owner_email: { $in: loginVariants } }
+        ]
+      }).sort({ createdAt: -1 }).lean();
+
+      for (const b of ownerBookings) {
+        const studentEmail = b.email || b.tenantEmail || '';
+        const pid = studentEmail ? generateWebsiteUserIdFromEmail(studentEmail) : (b.user_id || studentEmail || String(b._id));
+        if (pid && !summaryMap.has(pid)) {
+          summaryMap.set(pid, {
+            participant_login_id: pid,
+            participant_name: b.name || b.tenantName || studentEmail || "Website Tenant",
+            participant_email: studentEmail,
+            participant_phone: b.phone || b.tenantPhone || "",
+            participant_property: b.property_name || b.propertyName || "",
+            last_message: b.status === 'approved' 
+              ? `Booking Approved for ${b.property_name || 'your property'}`
+              : `Booking Request for ${b.property_name || 'your property'}`,
+            last_message_at: b.updatedAt || b.createdAt || new Date(),
+            last_sender_login_id: pid,
+            unread_count: b.status === 'approved' ? 0 : 1
+          });
+        }
+      }
+    } catch (_) {}
 
     for (const item of summaryMap.values()) {
         const pid = item.participant_login_id;
@@ -287,17 +361,30 @@ exports.getConversation = async (req, res) => {
 
     const isSuperadmin = await isCallerSuperadmin(req);
 
+    const allVariants = [...user1Variants, ...user2Variants];
     const pairKey = [user1, user2].sort().join(':').toUpperCase();
-    const query = {
-      $or: [
-        { room_id: { $in: user1Variants }, sender_login_id: { $in: user2Variants } },
-        { room_id: { $in: user2Variants }, sender_login_id: { $in: user1Variants } },
-        { room_id: 'Verified Owner', sender_login_id: { $in: [...user1Variants, ...user2Variants] } },
-        { room_id: { $in: [...user1Variants, ...user2Variants] }, sender_login_id: 'Verified Owner' },
-        { conversation_id: pairKey, sender_login_id: { $in: ['system', 'System'] } },
-        { conversation_id: pairKey, message_type: 'system' }
-      ]
-    };
+
+    // Safe regex pattern for user2 if it's a name
+    const user2SafeRegex = user2.length >= 3 && !user2.includes('@') && !/^ROOMHY/i.test(user2)
+      ? new RegExp(user2.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+
+    const orConditions = [
+      { room_id: { $in: user1Variants }, sender_login_id: { $in: user2Variants } },
+      { room_id: { $in: user2Variants }, sender_login_id: { $in: user1Variants } },
+      { room_id: { $in: allVariants }, sender_login_id: { $in: ['system', 'System'] } },
+      { room_id: 'Verified Owner', sender_login_id: { $in: allVariants } },
+      { room_id: { $in: allVariants }, sender_login_id: 'Verified Owner' },
+      { conversation_id: pairKey },
+      { message_type: 'system' }
+    ];
+
+    if (user2SafeRegex) {
+      orConditions.push({ room_id: { $in: user1Variants }, sender_name: user2SafeRegex });
+      orConditions.push({ room_id: { $in: user2Variants }, sender_name: user2SafeRegex });
+    }
+
+    const query = { $or: orConditions };
 
     if (!isSuperadmin) {
       query.is_blocked = { $ne: true };

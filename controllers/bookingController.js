@@ -1135,21 +1135,37 @@ exports.approveBooking = async (req, res) => {
                 propertyName
             });
 
-            // Send automatic welcome message to tenant's room from owner
-            if (chat && chat.userRoomId) {
+            // Send automatic welcome message to tenant's and owner's chat rooms
+            if (chat && chat.userRoomId && chat.ownerRoomId) {
                 try {
                     const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
-                    await ChatMessage.create({
-                        room_id: chat.userRoomId,
-                        sender_login_id: String(request.owner_id || '').toUpperCase(),
-                        sender_name: ownerName,
-                        sender_role: 'property_owner',
-                        message: welcomeMsg,
-                        message_type: 'text',
-                        created_at: new Date(),
-                        updated_at: new Date()
-                    });
-                    console.log('✅ Automated chat welcome message sent to', chat.userRoomId);
+                    const pairKey = [String(chat.ownerRoomId).toUpperCase(), String(chat.userRoomId)].sort().join(':').toUpperCase();
+
+                    await Promise.all([
+                        ChatMessage.create({
+                            room_id: chat.userRoomId,
+                            conversation_id: pairKey,
+                            sender_login_id: String(chat.ownerRoomId || '').toUpperCase(),
+                            sender_name: ownerName,
+                            sender_role: 'property_owner',
+                            message: welcomeMsg,
+                            message_type: 'text',
+                            created_at: new Date(),
+                            updated_at: new Date()
+                        }),
+                        ChatMessage.create({
+                            room_id: String(chat.ownerRoomId || '').toUpperCase(),
+                            conversation_id: pairKey,
+                            sender_login_id: String(chat.userRoomId || '').toLowerCase(),
+                            sender_name: tenantName,
+                            sender_role: 'website_user',
+                            message: welcomeMsg,
+                            message_type: 'text',
+                            created_at: new Date(),
+                            updated_at: new Date()
+                        })
+                    ]);
+                    console.log('✅ Automated chat welcome messages created for owner & tenant rooms');
                 } catch (chatMsgErr) {
                     console.error('⚠️ Failed to send automated welcome chat message:', chatMsgErr.message);
                 }

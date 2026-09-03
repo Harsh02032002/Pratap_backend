@@ -224,9 +224,12 @@ exports.updateEnquiry = async (req, res) => {
 
             // Send welcome message to both tenant's and owner's chat rooms
             const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
+            const pairKey = [String(normalizedOwnerId).toUpperCase(), String(normalizedUserId)].sort().join(':').toUpperCase();
+
             await Promise.all([
               ChatMessage.create({
                 room_id: normalizedUserId,
+                conversation_id: pairKey,
                 sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
                 sender_name: ownerName,
                 sender_role: 'property_owner',
@@ -237,9 +240,10 @@ exports.updateEnquiry = async (req, res) => {
               }),
               ChatMessage.create({
                 room_id: normalizedOwnerId,
-                sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
-                sender_name: ownerName,
-                sender_role: 'property_owner',
+                conversation_id: pairKey,
+                sender_login_id: String(normalizedUserId || '').toLowerCase(),
+                sender_name: tenantName,
+                sender_role: 'website_user',
                 message: welcomeMsg,
                 message_type: 'text',
                 created_at: new Date(),

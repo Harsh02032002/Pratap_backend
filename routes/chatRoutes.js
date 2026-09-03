@@ -84,9 +84,12 @@ router.post('/create', async (req, res) => {
 
         if (!existingWelcome) {
             const intro = `Chat opened for ${propertyName || 'property'} between ${ownerName || normalizedOwnerId} and ${userName || userEmail || normalizedUserId}`;
+            const pairKey = [normalizedOwnerId, normalizedUserId].sort().join(':').toUpperCase();
+
             await Promise.all([
                 ChatMessage.create({
                     room_id: normalizedOwnerId,
+                    conversation_id: pairKey,
                     sender_login_id: 'system',
                     sender_name: 'System',
                     sender_role: 'superadmin',
@@ -96,6 +99,7 @@ router.post('/create', async (req, res) => {
                 }),
                 ChatMessage.create({
                     room_id: normalizedUserId,
+                    conversation_id: pairKey,
                     sender_login_id: 'system',
                     sender_name: 'System',
                     sender_role: 'superadmin',

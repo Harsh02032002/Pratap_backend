@@ -134,7 +134,7 @@ exports.getApprovedPropertiesForWebsite = async (req, res) => {
             roomInfo: prop.roomInfo,
             monthlyRent: prop.monthlyRent || prop.rent || 0,
             rent: prop.rent || prop.monthlyRent || 0,
-            rating: prop.rating || 4.5,
+            rating: prop.rating || 0,
             reviewsCount: prop.reviewsCount || 0,
             isVerified: prop.isVerified || false,
             photos: prop.professionalPhotos || prop.photos || [],

@@ -201,6 +201,7 @@ exports.addProperty = async (req, res) => {
     if (!isStaff) {
       try {
         const User = require('../models/user');
+        const { sendMail } = require('../utils/mailer');
         const superAdmins = await User.find({ role: 'superadmin' }).lean();
         for (const sa of superAdmins) {
           await Notification.create({
@@ -208,13 +209,32 @@ exports.addProperty = async (req, res) => {
             toLoginId: sa.loginId || '',
             from: req.user?.loginId || 'owner',
             type: 'new_property_request',
-            message: `New property approval request submitted for "${property.title}"`,
+            message: `New property approval request submitted for "${property.title}" — ${autoAssignedTo ? `assigned to ${autoAssignedToName || autoAssignedTo} for verification` : 'no employee matched, needs manual assignment'}`,
             meta: {
               propertyId: property._id.toString(),
               propertyTitle: property.title
             }
           });
         }
+        // Email to superadmin
+        const superadminEmail = process.env.SUPERADMIN_EMAIL || 'team@roomhy.com';
+        const propUrl = `${(process.env.APP_URL || 'https://app.roomhy.com').replace(/\/$/, '')}/superadmin/properties`;
+        const assignedLine = autoAssignedTo
+          ? `<li><strong>Assigned To:</strong> ${autoAssignedToName || autoAssignedTo} (${autoAssignedTo}) — verification pending in employee panel</li>`
+          : `<li><strong>Assigned To:</strong> No matching employee found — requires manual assignment</li>`;
+        const emailHtml = `<div style="font-family:Arial,sans-serif;">
+          <h3>New Property Listing Request</h3>
+          <p>A new property has been submitted for verification.</p>
+          <ul>
+            <li><strong>Title:</strong> ${property.title || '-'}</li>
+            <li><strong>City:</strong> ${property.city || '-'}</li>
+            <li><strong>Area:</strong> ${property.area || '-'}</li>
+            <li><strong>Owner:</strong> ${req.user?.loginId || '-'}</li>
+            ${assignedLine}
+          </ul>
+          <p><a href="${propUrl}" style="background:#6366f1;color:#fff;padding:10px 20px;text-decoration:none;border-radius:6px;">Review in Admin Panel</a></p>
+        </div>`;
+        sendMail(superadminEmail, `New Property Request: ${property.title}`, '', emailHtml).catch(e => console.warn('Superadmin property email failed:', e.message));
       } catch (notifyErr) {
         console.warn('Property request notification failed:', notifyErr.message);
       }
@@ -226,7 +246,7 @@ exports.addProperty = async (req, res) => {
     // Clear cached listings so the new property shows up immediately
     clearCache('/api/approved-properties');
     clearCache('/api/properties');
-    // Send assignment notification if auto-assigned
+    // Send assignment notification + email if auto-assigned
     if (autoAssignedTo && !isStaff) {
       try {
         await Notification.create({
@@ -242,6 +262,25 @@ exports.addProperty = async (req, res) => {
             area: property.area || ''
           }
         });
+        // Email to matched employee
+        const { sendMail } = require('../utils/mailer');
+        const Employee = require('../models/Employee');
+        const empDoc = await Employee.findOne({ loginId: autoAssignedTo }).select('email').lean();
+        const empEmail = empDoc?.email || '';
+        if (empEmail) {
+          const empHtml = `<div style="font-family:Arial,sans-serif;">
+            <h3>New Property Assigned for Verification</h3>
+            <p>A new property in your area has been submitted and assigned to you.</p>
+            <ul>
+              <li><strong>Title:</strong> ${property.title || '-'}</li>
+              <li><strong>City:</strong> ${property.city || '-'}</li>
+              <li><strong>Area:</strong> ${property.area || '-'}</li>
+              <li><strong>Owner:</strong> ${req.user?.loginId || '-'}</li>
+            </ul>
+            <p>Please review and verify this property in your panel.</p>
+          </div>`;
+          sendMail(empEmail, `Property Assigned: ${property.title}`, '', empHtml).catch(e => console.warn('Employee property email failed:', e.message));
+        }
       } catch (notifyErr) {
         console.warn('Property assignment notification failed:', notifyErr.message);
       }

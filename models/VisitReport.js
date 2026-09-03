@@ -42,7 +42,7 @@ const VisitReportSchema = new mongoose.Schema({
     // Website Listing Info
     isLiveOnWebsite: { type: Boolean, default: false },
     isVerified: { type: Boolean, default: false },
-    rating: { type: Number, default: 4.5 },
+    rating: { type: Number, default: 0 },
     reviewsCount: { type: Number, default: 0 },
     
     // Status & Notes
