@@ -166,48 +166,62 @@ Receiver Role: ${receiver}`;
     // Moderation runs in the background, so a slightly longer budget costs
     // nothing and a timeout here means the message goes UNMODERATED (see the
     // fail-open catch below). 5s was tight enough to trip regularly.
-    const timeoutMs = Number(process.env.AI_MODERATION_TIMEOUT_MS || 12000);
-    const maxAttempts = 2;
+    const timeoutMs = parseInt(process.env.AI_MODERATION_TIMEOUT_MS, 10) || 12000;
+    const maxAttempts = parseInt(process.env.AI_MODERATION_MAX_RETRIES, 10) || 2;
+    let response = null;
 
-    let response;
+    const modelsToTry = process.env.AI_MODERATION_MODEL
+        ? [process.env.AI_MODERATION_MODEL]
+        : (provider === 'groq' ? [model, ...fallbackModels.filter(m => m !== model)] : [model]);
+
+    let lastError = null;
+
+    for (const currentModel of modelsToTry) {
+        model = currentModel;
+        try {
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    response = await axios.post(
+                        completionsUrl,
+                        {
+                            model: model,
+                            messages: [
+                                { role: 'system', content: systemPrompt },
+                                { role: 'user', content: userMessageContent }
+                            ],
+                            response_format: {
+                                type: 'json_object'
+                            },
+                            temperature: 0.1
+                        },
+                        {
+                            headers: {
+                                'Authorization': `Bearer ${apiKey}`,
+                                'Content-Type': 'application/json'
+                            },
+                            timeout: timeoutMs
+                        }
+                    );
+                    break;
+                } catch (attemptErr) {
+                    const status = attemptErr.response?.status;
+                    if (attempt === maxAttempts || (status && status < 500)) throw attemptErr;
+                    console.warn(`⚠️ AI moderation attempt ${attempt} failed (${attemptErr.message}); retrying...`);
+                }
+            }
+            if (response) break;
+        } catch (modelErr) {
+            lastError = modelErr;
+            const status = modelErr.response?.status;
+            if (status === 404 && modelsToTry.indexOf(currentModel) < modelsToTry.length - 1) {
+                console.warn(`⚠️ Model "${currentModel}" returned 404 on ${provider}, trying fallback model...`);
+                continue;
+            }
+            throw modelErr;
+        }
+    }
 
     try {
-        console.log(`🤖 Invoking AI Moderation via provider: ${provider} (Model: ${model}, URL: ${completionsUrl})`);
-        console.log(`--- PROMPT --- \n${userMessageContent}\n--------------`);
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            try {
-                response = await axios.post(
-                    completionsUrl,
-                    {
-                        model: model,
-                        messages: [
-                            { role: 'system', content: systemPrompt },
-                            { role: 'user', content: userMessageContent }
-                        ],
-                        response_format: {
-                            type: 'json_object'
-                        },
-                        temperature: 0.1
-                    },
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${apiKey}`,
-                            'Content-Type': 'application/json'
-                        },
-                        timeout: timeoutMs
-                    }
-                );
-                break;
-            } catch (attemptErr) {
-                // Retry once on timeout / transport failure, but not on a 4xx —
-                // a bad key or model will fail identically the second time.
-                const status = attemptErr.response?.status;
-                if (attempt === maxAttempts || (status && status < 500)) throw attemptErr;
-                console.warn(`⚠️ AI moderation attempt ${attempt} failed (${attemptErr.message}); retrying...`);
-            }
-        }
-
         const choice = response.data?.choices?.[0]?.message?.content;
         console.log(`--- RESPONSE --- \n${choice}\n----------------`);
         if (!choice) {

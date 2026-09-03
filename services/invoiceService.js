@@ -528,10 +528,19 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
 
     const ownerObjId = ownerDoc._id;
     const ownerLoginId = ownerDoc.loginId || rawOwnerId.toUpperCase();
+    const isOwnerObjectId = ownerObjId && mongoose.Types.ObjectId.isValid(ownerObjId) && String(ownerObjId).match(/^[0-9a-fA-F]{24}$/);
+
+    // Deterministic ObjectId for models requiring Schema.Types.ObjectId ref to Owner when ownerDoc._id is a custom string
+    const safeOwnerObjectId = isOwnerObjectId
+      ? ownerObjId
+      : new mongoose.Types.ObjectId(require('crypto').createHash('md5').update(String(ownerLoginId || rawOwnerId)).digest('hex').slice(0, 24));
 
     // Find properties owned by this owner
     const properties = await Property.find({
-      $or: [{ ownerLoginId }, { owner: ownerObjId }],
+      $or: [
+        { ownerLoginId },
+        ...(isOwnerObjectId ? [{ owner: ownerObjId }] : [])
+      ],
       isDeleted: { $ne: true }
     }).select('_id').lean();
     const propertyIds = properties.map(p => p._id);
@@ -541,7 +550,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
       $or: [
         { ownerLoginId },
         ...(propertyIds.length > 0 ? [{ property: { $in: propertyIds } }] : []),
-        { assignedBy: ownerObjId }
+        ...(isOwnerObjectId ? [{ assignedBy: ownerObjId }] : [])
       ],
       isDeleted: { $ne: true },
       status: { $ne: 'inactive' },
@@ -570,7 +579,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
         });
 
         if (!existingMoveInInv) {
-          const config = await getEffectiveConfig(ownerObjId, t.property, null).catch(() => null);
+          const config = await getEffectiveConfig(safeOwnerObjectId, t.property, null).catch(() => null);
           const dueDate = new Date(moveInYear, moveInMonthNum - 1, config?.rentDueDay || 1);
           const invoiceNumber = `INV-${currentMonth}-${String(t._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
           
@@ -580,7 +589,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
 
           const invoice = await RentInvoice.create({
             invoiceNumber,
-            ownerId: ownerObjId,
+            ownerId: safeOwnerObjectId,
             propertyId: t.property,
             tenantId: t._id,
             tenantName: t.name || '',
@@ -604,7 +613,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
               invoiceId: invoice._id,
               tenantId: t._id,
               propertyId: t.property,
-              ownerId: ownerObjId,
+              ownerId: safeOwnerObjectId,
               amount: rentAmt,
               paymentMethod: 'online',
               transactionId: `MOVEIN-${Date.now().toString(36).toUpperCase()}`,
@@ -622,7 +631,7 @@ async function autoHealMoveInInvoices(ownerIdInput, reqUser = null) {
             action: 'INVOICE_CREATED',
             invoiceId: invoice._id,
             tenantId: t._id,
-            ownerId: ownerObjId,
+            ownerId: safeOwnerObjectId,
             propertyId: t.property,
             meta: { billingMonth: currentMonth, rentAmount: rentAmt, note: 'Move-in month invoice created after payment verification' },
           }).catch(() => {});

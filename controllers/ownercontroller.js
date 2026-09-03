@@ -32,9 +32,17 @@ exports.healTenantInvoices = async (ownerLoginId) => {
         const ownerDoc = await Owner.findOne({ loginId: ownerLoginId }).lean();
         if (!ownerDoc) return;
 
+        const isOwnerObjectId = ownerDoc._id && mongoose.Types.ObjectId.isValid(ownerDoc._id) && String(ownerDoc._id).match(/^[0-9a-fA-F]{24}$/);
+        const safeOwnerId = isOwnerObjectId
+            ? ownerDoc._id
+            : new mongoose.Types.ObjectId(require('crypto').createHash('md5').update(String(ownerLoginId)).digest('hex').slice(0, 24));
+
         // 1. Heal existing PENDING/PARTIAL invoices if a paid Rent record exists
         const invoices = await RentInvoice.find({
-            ownerId: ownerDoc._id,
+            $or: [
+                { ownerId: safeOwnerId },
+                ...(isOwnerObjectId ? [{ ownerId: ownerDoc._id }] : [])
+            ],
             status: { $in: ['PENDING', 'PARTIAL'] }
         });
 
@@ -84,13 +92,13 @@ exports.healTenantInvoices = async (ownerLoginId) => {
                 if (!existingInv) {
                     const rentAmt = Number(t.agreedRent || paidRent.rentAmount || 0);
                     const invoiceNumber = `INV-${billingMonth}-${String(t._id).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
-                    const config = await getEffectiveConfig(ownerDoc._id, t.property, null);
+                    const config = await getEffectiveConfig(safeOwnerId, t.property, null);
                     const [yr, mo] = billingMonth.split('-');
                     const dueDate = new Date(parseInt(yr), parseInt(mo) - 1, config?.rentDueDay || 1);
 
                     const newInv = await RentInvoice.create({
                         invoiceNumber,
-                        ownerId: ownerDoc._id,
+                        ownerId: safeOwnerId,
                         propertyId: t.property || null,
                         tenantId: t._id,
                         tenantName: t.name || '',
@@ -113,7 +121,7 @@ exports.healTenantInvoices = async (ownerLoginId) => {
                             invoiceId: newInv._id,
                             tenantId: t._id,
                             propertyId: t.property || null,
-                            ownerId: ownerDoc._id,
+                            ownerId: safeOwnerId,
                             amount: rentAmt,
                             paymentMethod: paidRent.paymentMethod || 'cash',
                             transactionId: paidRent.razorpayPaymentId || `HEAL-${Date.now().toString(36).toUpperCase()}`,
