@@ -75,13 +75,20 @@ async function checkUserBlockStatus(loginId) {
     };
   }
 
-  // Check if remaining real violations >= 2
+  // Count only the violations this account actually COMMITTED.
+  //
+  // participantLoginId is the offender. ownerId is the owner of the
+  // CONVERSATION the violation happened in, which is a completely different
+  // thing: when a tenant shares a phone number, the violation is stored with
+  // participantLoginId = <tenant> and ownerId = <the owner they were talking
+  // to>. Counting the ownerId clause here charged that strike to the owner,
+  // so an owner reached "2 strikes" — a permanent block — from one strike of
+  // their own plus one committed by somebody else in their inbox.
+  //
+  // That is not a hypothetical: it is what silently 403'd every
+  // POST /api/chat/send for the owner whose messages "disappeared".
   const realViolationsCount = await ChatViolation.countDocuments({
-    $or: [
-      { ownerId: upperId },
-      { participantLoginId: cleanId },
-      { participantLoginId: upperId }
-    ]
+    participantLoginId: { $in: [cleanId, upperId] }
   });
 
   if (realViolationsCount < 2) {
@@ -281,7 +288,23 @@ function detectViolation(text, settings = {}) {
     /\bbina\s+([a-zA-Z]*\s+){0,2}beech\b/i,
     /\b(owner|malik)\s+([a-zA-Z]*\s+){0,2}(naam|name)\b/i,
     /\b(app|platform)\s+([a-zA-Z]*\s+){0,2}bina\b/i,
-    /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i
+    /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i,
+
+    // "give me the money" in Hinglish, either word order:
+    //   "dede paise mujhe" / "paise de do" / "paisa dedo bhai"
+    //
+    // This slipped past every pattern above. The money-word list already
+    // existed, but each rule paired it with a channel word (direct, offline,
+    // cash, transfer) and this phrasing names no channel at all — it is a bare
+    // demand for a handover, which is the most common way an owner opens an
+    // off-platform payment.
+    //
+    // Both a money word AND a give word are required, within two words of each
+    // other, so ordinary rent talk is untouched: "8000 rent hai monthly" has no
+    // give word, "de dena" alone has no money word, and "paise online bhej do"
+    // is a legitimate on-platform instruction the AI layer judges in context.
+    /\b(paise|paisa|rupay|rupaye|amount|cash)\s+([a-zA-Z]*\s+){0,2}(de\s?de|de\s?do|dedo|dede|dena|de\s?dena|bhej\s?de|bhej\s?do)\b/i,
+    /\b(de\s?de|de\s?do|dedo|dede|dena|de\s?dena|bhej\s?de|bhej\s?do)\s+([a-zA-Z]*\s+){0,2}(paise|paisa|rupay|rupaye|amount|cash)\b/i
   ];
 
   // Clean payment links and safe phrases before bypass check
@@ -428,13 +451,17 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         global.io.to(senderLoginId).emit('receive_message', strike1Msg);
       }
     } else if (attemptNumber >= 2 && isNewAttempt) {
-      // Strike 2: Auto block owner and user account after 2 genuine attempts
-      const isOwnerObjId = mongoose.Types.ObjectId.isValid(ownerId) && String(ownerId).match(/^[0-9a-fA-F]{24}$/);
-      const ownerConds = [{ loginId: ownerId }, { loginId: String(ownerId).toUpperCase() }];
-      if (isOwnerObjId) ownerConds.push({ _id: ownerId });
+      // Strike 2: auto-block the account that actually sent the message.
+      // senderLoginId is the offender; ownerId is only the owner of the
+      // conversation it happened in. Blocking ownerId here punished the owner
+      // for a tenant's violation.
+      const offenderId = senderLoginId;
+      const isOffenderObjId = mongoose.Types.ObjectId.isValid(offenderId) && String(offenderId).match(/^[0-9a-fA-F]{24}$/);
+      const offenderConds = [{ loginId: offenderId }, { loginId: String(offenderId).toUpperCase() }];
+      if (isOffenderObjId) offenderConds.push({ _id: offenderId });
       await Promise.allSettled([
-        Owner.updateOne({ $or: ownerConds }, { isActive: false }),
-        User.updateOne({ $or: ownerConds }, { status: 'blocked', isActive: false })
+        Owner.updateOne({ $or: offenderConds }, { isActive: false }),
+        User.updateOne({ $or: offenderConds }, { status: 'blocked', isActive: false })
       ]);
 
       const blockWarningMsg = new ChatMessage({
@@ -442,7 +469,9 @@ async function logViolation(senderLoginId, receiverLoginId, messageText, violati
         sender_login_id: 'system',
         sender_name: 'Roomhy System',
         sender_role: 'superadmin',
-        message: `🚨 ACCOUNT BLOCKED (Attempt 2 of 2): Account (${ownerName}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
+        // Names the account that was actually suspended. It previously always
+        // named the owner, even when the tenant was the one who was blocked.
+        message: `🚨 ACCOUNT BLOCKED (Attempt 2 of 2): Account (${sender.name || offenderId}) has been automatically suspended due to repeated policy violations (commission bypass). Chat is now closed.`,
         message_type: 'system',
         is_read: false
       });
@@ -727,12 +756,20 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
 
         if (isRepeatedOrSevere) {
           console.log(`🚨 Auto-blocking offender ${offenderId} (Genuine Attempt 2 failed)`);
+          // Block the OFFENDER only. The previous `$or: [offenderId, ownerId]`
+          // matched a single document, and when the offender was the tenant
+          // (who has no Owner record) the only thing it could match was the
+          // owner — so a tenant's violation blocked the owner's account.
+          const offenderConds = [
+            { loginId: offenderId },
+            { loginId: String(offenderId).toUpperCase() }
+          ];
           await Promise.allSettled([
-            Owner.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' }),
-            User.updateOne({ $or: [{ loginId: offenderId }, { loginId: ownerId }] }, { status: 'blocked', isActive: false })
+            Owner.updateOne({ $or: offenderConds }, { isActive: false, status: 'blocked', blockedReason: 'Repeated commission bypass attempt' }),
+            User.updateOne({ $or: offenderConds }, { status: 'blocked', isActive: false })
           ]);
           if (global.io) {
-            global.io.to(offenderId).to(ownerId).emit('account_blocked', {
+            global.io.to(offenderId).emit('account_blocked', {
               blocked: true,
               accountBlocked: true,
               reason: 'Your account has been permanently blocked due to repeated commission bypass attempts.'
@@ -825,7 +862,12 @@ setInterval(async () => {
     const toDeleteIds = [];
 
     for (const v of allViolations) {
-      const key = v.ownerId || v.participantLoginId;
+      // Group by the OFFENDER, matching what checkUserBlockStatus() counts.
+      // Keying on ownerId first bucketed a tenant's violation under the owner,
+      // so an owner with one real strike looked like two and this loop —
+      // whose whole job is to heal accounts below two genuine strikes — never
+      // unblocked them.
+      const key = v.participantLoginId;
       if (!key) continue;
       if (!userGroups.has(key)) {
         userGroups.set(key, [v]);
@@ -848,13 +890,16 @@ setInterval(async () => {
     }
 
     // Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
-    for (const [ownerKey, list] of userGroups.entries()) {
+    for (const [offenderKey, list] of userGroups.entries()) {
       if (list.length < 2) {
-        const isKeyObjId = mongoose.Types.ObjectId.isValid(ownerKey) && String(ownerKey).match(/^[0-9a-fA-F]{24}$/);
-        const ownerConds = [{ loginId: ownerKey }, { loginId: String(ownerKey).toUpperCase() }];
-        if (isKeyObjId) ownerConds.push({ _id: ownerKey });
-        await Owner.updateMany({ $or: ownerConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
-        await User.updateMany({ loginId: ownerKey }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
+        const isKeyObjId = mongoose.Types.ObjectId.isValid(offenderKey) && String(offenderKey).match(/^[0-9a-fA-F]{24}$/);
+        const offenderConds = [{ loginId: offenderKey }, { loginId: String(offenderKey).toUpperCase() }];
+        if (isKeyObjId) offenderConds.push({ _id: offenderKey });
+        await Owner.updateMany({ $or: offenderConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
+        // Matched on the exact-case loginId only, so a stored id whose case
+        // differed from the violation's stayed blocked forever while the Owner
+        // record beside it was healed.
+        await User.updateMany({ $or: offenderConds }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
       }
     }
   } catch (_) {}

@@ -1,4 +1,5 @@
 const ChatMessage = require('../models/ChatMessage');
+const { canonicalChatId } = require('../utils/chatIdentity');
 
 /**
  * SOCKET.IO CHAT HANDLERS
@@ -45,7 +46,14 @@ module.exports = (io) => {
 
       // Join room with loginId
       socket.join(login_id);
-      const aliasRooms = normalizeAliases(aliases, login_id);
+      // Always also join the canonical form of this id. A website user whose
+      // stored loginId is their email joins "harsh@example.com" while every
+      // backend creation path addresses them as "roomhyweb541955" — joining
+      // both means neither side has to know which form the other used.
+      const aliasRooms = normalizeAliases(
+        [...(Array.isArray(aliases) ? aliases : []), canonicalChatId(login_id)],
+        login_id
+      );
       aliasRooms.forEach((alias) => socket.join(alias));
       socket.userLogin = login_id;
       socket.userRole = role;
@@ -120,29 +128,38 @@ module.exports = (io) => {
 
         console.log(`✓ Message saved: ${from_login_id} -> ${to_login_id}`);
 
-        // Emit to receiver's room
-        io.to(to_login_id).emit('receive_message', {
+        const basePayload = {
           _id: msg._id,
-          room_id: to_login_id,
           sender_login_id: from_login_id,
           sender_name: socket.userName,
           message: msg.message,
           message_type: msg.message_type,
           file_url: msg.file_url,
           created_at: msg.created_at
-        });
+        };
+
+        // Emit to receiver's room. Rooms are exact strings and one website user
+        // can be joined under either their email or their email hash, so the
+        // equivalent room is included — otherwise the push silently went
+        // nowhere and the recipient had to reload to see the message.
+        const receiverRooms = new Set(
+          [to_login_id, canonicalChatId(to_login_id)]
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+        );
+        for (const room of receiverRooms) {
+          io.to(room).emit('receive_message', { ...basePayload, room_id: room });
+        }
 
         // Emit to sender's own room so the sender's UI updates in real-time
-        io.to(from_login_id).emit('receive_message', {
-          _id: msg._id,
-          room_id: from_login_id,
-          sender_login_id: from_login_id,
-          sender_name: socket.userName,
-          message: msg.message,
-          message_type: msg.message_type,
-          file_url: msg.file_url,
-          created_at: msg.created_at
-        });
+        const senderRooms = new Set(
+          [from_login_id, canonicalChatId(from_login_id)]
+            .map((id) => String(id || '').trim())
+            .filter((id) => id && !receiverRooms.has(id))
+        );
+        for (const room of senderRooms) {
+          io.to(room).emit('receive_message', { ...basePayload, room_id: room });
+        }
 
         // Confirm to sender
         socket.emit('message_sent', { success: true, id: msg._id });
