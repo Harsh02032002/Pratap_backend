@@ -52,6 +52,21 @@ function isMailjetConfigured(cfg) {
     return Boolean(cfg.mailjetHost && cfg.mailjetUser && cfg.mailjetPass);
 }
 
+// Ex-tenant guard shared by the WhatsApp senders below.
+// Fails open — a guard error must never block a legitimate message.
+async function isExTenantPhone(toPhone) {
+    try {
+        const { isRecipientSuppressed } = require('../services/tenantCommsGuard');
+        if (await isRecipientSuppressed({ phone: toPhone })) {
+            console.log('[MAILER] WhatsApp suppressed for ex-tenant recipient');
+            return true;
+        }
+    } catch (e) {
+        console.error('[MAILER] comms guard skipped:', e.message);
+    }
+    return false;
+}
+
 function normalizeRecipients(to) {
     if (!to) return [];
     if (Array.isArray(to)) {
@@ -226,6 +241,7 @@ async function resolvePhoneByEmail(email) {
 
 async function sendWhatsAppMessage(toPhone, body, cfg) {
     if (!toPhone || !body) return false;
+    if (await isExTenantPhone(toPhone)) return false;
 
     const endpoint = `https://graph.facebook.com/${cfg.whatsappApiVersion}/${cfg.whatsappPhoneNumberId}/messages`;
     const payload = {
@@ -376,7 +392,25 @@ async function sendMail(to, subject, text, html, options = {}) {
     
     console.log('[MAILER DEBUG] sendMail called with:', { to, subject, hasHtml: !!html, hasAttachments: (options.attachments?.length || 0) });
     
-    const recipients = normalizeRecipients(to);
+    let recipients = normalizeRecipients(to);
+
+    // Ex-tenant guard: strip any recipient whose move-out has completed and who
+    // has no other active tenancy / owner / staff account. See
+    // services/tenantCommsGuard.js. Required lazily to avoid a circular import.
+    try {
+        const { isRecipientSuppressed } = require('../services/tenantCommsGuard');
+        const verdicts = await Promise.all(
+            recipients.map((r) => isRecipientSuppressed({ email: r.Email }))
+        );
+        const kept = recipients.filter((_, i) => !verdicts[i]);
+        if (kept.length !== recipients.length) {
+            console.log(`[MAILER] Suppressed ${recipients.length - kept.length} ex-tenant recipient(s)`);
+            recipients = kept;
+        }
+    } catch (e) {
+        console.error('[MAILER] comms guard skipped:', e.message);
+    }
+
     const hasSmtp = isSmtpConfigured(cfg);
     const hasMailjet = isMailjetConfigured(cfg);
 
@@ -635,6 +669,9 @@ async function sendKycLinkEmail(toEmail, name, portalName, kycLink) {
 
 async function sendDirectWhatsAppOtp(toPhone, otp) {
     const cfg = getMailerConfig();
+    // Builds its own Graph API request rather than going through
+    // sendWhatsAppTemplate, so it needs the ex-tenant guard of its own.
+    if (await isExTenantPhone(toPhone)) return false;
     if (!isWhatsAppConfigured(cfg) || !cfg.whatsappOtpTemplateName) {
         // WhatsApp API unconfigured — silently fallback to email OTP
         return false;
@@ -698,6 +735,7 @@ async function sendDirectWhatsAppOtp(toPhone, otp) {
 //     [{ name: 'tenant_name', value: 'John' }, { name: 'amount', value: '3000' }]
 async function sendWhatsAppTemplate(toPhone, templateName, languageCode, bodyParams, cfg) {
     if (!toPhone || !templateName) return false;
+    if (await isExTenantPhone(toPhone)) return false;
     const endpoint = `https://graph.facebook.com/${cfg.whatsappApiVersion}/${cfg.whatsappPhoneNumberId}/messages`;
     const parameters = bodyParams.map((p, idx) => {
         if (p && typeof p === 'object' && (p.name || p.parameter_name)) {

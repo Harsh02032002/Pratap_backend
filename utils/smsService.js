@@ -139,6 +139,19 @@ async function sendOTP_Twilio(phone, otp, purpose = 'verification') {
  * @returns {Promise<{success: boolean, provider: string}>}
  */
 async function sendOTPSMS(phone, otp, purpose = 'verification') {
+    // Ex-tenant guard. A completed ex-tenant cannot log in anyway, so an OTP to
+    // them has no use; if the owner re-adds them via Add Tenant this unblocks
+    // automatically because the guard is a live lookup, not a stored blocklist.
+    try {
+        const { isRecipientSuppressed } = require('../services/tenantCommsGuard');
+        if (await isRecipientSuppressed({ phone })) {
+            console.log('[SMS] Suppressed — recipient is an ex-tenant');
+            return { success: false, provider: 'suppressed' };
+        }
+    } catch (e) {
+        console.error('[SMS] comms guard skipped:', e.message);
+    }
+
     // Try Twilio first
     if (isTwilioConfigured(TWILIO_OTP_CHANNEL)) {
         const success = await sendOTP_Twilio(phone, otp, purpose);

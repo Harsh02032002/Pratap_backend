@@ -926,6 +926,29 @@ exports.login = async (req, res) => {
                 User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
             }
 
+            // Ex-tenant lockout. Must run BEFORE the auto-heal below, which
+            // would otherwise flip isActive back to true and let a tenant whose
+            // move-out has completed straight back into the panel.
+            // Keyed on moveoutRequest.completedAt, so a tenant merely serving
+            // their notice period still logs in normally, and a person re-added
+            // later through Add Tenant gets a fresh record and works again.
+            if (user.role === 'tenant') {
+                const exTenant = await Tenant.findOne({
+                    $or: [
+                        { loginId: user.loginId },
+                        { user: user._id }
+                    ],
+                    'moveoutRequest.completedAt': { $exists: true, $ne: null },
+                    status: 'inactive'
+                }).select('_id name').lean();
+
+                if (exTenant) {
+                    return res.status(403).json({
+                        message: 'Your move-out is complete and this tenant account has been closed. Please contact your property owner if you believe this is a mistake.'
+                    });
+                }
+            }
+
             // Auto-heal tenant User model if user is a tenant with valid credentials
             if (user.role === 'tenant' && user.isActive === false) {
                 user.isActive = true;
