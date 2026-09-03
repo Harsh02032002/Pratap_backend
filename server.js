@@ -11,6 +11,7 @@ const { startCronJobs } = require('./services/cronJobs');
 const { registerAllCronJobs } = require('./jobs/dailyRentEvaluator');
 const { registerAutoMarkAbsentJob } = require('./jobs/autoMarkAbsentJob');
 const { registerOwnerPropertyHealJob } = require('./jobs/ownerPropertyHealJob');
+const { registerUnreadChatReminderJob } = require('./jobs/unreadChatReminderJob');
 const { startEscalationJob } = require('./controllers/complaintController');
 let escalationJobStarted = false;
 const initChatSocket = require('./socket/chatSocket');
@@ -876,6 +877,7 @@ function startServer() {
             registerAllCronJobs();
             registerAutoMarkAbsentJob();
             registerOwnerPropertyHealJob();
+            registerUnreadChatReminderJob();
         } catch (err) {
             console.warn('⚠️  Cron jobs failed to start:', err.message);
         }

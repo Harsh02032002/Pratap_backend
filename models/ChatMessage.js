@@ -61,11 +61,23 @@ const chatMessageSchema = new mongoose.Schema({
   },
   moderation_resolved_by: { type: String, default: null },
 
+  // When the "you have an unread message" reminder email covering this message
+  // was sent. Null means no reminder has gone out for it yet.
+  //
+  // This is the idempotency marker for jobs/unreadChatReminderJob: without a
+  // stored marker the job would re-send the same reminder on every run, because
+  // a message stays unread until the recipient actually opens the conversation.
+  reminder_email_sent_at: { type: Date, default: null },
+
   created_at: { type: Date, default: Date.now, index: true },
   updated_at: { type: Date, default: Date.now }
 });
 
 chatMessageSchema.index({ room_id: 1, created_at: -1 });
+
+// Serves the reminder job's selector: unread, not yet reminded, older than the
+// delay. Without it that query is a collection scan every two minutes.
+chatMessageSchema.index({ is_read: 1, reminder_email_sent_at: 1, created_at: 1 });
 
 // Automatic Moderation Pre-save Hook
 chatMessageSchema.pre('save', async function(next) {

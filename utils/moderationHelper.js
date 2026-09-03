@@ -115,6 +115,16 @@ async function checkUserBlockStatus(loginId) {
   };
 }
 
+/**
+ * How far back the split-typing check may look when merging a sender's recent
+ * messages into one string to screen.
+ *
+ * Deliberately short. Anything longer stops being "one thought typed across a
+ * few messages" and becomes "everything this person has ever said", which made
+ * a single past violation taint every future message they sent.
+ */
+const SPLIT_CONTEXT_WINDOW_MS = Number(process.env.CHAT_SPLIT_CONTEXT_WINDOW_MS || 5 * 60 * 1000);
+
 // Detect violations in message content
 function detectViolation(text, settings = {}) {
   if (!text) return { violation: null, maskedText: '' };
@@ -613,12 +623,30 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
     const senderVariants = [...new Set([sender, sender.toLowerCase(), sender.toUpperCase()])];
     const receiverVariants = [...new Set([receiver, receiver.toLowerCase(), receiver.toUpperCase()])];
 
+    // Only messages from the last few minutes count as context.
+    //
+    // This window did not exist, and its absence was a false-positive engine.
+    // The split-typing check below merges the sender's recent messages into one
+    // string and screens that, so it could catch someone typing "paise" / "naa"
+    // / "de" as separate messages. With no lower bound it merged the last 8
+    // messages no matter how old they were: once anything flagged sat in that
+    // history, EVERY later message inherited it forever. An owner typing "hi"
+    // was screened as "...453534545454 5000 7845 dede paise mujhe ... hi",
+    // flagged, and struck — twice, which suspends the account.
+    //
+    // Split typing means messages sent back-to-back in one breath, so a few
+    // minutes is the honest span. It matches ATTEMPT_SESSION_WINDOW, which
+    // already groups consecutive messages into a single attempt.
+    const contextSince = new Date(
+      new Date(messageDoc.created_at).getTime() - SPLIT_CONTEXT_WINDOW_MS
+    );
+
     const recentMessages = await ChatMessage.find({
       $or: [
         { room_id: { $in: receiverVariants }, sender_login_id: { $in: senderVariants } },
         { room_id: { $in: senderVariants }, sender_login_id: { $in: receiverVariants } }
       ],
-      created_at: { $lt: messageDoc.created_at }
+      created_at: { $lt: messageDoc.created_at, $gte: contextSince }
     })
       .sort({ created_at: -1 })
       .limit(8)
@@ -776,12 +804,20 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
             });
           }
         } else {
-          // New Attempt 1 — emit warning
+          // New Attempt 1 — emit warning to the OFFENDER only.
+          //
+          // This used to be `.to(offenderId).to(ownerId)`, so when the tenant
+          // was the offender the owner also got a "1st Warning: your account
+          // will be blocked" popup for something they did not send.
           if (global.io) {
-            global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+            global.io.to(offenderId).emit('message_blocked', {
               warning: true,
               warningType: '1st_warning',
               attemptCount: 1,
+              // The offending text, so the UI can show what was actually
+              // withheld instead of labelling this warning as the user's
+              // own message.
+              snippet: String(messageText || '').slice(0, 300),
               message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
             });
           }
@@ -837,10 +873,14 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       } else {
         // Grouped consecutive message — STILL show warning if it's Attempt 1 session
         if (attemptNumber < 2 && global.io) {
-          global.io.to(offenderId).to(ownerId).emit('message_blocked', {
+          // Offender only — see the note on the other message_blocked emit.
+          // Warning somebody about a message they did not send is both
+          // confusing and, since it names account suspension, alarming.
+          global.io.to(offenderId).emit('message_blocked', {
             warning: true,
             warningType: '1st_warning',
             attemptCount: 1,
+            snippet: String(messageText || '').slice(0, 300),
             message: '⚠️ 1st Warning: Sharing contact numbers, emails, or offline payment terms is strictly prohibited on Roomhy. A 2nd attempt will permanently block your account.'
           });
         }
