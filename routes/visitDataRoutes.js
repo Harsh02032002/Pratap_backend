@@ -199,6 +199,39 @@ async function sendOwnerKycLink(visit) {
     const propertyLocationCode = String(ownerArea || visit.city || loginId).trim().toUpperCase();
     const occupancy = normalizeOccupancyFields(visit);
 
+    // Carry what the employee already wrote down onto the Owner record, so the
+    // digital check-in page can prefill it. Without this the owner is asked to
+    // retype the address and bank details that are already on the visit report,
+    // and the page shows those fields blank under a "PRE-FILLED BY ROOMHY"
+    // heading.
+    //
+    // Gaps only. This function also backs the manual "Resend KYC" button, and by
+    // then the owner may have corrected these fields on the check-in page. The
+    // visit report is the employee's second-hand note; whatever the owner
+    // entered about their own bank account wins.
+    const existingOwner = await Owner.findOne({ loginId })
+        .select('phone profile checkinPhone checkinAddress checkinBankName checkinBranchName ' +
+                'checkinBankAccountNumber checkinIfscCode checkinAccountHolderName checkinUpiId')
+        .lean();
+
+    const prefill = {};
+    const fillIfBlank = (field, value) => {
+        const next = String(value || '').trim();
+        if (next && !String(existingOwner?.[field] || '').trim()) prefill[field] = next;
+    };
+    fillIfBlank('checkinPhone', ownerPhone);
+    fillIfBlank('checkinAddress', visit.address);
+    fillIfBlank('checkinBankName', visit.bankName);
+    fillIfBlank('checkinBranchName', visit.bankBranchName);
+    fillIfBlank('checkinBankAccountNumber', visit.bankAccountNumber);
+    fillIfBlank('checkinIfscCode', visit.bankIfscCode);
+    fillIfBlank('checkinAccountHolderName', visit.bankAccountHolderName);
+    fillIfBlank('checkinUpiId', visit.bankUpiId);
+
+    // A visit with no owner phone must not blank out a number the owner already
+    // gave — this same line runs again on every resend.
+    const resolvedPhone = ownerPhone || existingOwner?.phone || existingOwner?.profile?.phone || '';
+
     // Create/update Owner record so the digital-checkin page can look it up
     await Owner.findOneAndUpdate(
         { loginId },
@@ -207,11 +240,12 @@ async function sendOwnerKycLink(visit) {
                 loginId,
                 name: ownerName,
                 email: ownerEmail,
-                phone: ownerPhone,
+                phone: resolvedPhone,
                 area: ownerArea,
                 locationCode: propertyLocationCode,
-                profile: { name: ownerName, email: ownerEmail, phone: ownerPhone, locationCode: propertyLocationCode, updatedAt: new Date() },
+                profile: { name: ownerName, email: ownerEmail, phone: resolvedPhone, locationCode: propertyLocationCode, updatedAt: new Date() },
                 ...occupancy,
+                ...prefill,
                 credentials: { password: tempPassword, firstTime: true },
                 checkinPassword: tempPassword,
                 isActive: true
