@@ -525,9 +525,48 @@ exports.handleWebhook = async (req, res) => {
         } catch (notifErr) {
           console.warn('[CashfreePaymentCtrl] Owner notification failed:', notifErr.message);
         }
-      }
-
       console.log(`[CashfreePaymentCtrl] ✅ Payment processed: ₹${paymentAmount} | Booking: ${tx.booking_id} | WalletStatus: ${newWalletStatus}`);
+
+      // ── TRIGGER ONBOARDING FINALIZATION (Activate tenant, send receipt & credentials email) ──
+      try {
+        const tenantController = require('./tenantController');
+        const Tenant = require('../models/Tenant');
+        const Rent = require('../models/Rent');
+
+        const tenantLoginId = tx.tenant_id;
+        const rentRecordId = tx.rent_id || tx.invoice_id || tx.booking_id;
+
+        let tenantDoc = null;
+        if (tenantLoginId && tenantLoginId !== 'tenant_user') {
+          tenantDoc = await Tenant.findOne({
+            $or: [
+              { loginId: String(tenantLoginId).toUpperCase() },
+              { loginId: tenantLoginId }
+            ]
+          }).catch(() => null);
+        }
+        if (!tenantDoc && rentRecordId && mongoose.Types.ObjectId.isValid(rentRecordId)) {
+          tenantDoc = await Tenant.findOne({ onboardingRentId: rentRecordId }).catch(() => null);
+          if (!tenantDoc) {
+            const rentDoc = await Rent.findById(rentRecordId).catch(() => null);
+            if (rentDoc?.tenantLoginId) {
+              tenantDoc = await Tenant.findOne({
+                $or: [
+                  { loginId: String(rentDoc.tenantLoginId).toUpperCase() },
+                  { loginId: rentDoc.tenantLoginId }
+                ]
+              }).catch(() => null);
+            }
+          }
+        }
+
+        if (tenantDoc && tenantDoc.paymentLinkStatus !== 'paid') {
+          console.log(`[CASHFREE WEBHOOK] Triggering onboarding finalization for tenant ${tenantDoc.loginId}`);
+          await tenantController.finalizeOnboardingPayment(tenantDoc.loginId, rentRecordId);
+        }
+      } catch (onboardingWebhookErr) {
+        console.error('[CASHFREE WEBHOOK ONBOARDING FINALIZATION ERROR]:', onboardingWebhookErr.message);
+      }
     }
 
     // ── PAYMENT FAILED ───────────────────────────────────────────────────────
@@ -918,9 +957,32 @@ exports.verifyRentPayment = async (req, res) => {
           `;
           await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${paidAmount} received from ${tenantName}`, html).catch(() => {});
         }
-      } catch (emailErr) {
-        console.warn('[verifyRentPayment] Email warn:', emailErr.message);
+    // 8. Onboarding Payment Finalization (Activate Tenant + Send Credentials & Receipt Email)
+    try {
+      const Tenant = require('../models/Tenant');
+      const tenantLoginId = rentDoc?.tenantLoginId || tx?.tenant_id;
+      const rentRecordId = rentDoc?._id || rentInvoiceDoc?._id || tx?.rent_id || rentId;
+
+      let tenantDoc = null;
+      if (tenantLoginId && tenantLoginId !== 'tenant_user') {
+        tenantDoc = await Tenant.findOne({
+          $or: [
+            { loginId: String(tenantLoginId).toUpperCase() },
+            { loginId: tenantLoginId }
+          ]
+        }).catch(() => null);
       }
+      if (!tenantDoc && rentRecordId && mongoose.Types.ObjectId.isValid(rentRecordId)) {
+        tenantDoc = await Tenant.findOne({ onboardingRentId: rentRecordId }).catch(() => null);
+      }
+
+      if (tenantDoc && tenantDoc.paymentLinkStatus !== 'paid') {
+        const tenantController = require('./tenantController');
+        console.log(`[CASHFREE VERIFY] Triggering onboarding finalization for tenant ${tenantDoc.loginId}`);
+        await tenantController.finalizeOnboardingPayment(tenantDoc.loginId, rentRecordId);
+      }
+    } catch (onboardingFinalizeErr) {
+      console.error('[CASHFREE VERIFY ONBOARDING FINALIZATION ERROR]:', onboardingFinalizeErr.message);
     }
 
     return res.json({

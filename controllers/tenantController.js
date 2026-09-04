@@ -1343,3 +1343,68 @@ exports.retryFailedOnboardingEmails = async (req, res) => {
         throw error;
     }
 };
+
+/**
+ * Auto-heal sweep for tenants whose onboarding payment was completed (via Cashfree/online/cash),
+ * but whose status remained 'pending' or whose receipt/credentials emails were missed.
+ */
+exports.healPendingPaidTenants = async () => {
+    try {
+        const Rent = require('../models/Rent');
+        const PaymentTransaction = require('../models/PaymentTransaction');
+
+        const pendingTenants = await Tenant.find({
+            isDeleted: { $ne: true },
+            $or: [
+                { status: 'pending' },
+                { paymentLinkStatus: { $ne: 'paid' } },
+                { receiptEmailStatus: 'failed' },
+                { credentialsEmailStatus: 'failed' }
+            ]
+        }).lean();
+
+        let healedCount = 0;
+
+        for (const tenant of pendingTenants) {
+            let paidRent = null;
+            if (tenant.onboardingRentId) {
+                paidRent = await Rent.findOne({ _id: tenant.onboardingRentId, paymentStatus: 'paid' }).lean();
+            }
+            if (!paidRent) {
+                paidRent = await Rent.findOne({
+                    $or: [
+                        { tenantId: tenant._id },
+                        { tenantLoginId: tenant.loginId }
+                    ],
+                    paymentStatus: 'paid'
+                }).sort({ createdAt: -1 }).lean();
+            }
+
+            let verifiedTx = null;
+            if (!paidRent) {
+                verifiedTx = await PaymentTransaction.findOne({
+                    $or: [
+                        { tenant_id: tenant.loginId },
+                        { tenant_id: String(tenant._id) }
+                    ],
+                    status: { $in: ['Verified', 'Settled'] }
+                }).lean();
+            }
+
+            if (paidRent || verifiedTx) {
+                const rentRecordId = paidRent?._id || verifiedTx?.rent_id || verifiedTx?.booking_id || tenant.onboardingRentId;
+                console.log(`[HEAL PAID TENANT] Activating & finalizing tenant ${tenant.loginId} (${tenant.name})`);
+                await exports.finalizeOnboardingPayment(tenant.loginId, rentRecordId).catch(err => {
+                    console.error(`[HEAL PAID TENANT ERROR] Finalization for ${tenant.loginId} failed:`, err.message);
+                });
+                healedCount++;
+            }
+        }
+
+        if (healedCount > 0) {
+            console.log(`[HEAL PAID TENANTS SWEEP] ✓ Successfully activated and sent receipt/credentials for ${healedCount} tenant(s).`);
+        }
+    } catch (err) {
+        console.error('[HEAL PAID TENANTS SWEEP ERROR]:', err.message);
+    }
+};
