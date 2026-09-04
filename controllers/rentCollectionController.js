@@ -252,6 +252,91 @@ async function sendReminder(req, res) {
   }
 }
 
+// ─── Bulk reminder throttle ──────────────────────────────────────────────────
+//
+// "Send reminders" fans out an email/WhatsApp to every unpaid tenant, so it is
+// rate-limited to once an hour per owner+property. The window is stored in
+// MongoDB (models/ReminderCooldown.js) rather than in memory or the browser: it
+// has to survive a backend restart, and it must not be bypassable by clearing
+// localStorage or opening a second browser.
+
+const BULK_REMINDER_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+const normalizePropertyId = (raw) => {
+  const v = String(raw || '').trim();
+  if (!v || v === 'all' || v === 'undefined' || v === 'null') return null;
+  return mongoose.Types.ObjectId.isValid(v) ? new mongoose.Types.ObjectId(v) : null;
+};
+
+const cooldownPayload = (lastSentAt, now = Date.now()) => {
+  const last = lastSentAt ? new Date(lastSentAt).getTime() : 0;
+  const nextAllowedAtMs = last + BULK_REMINDER_COOLDOWN_MS;
+  const msRemaining = Math.max(0, nextAllowedAtMs - now);
+  return {
+    lastSentAt: lastSentAt || null,
+    nextAllowedAt: last ? new Date(nextAllowedAtMs).toISOString() : null,
+    // The client counts down from this rather than from an absolute server
+    // timestamp, so a skewed device clock cannot shorten or extend the wait.
+    secondsRemaining: Math.ceil(msRemaining / 1000),
+    cooldownSeconds: BULK_REMINDER_COOLDOWN_MS / 1000,
+  };
+};
+
+// ─── GET /api/rent-collection/reminders/bulk-status ──────────────────────────
+async function getBulkReminderStatus(req, res) {
+  try {
+    const ReminderCooldown = require('../models/ReminderCooldown');
+    const propertyId = normalizePropertyId(req.query.propertyId);
+    const doc = await ReminderCooldown.findOne({ ownerId: req.user._id, propertyId }).lean();
+    return res.json({ success: true, ...cooldownPayload(doc?.lastSentAt) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+// ─── POST /api/rent-collection/reminders/bulk-claim ──────────────────────────
+// Claims the hour-long window BEFORE the caller fans out its reminders. Two
+// concurrent clicks cannot both win: the conditional update matches only a
+// document whose window has expired, and the unique index rejects the second
+// insert when no document existed yet.
+async function claimBulkReminder(req, res) {
+  try {
+    const ReminderCooldown = require('../models/ReminderCooldown');
+    const propertyId = normalizePropertyId(req.body?.propertyId);
+    const now = new Date();
+    const expiredBefore = new Date(now.getTime() - BULK_REMINDER_COOLDOWN_MS);
+    const filter = { ownerId: req.user._id, propertyId };
+
+    const claimed = await ReminderCooldown.findOneAndUpdate(
+      { ...filter, lastSentAt: { $lte: expiredBefore } },
+      { $set: { lastSentAt: now }, $inc: { sentCount: 1 } },
+      { new: true }
+    );
+    if (claimed) return res.json({ success: true, claimed: true, ...cooldownPayload(claimed.lastSentAt, now.getTime()) });
+
+    const existing = await ReminderCooldown.findOne(filter).lean();
+    if (!existing) {
+      try {
+        const created = await ReminderCooldown.create({ ...filter, lastSentAt: now, sentCount: 1 });
+        return res.json({ success: true, claimed: true, ...cooldownPayload(created.lastSentAt, now.getTime()) });
+      } catch (err) {
+        if (err?.code !== 11000) throw err;
+        // Lost the race to a concurrent click — fall through and report the wait.
+      }
+    }
+
+    const current = await ReminderCooldown.findOne(filter).lean();
+    return res.status(429).json({
+      success: false,
+      claimed: false,
+      message: 'Reminders were already sent recently. Please wait for the cooldown to finish.',
+      ...cooldownPayload(current?.lastSentAt, now.getTime()),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
 // ─── PATCH /api/rent-collection/invoices/:id/waive ───────────────────────────
 async function waivePenaltyHandler(req, res) {
   try {
@@ -1157,6 +1242,8 @@ module.exports = {
   getTenantInvoiceSummary,
   getCronHealth,
   getMissingContacts,
+  getBulkReminderStatus,
+  claimBulkReminder,
   listPaymentsHandler,
   getWhatsAppTemplates,
   getDailyPaymentSummary,
