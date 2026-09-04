@@ -525,6 +525,7 @@ exports.handleWebhook = async (req, res) => {
         } catch (notifErr) {
           console.warn('[CashfreePaymentCtrl] Owner notification failed:', notifErr.message);
         }
+      }
       console.log(`[CashfreePaymentCtrl] ✅ Payment processed: ₹${paymentAmount} | Booking: ${tx.booking_id} | WalletStatus: ${newWalletStatus}`);
 
       // ── TRIGGER ONBOARDING FINALIZATION (Activate tenant, send receipt & credentials email) ──
@@ -957,7 +958,10 @@ exports.verifyRentPayment = async (req, res) => {
           `;
           await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${paidAmount} received from ${tenantName}`, html).catch(() => {});
         }
-    // 8. Onboarding Payment Finalization (Activate Tenant + Send Credentials & Receipt Email)
+      } catch (emailErr) {
+        console.warn('[verifyRentPayment] Email warn:', emailErr.message);
+      }
+    }
     try {
       const Tenant = require('../models/Tenant');
       const tenantLoginId = rentDoc?.tenantLoginId || tx?.tenant_id;
