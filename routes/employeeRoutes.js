@@ -261,6 +261,51 @@ const buildUniqueStaffLoginId = async (ownerLoginId, preferredLoginId = null) =>
     return `STAFF${String(nextNum).padStart(4, '0')}`;
 };
 
+// ── Staff self-service: the caller's own record ──────────────────────────────
+// MUST be registered before '/:loginId', or Express consumes "me" as an id.
+//
+// The staff session is a snapshot taken at login, so a photo (or name, or
+// permissions) changed by the owner afterwards never reaches an already
+// signed-in staff member — their header kept rendering the value captured
+// whenever they last logged in. The client re-hydrates from this on load.
+//
+// Deliberately NOT the list endpoint above: that one applies no filter for role
+// 'employee', so a staff member calling it receives every employee on the
+// platform. This returns the caller and nobody else.
+router.get('/me', protect, async (req, res) => {
+    try {
+        const byId = req.user?._id
+            ? await Employee.findById(req.user._id).select('-password').populate('assignedProperties', 'title name city')
+            : null;
+        const emp = byId || (req.user?.loginId
+            ? await Employee.findOne({ loginId: String(req.user.loginId).toUpperCase(), isDeleted: { $ne: true } })
+                .select('-password').populate('assignedProperties', 'title name city')
+            : null);
+
+        if (!emp) return res.status(404).json({ success: false, error: 'Staff record not found' });
+        if (emp.isDeleted) return res.status(404).json({ success: false, error: 'Staff record not found' });
+        if (!emp.isActive) return res.status(403).json({ success: false, error: 'Your account is inactive. Contact your manager.' });
+
+        return res.json({
+            success: true,
+            data: {
+                _id: emp._id,
+                loginId: emp.loginId,
+                name: emp.name,
+                role: emp.role,
+                parentLoginId: emp.parentLoginId,
+                permissions: emp.permissions || [],
+                assignedProperties: emp.assignedProperties || [],
+                assignedPropertyName: emp.assignedProperties?.[0]?.title || emp.assignedProperties?.[0]?.name || '',
+                photoDataUrl: emp.photoDataUrl || '',
+            }
+        });
+    } catch (err) {
+        console.error('Staff /me error:', err);
+        return res.status(500).json({ success: false, error: 'Failed to load staff record' });
+    }
+});
+
 router.get('/generate-staff-id/:ownerLoginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
