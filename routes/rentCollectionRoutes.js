@@ -14,6 +14,11 @@ router.post('/invoices/generate', ctrl.generateInvoices);
 router.get('/invoices', ctrl.listInvoices);
 router.get('/invoices/:id', ctrl.getInvoiceById);
 router.post('/invoices/:id/remind', ctrl.sendReminder);
+
+// Bulk-reminder throttle. The window is server-owned so it survives a restart
+// and cannot be bypassed from the browser.
+router.get('/reminders/bulk-status', ctrl.getBulkReminderStatus);
+router.post('/reminders/bulk-claim', ctrl.claimBulkReminder);
 router.patch('/invoices/:id/waive', ctrl.waivePenaltyHandler);
 
 // Payments
