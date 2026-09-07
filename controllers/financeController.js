@@ -1070,12 +1070,36 @@ exports.manualTransferToOwner = async (req, res) => {
     }
 
     const owner = await Owner.findOne({ loginId: tx.owner_id });
-    const accountHolder = owner?.checkinAccountHolderName || owner?.name || owner?.profile?.name || '';
+    const accountHolder = owner?.checkinAccountHolderName || owner?.accountHolderName || owner?.name || owner?.profile?.name || '';
     const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
     const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
     const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
+    const upiId         = owner?.upiId || owner?.checkinUpiId || owner?.profile?.upiId || '';
 
-    const ref = 'RHY-MAN-' + Math.floor(10000000 + Math.random() * 90000000);
+    // Initiate Real Cashfree Bank Payout
+    const cfPayout = require('../services/cashfreePayoutService');
+    const transferId = `RHY_PO_${tx._id}_${Date.now()}`;
+    const payoutRes = await cfPayout.directBankTransfer({
+      transferId,
+      amount: tx.owner_amount,
+      bankDetails: {
+        accountHolderName: accountHolder,
+        accountNumber,
+        ifsc: ifscCode,
+        bankName,
+        upiId
+      },
+      remarks: `Owner Payout — ${tx.property_name || 'Roomhy'}`
+    });
+
+    if (!payoutRes.success) {
+      return res.status(502).json({
+        success: false,
+        message: `Cashfree Payout Transfer Failed: ${payoutRes.error || 'Bank transfer failed'}`
+      });
+    }
+
+    const ref = payoutRes.referenceId || payoutRes.transferId || ('RHY-MAN-' + Math.floor(10000000 + Math.random() * 90000000));
 
     tx.payout_status           = 'Paid';
     tx.payout_date             = new Date();
@@ -1085,7 +1109,7 @@ exports.manualTransferToOwner = async (req, res) => {
     tx.payout_account_number   = accountNumber;
     tx.payout_ifsc_code        = ifscCode;
     tx.payout_bank_name        = bankName;
-    tx.notes                   = notes || tx.notes || 'Manual transfer by admin';
+    tx.notes                   = notes || tx.notes || `Direct Cashfree Payout (Ref: ${ref})`;
     await tx.save();
 
     if (owner) {
@@ -1099,7 +1123,7 @@ exports.manualTransferToOwner = async (req, res) => {
       owner_id:        tx.owner_id,
       owner_name:      tx.owner_name || owner?.name || '',
       amount:          tx.owner_amount,
-      mode:            'bank',
+      mode:            upiId ? 'upi' : 'bank',
       status:          'processed',
       is_sandbox:      false,
       account_holder:  accountHolder,
@@ -1112,9 +1136,9 @@ exports.manualTransferToOwner = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `₹${tx.owner_amount.toLocaleString('en-IN')} transfer recorded for ${tx.owner_name || tx.owner_id}.`,
+      message: `₹${tx.owner_amount.toLocaleString('en-IN')} transferred via Cashfree to ${tx.owner_name || tx.owner_id} (UTR: ${ref}).`,
       reference: ref,
-      bankUsed: { accountHolder, accountNumber, ifscCode, bankName },
+      bankUsed: { accountHolder, accountNumber, ifscCode, bankName, upiId },
     });
   } catch (error) {
     console.error('manualTransferToOwner error:', error);
@@ -1134,6 +1158,7 @@ exports.bulkManualTransfer = async (req, res) => {
       return res.status(400).json({ success: false, message: 'transactionIds array is required' });
     }
 
+    const cfPayout = require('../services/cashfreePayoutService');
     const results = { transferred: 0, alreadyPaid: 0, failed: 0, errors: [] };
 
     for (const txId of transactionIds) {
@@ -1143,11 +1168,27 @@ exports.bulkManualTransfer = async (req, res) => {
         if (tx.payout_status === 'Paid') { results.alreadyPaid++; continue; }
 
         const owner = await Owner.findOne({ loginId: tx.owner_id });
-        const accountHolder = owner?.checkinAccountHolderName || owner?.name || '';
+        const accountHolder = owner?.checkinAccountHolderName || owner?.accountHolderName || owner?.name || '';
         const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
         const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
         const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
-        const ref = 'RHY-BULK-' + Math.floor(10000000 + Math.random() * 90000000);
+        const upiId         = owner?.upiId || owner?.checkinUpiId || owner?.profile?.upiId || '';
+
+        const transferId = `RHY_PO_BULK_${tx._id}_${Date.now()}`;
+        const payoutRes = await cfPayout.directBankTransfer({
+          transferId,
+          amount: tx.owner_amount,
+          bankDetails: { accountHolderName: accountHolder, accountNumber, ifsc: ifscCode, bankName, upiId },
+          remarks: `Bulk Payout — ${tx.property_name || 'Roomhy'}`
+        });
+
+        if (!payoutRes.success) {
+          results.failed++;
+          results.errors.push(`${txId}: Cashfree error (${payoutRes.error})`);
+          continue;
+        }
+
+        const ref = payoutRes.referenceId || payoutRes.transferId || ('RHY-BULK-' + Math.floor(10000000 + Math.random() * 90000000));
 
         tx.payout_status           = 'Paid';
         tx.payout_date             = new Date();
@@ -1157,7 +1198,7 @@ exports.bulkManualTransfer = async (req, res) => {
         tx.payout_account_number   = accountNumber;
         tx.payout_ifsc_code        = ifscCode;
         tx.payout_bank_name        = bankName;
-        tx.notes                   = 'Bulk transfer by admin';
+        tx.notes                   = `Bulk Cashfree Transfer (Ref: ${ref})`;
         await tx.save();
 
         if (owner) {
@@ -1171,7 +1212,7 @@ exports.bulkManualTransfer = async (req, res) => {
           owner_id:       tx.owner_id,
           owner_name:     tx.owner_name || '',
           amount:         tx.owner_amount,
-          mode:           'bank',
+          mode:           upiId ? 'upi' : 'bank',
           status:         'processed',
           is_sandbox:     false,
           account_holder: accountHolder,
@@ -1191,7 +1232,7 @@ exports.bulkManualTransfer = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Bulk transfer complete: ${results.transferred} transferred, ${results.alreadyPaid} already paid, ${results.failed} failed.`,
+      message: `Bulk transfer complete: ${results.transferred} transferred via Cashfree, ${results.alreadyPaid} already paid, ${results.failed} failed.`,
       results,
     });
   } catch (error) {
