@@ -5,6 +5,7 @@ const systemSettingsSchema = new mongoose.Schema({
   gst_percentage: { type: Number, default: 18 },
   revenueBalance: { type: Number, default: 0 },
   fixedFee: { type: Number, default: 500 },
+  bookingAmount: { type: Number, default: 500 },
   perBedFee: { type: Number, default: 50 },
   invoicePrefix: { type: String, default: 'RHY-' },
   invoiceCounter: { type: Number, default: 1000 },

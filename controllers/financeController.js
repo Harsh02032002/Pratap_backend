@@ -33,10 +33,40 @@ async function getSettings() {
 // ─── CATEGORY 1: TENANT TRANSACTION MANAGEMENT ─────────────────────────────────
 exports.getTenantReceipts = async (req, res) => {
   try {
-    const invoices = await RentInvoice.find({ status: { $in: ['PAID', 'PARTIAL'] } })
-      .sort({ updatedAt: -1 })
-      .lean();
-    res.json({ success: true, receipts: invoices });
+    const [invoices, transactions] = await Promise.all([
+      RentInvoice.find({ status: { $in: ['PAID', 'PARTIAL'] } }).sort({ updatedAt: -1 }).lean(),
+      PaymentTransaction.find({ status: { $in: ['PAID', 'SUCCESS', 'VERIFIED', 'COMPLETED', 'Created'] } }).sort({ payment_date: -1 }).lean()
+    ]);
+
+    const formattedRentReceipts = invoices.map(inv => ({
+      ...inv,
+      receiptType: 'RENT',
+      category: 'Rent Payment',
+      paidAmount: inv.paidAmount || inv.totalDue || 0,
+      invoiceNumber: inv.invoiceNumber || `INV-${inv._id.toString().slice(-6).toUpperCase()}`
+    }));
+
+    const formattedBookingReceipts = transactions.map(tx => ({
+      _id: tx._id,
+      invoiceNumber: tx.cf_payment_link_id || tx.cf_order_id || `BKG-${tx._id.toString().slice(-6).toUpperCase()}`,
+      tenantName: tx.tenant_name || tx.customer_name || 'Tenant',
+      tenantId: tx.tenant_id,
+      propertyName: tx.property_name || 'Roomhy Stay',
+      paidAmount: tx.booking_amount || tx.amount || 0,
+      paymentMethod: tx.payment_method || 'Cashfree',
+      billingMonth: tx.payment_date ? new Date(tx.payment_date).toISOString().slice(0, 7) : 'Token',
+      status: tx.status || 'PAID',
+      receiptType: 'BOOKING_TOKEN',
+      category: 'Booking Token',
+      paymentDate: tx.payment_date || tx.createdAt
+    }));
+
+    res.json({
+      success: true,
+      receipts: [...formattedBookingReceipts, ...formattedRentReceipts],
+      rentReceipts: formattedRentReceipts,
+      bookingReceipts: formattedBookingReceipts
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
