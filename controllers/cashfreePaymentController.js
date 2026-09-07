@@ -287,6 +287,7 @@ exports.createOrder = async (req, res) => {
       order_token:        orderResult.order_token,
       amount,
       return_url:         returnUrl,
+      isSandbox:          orderResult.isSandbox,
     });
 
   } catch (err) {
