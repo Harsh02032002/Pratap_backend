@@ -1,93 +1,176 @@
-const axios = require('axios');
-const crypto = require('crypto');
+'use strict';
 
 /**
- * Cashfree Payout Service V2 / V3
+ * cashfreePayoutService.js
+ * ─────────────────────────
+ * Cashfree Payouts API Integration.
  * Handles instant direct bank transfers for Owners and Admin Platform Commission.
  */
+
+const axios = require('axios');
 
 function getConfig() {
   const env = (process.env.CASHFREE_ENV || process.env.CASHFREE_MODE || 'TEST').toUpperCase();
   const isSandbox = env !== 'PROD' && process.env.CASHFREE_MODE !== 'production';
-  const baseUrl = isSandbox
-    ? 'https://sandbox.cashfree.com/payout'
-    : 'https://api.cashfree.com/payout';
 
   return {
     clientId:     process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '',
     secretKey:    process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '',
-    baseUrl,
+    baseUrl:      isSandbox ? 'https://sandbox.cashfree.com/payout' : 'https://api.cashfree.com/payout',
+    payoutApiUrl: isSandbox ? 'https://payout-api.cashfree.com/payout' : 'https://payout-api.cashfree.com/payout',
     isSandbox,
   };
 }
 
-function getHeaders(config) {
-  return {
-    'X-Client-Id':     config.clientId,
-    'X-Client-Secret': config.secretKey,
-    'Content-Type':    'application/json',
-    'x-api-version':   '2024-01-01',
-  };
+let _cachedPayoutToken = null;
+let _cachedPayoutTokenExpiry = 0;
+
+/**
+ * getPayoutAuthToken(config)
+ * Obtains a Bearer Authorization Token required for Cashfree Payouts API.
+ */
+async function getPayoutAuthToken(config) {
+  if (_cachedPayoutToken && Date.now() < _cachedPayoutTokenExpiry) {
+    return _cachedPayoutToken;
+  }
+
+  const authUrls = [
+    `${config.payoutApiUrl}/v1/authorize`,
+    `${config.baseUrl}/v1/authorize`,
+    `https://api.cashfree.com/payout/v1/authorize`
+  ];
+
+  let lastErr = null;
+  for (const url of authUrls) {
+    try {
+      const { data } = await axios.post(url, {}, {
+        headers: {
+          'X-Client-Id':     config.clientId,
+          'X-Client-Secret': config.secretKey,
+          'Content-Type':    'application/json',
+        },
+        timeout: 10000,
+      });
+
+      if (data?.status === 'SUCCESS' && data?.data?.token) {
+        _cachedPayoutToken = data.data.token;
+        _cachedPayoutTokenExpiry = Date.now() + 50 * 60 * 1000; // 50 min validity
+        console.log('[CashfreePayout] ✅ Payout Authorization Token generated successfully');
+        return _cachedPayoutToken;
+      } else if (data?.message) {
+        lastErr = data.message;
+      }
+    } catch (err) {
+      lastErr = err.response?.data?.message || err.message;
+    }
+  }
+
+  throw new Error(lastErr || 'Could not obtain Cashfree Payout authorization token');
 }
 
 /**
  * directBankTransfer
  * Instantly transfers money from Cashfree Payout balance directly to Bank Account / UPI ID.
  */
-async function directBankTransfer({ transferId, amount, bankDetails, remarks = 'Roomhy Payout' }) {
+async function directBankTransfer({ transferId, amount, bankDetails = {}, remarks = 'Roomhy Payout' }) {
   const config = getConfig();
 
   if (!config.clientId || !config.secretKey) {
-    console.warn('[CashfreePayout] Credentials missing, running mock payout success mode for development.');
     return {
-      success: true,
-      transferId,
-      referenceId: `UTR_MOCK_${Date.now()}`,
-      status: 'SUCCESS',
-      isMock: true,
+      success: false,
+      error: 'Cashfree credentials not configured (CASHFREE_APP_ID / CASHFREE_SECRET_KEY)',
     };
   }
 
   try {
+    const token = await getPayoutAuthToken(config);
+
+    const isUpi = Boolean(bankDetails.upiId && String(bankDetails.upiId).includes('@'));
+    const cleanAmount = parseFloat(Number(amount).toFixed(2));
+    const cleanTransferId = String(transferId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+
     const payload = {
-      transfer_id: transferId,
-      transfer_amount: Number(amount),
-      transfer_mode: bankDetails.upiId ? 'upi' : 'imps',
-      transfer_remarks: remarks,
-      beneficiary_details: {
-        beneficiary_id: `BEN_${transferId.slice(-12)}`,
-        beneficiary_name: bankDetails.accountHolderName || 'Account Holder',
-        beneficiary_account_number: bankDetails.accountNumber,
-        beneficiary_ifsc: bankDetails.ifsc,
-        beneficiary_upi: bankDetails.upiId || undefined,
+      transferId:   cleanTransferId,
+      amount:       cleanAmount,
+      transferMode: isUpi ? 'upi' : 'banktransfer',
+      remarks:      remarks || 'Roomhy Owner Payout',
+      beneDetails:  isUpi ? {
+        name:  bankDetails.accountHolderName || 'Account Holder',
+        email: bankDetails.email || 'owner@roomhy.com',
+        phone: bankDetails.phone || '9999999999',
+        vpa:   String(bankDetails.upiId).trim(),
+      } : {
+        name:        bankDetails.accountHolderName || 'Account Holder',
+        email:       bankDetails.email || 'owner@roomhy.com',
+        phone:       bankDetails.phone || '9999999999',
+        bankAccount: String(bankDetails.accountNumber || '').trim(),
+        ifsc:        String(bankDetails.ifsc || '').trim().toUpperCase(),
       }
     };
 
-    const { data } = await axios.post(`${config.baseUrl}/transfers`, payload, {
-      headers: getHeaders(config),
-      timeout: 15000,
-    });
+    const transferUrls = [
+      `${config.payoutApiUrl}/v1.2/directTransfer`,
+      `${config.baseUrl}/v1.2/directTransfer`,
+      `${config.payoutApiUrl}/v1/directTransfer`,
+      `https://api.cashfree.com/payout/v1.2/directTransfer`
+    ];
 
-    console.log(`[CashfreePayout] ✅ Transfer initiated: ${transferId} | Status: ${data.status}`);
+    let transferRes = null;
+    let transferErr = null;
+
+    for (const url of transferUrls) {
+      try {
+        const { data } = await axios.post(url, payload, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type':  'application/json',
+          },
+          timeout: 15000,
+        });
+
+        if (data && (data.status === 'SUCCESS' || data.status === 'PENDING' || data.subCode === '200')) {
+          transferRes = data;
+          break;
+        } else if (data && data.message) {
+          transferErr = data.message;
+        }
+      } catch (err) {
+        transferErr = err.response?.data?.message || err.message;
+        if (err.response?.status === 401) {
+          _cachedPayoutToken = null; // Clear expired token
+        }
+      }
+    }
+
+    if (transferRes) {
+      const refId = transferRes.data?.utr || transferRes.data?.referenceId || transferRes.reference_id || cleanTransferId;
+      console.log(`[CashfreePayout] ✅ Direct bank transfer succeeded: ${cleanTransferId} | UTR: ${refId}`);
+      return {
+        success:     true,
+        transferId:  transferRes.data?.transferId || cleanTransferId,
+        referenceId: refId,
+        status:      transferRes.data?.status || 'SUCCESS',
+        data:        transferRes,
+      };
+    }
 
     return {
-      success:     true,
-      transferId:  data.transfer_id || transferId,
-      referenceId: data.reference_id || data.utr || null,
-      status:      data.status || 'SUCCESS',
-      data,
+      success: false,
+      error:   transferErr || 'Cashfree Direct Transfer Failed',
     };
+
   } catch (err) {
-    const errMsg = err.response?.data?.message || err.message || 'Payout failed';
+    const errMsg = err.message || 'Payout failed';
     console.error('[CashfreePayout] ❌ Transfer error:', errMsg);
     return {
       success: false,
-      error: errMsg,
-      details: err.response?.data,
+      error:   errMsg,
     };
   }
 }
 
 module.exports = {
   directBankTransfer,
+  getPayoutAuthToken,
+  getConfig,
 };
