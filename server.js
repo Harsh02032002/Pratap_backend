@@ -911,8 +911,3 @@ if (process.env.VERCEL) {
 // it at module load raced the connection and started the cron jobs before the
 // database was reachable (see the note there).
 module.exports = app;
-}
-// Local development does NOT call startServer() here: the mongoose.connect
-// block above owns startup, on both the success and the failure path. Calling
-// it at module load raced the connection and started the cron jobs before the
-// database was reachable (see the note there).
