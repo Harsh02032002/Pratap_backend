@@ -6,22 +6,13 @@ const { authLimiter, otpLimiter, authIpLimiter, otpIpLimiter, captchaProtection 
 
 // router.use(authLimiter); // Removed global auth limiter as it affects /me and other routes
 
-router.post('/login', authController.login);
+// Guarded like every other credential endpoint below. Without these, login was
+// bounded only by globalApiLimiter — which keys a login POST by the submitted
+// email, so that limit was also the password-guessing budget for an account.
+router.post('/login', authIpLimiter, authLimiter, authController.login);
 
-router.get('/debug-emp', async (req, res) => {
-    try {
-        const Employee = require('../models/Employee');
-        const User = require('../models/user');
-        const emps = await Employee.find({});
-        const usrs = await User.find({});
-        res.json({ 
-            allEmployees: emps.map(e => ({ name: e.name, loginId: e.loginId, email: e.email, password: e.password })),
-            allUsers: usrs.map(u => ({ name: u.name, loginId: u.loginId, email: u.email, role: u.role, password: u.password }))
-        });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// Removed: GET /debug-emp — an unauthenticated endpoint that returned every
+// Employee and User record including the `password` field. Nothing referenced it.
 
 router.post('/register', authIpLimiter, authLimiter, authController.register);
 router.get('/me', protect, authController.me);
@@ -46,30 +37,8 @@ router.post('/forgot-password/request-otp', otpIpLimiter, otpLimiter, captchaPro
 router.post('/forgot-password/verify-otp', otpIpLimiter, otpLimiter, authController.forgotPasswordVerifyOTP);
 router.post('/forgot-password/reset-password', authIpLimiter, authLimiter, authController.forgotPasswordReset);
 
-// TEMPORARY: Reset password for specific user without old password
-router.post('/temp-reset-password', async (req, res) => {
-    try {
-        const { email, newPassword } = req.body;
-        if (!email || !newPassword) {
-            return res.status(400).json({ success: false, message: 'Email and new password required' });
-        }
-        
-        const User = require('../models/user');
-        const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) {
-            return res.status(404).json({ success: false, message: 'User not found' });
-        }
-        
-        user.password = newPassword;
-        user.requirePasswordReset = false;
-        await user.save();
-        
-        console.log(`[TEMP RESET] Password reset for ${email}`);
-        res.json({ success: true, message: 'Password reset successfully' });
-    } catch (err) {
-        console.error('[TEMP RESET] Error:', err.message);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
+// Removed: POST /temp-reset-password — set any account's password given only
+// an email address, with no authentication, OTP or token. Nothing referenced
+// it. The supported path is the /forgot-password/* OTP flow above.
 
 module.exports = router;

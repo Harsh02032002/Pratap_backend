@@ -7,6 +7,13 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const dns = require('dns');
+
+// Always load env from this folder, regardless of where the process was started.
+// This MUST stay above every local require() below: modules like
+// middleware/security.js read process.env into top-level constants at require
+// time, so loading .env any later leaves them silently using their fallbacks.
+dotenv.config({ path: path.join(__dirname, '.env') });
+
 const { startCronJobs } = require('./services/cronJobs');
 const { registerAllCronJobs } = require('./jobs/dailyRentEvaluator');
 const { registerAutoMarkAbsentJob } = require('./jobs/autoMarkAbsentJob');
@@ -59,8 +66,7 @@ try {
     console.warn('⚠️ Could not override DNS servers:', dnsErr.message);
 }
 
-// Always load env from this folder, regardless of where the process was started.
-dotenv.config({ path: path.join(__dirname, '.env') });
+// .env is loaded at the top of this file, before the local requires that read it.
 
 const app = express();
 const server = http.createServer(app);

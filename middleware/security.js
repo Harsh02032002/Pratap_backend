@@ -58,6 +58,15 @@ const CONTACT_MAX  = parseInt(process.env.RATE_LIMIT_CONTACT_MAX, 10) || 10;
 const REFUND_MAX   = parseInt(process.env.RATE_LIMIT_REFUND_MAX,  10) || 5;
 const CHAT_MAX     = parseInt(process.env.RATE_LIMIT_CHAT_MAX,    10) || 1000;
 
+// These constants are read once, at require time. If this module is ever loaded
+// before dotenv.config() runs, every value above silently falls back to its
+// default and nothing looks wrong until a user is throttled — which is exactly
+// what happened before. Printing the effective limits at boot makes that
+// failure visible in one glance at the logs.
+console.log('🛡️  Rate limits in effect:', {
+    GLOBAL_MAX, AUTH_MAX, OTP_MAX, FORM_MAX, CONTACT_MAX, REFUND_MAX, CHAT_MAX
+});
+
 const globalApiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: GLOBAL_MAX,
