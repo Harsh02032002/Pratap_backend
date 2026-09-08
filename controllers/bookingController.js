@@ -400,9 +400,13 @@ exports.createBookingRequest = async (req, res) => {
             }
 
             if (propDoc) {
-                const foundOwner = propDoc.generatedCredentials?.loginId || propDoc.ownerLoginId || propDoc.owner_id || propDoc.owner;
+                const rawOwner = propDoc.generatedCredentials?.loginId || propDoc.ownerLoginId || propDoc.propertyInfo?.ownerLoginId || propDoc.owner_id || propDoc.owner;
+                let foundOwner = rawOwner;
+                if (rawOwner && typeof rawOwner === 'object') {
+                    foundOwner = rawOwner.loginId || rawOwner._id || rawOwner.id;
+                }
                 if (foundOwner && (isGenericOwnerId(resolvedOwnerId) || !resolvedOwnerId)) {
-                    resolvedOwnerId = typeof foundOwner === 'string' ? foundOwner : String(foundOwner);
+                    resolvedOwnerId = String(foundOwner).trim().toUpperCase();
                 }
                 propertyOwnerEmail = propDoc.propertyInfo?.ownerEmail || propDoc.propertyInfo?.ownerGmail || propDoc.contact?.email || '';
                 propertyOwnerPhone = propDoc.propertyInfo?.ownerPhone || propDoc.contact?.number || '';
@@ -497,7 +501,7 @@ exports.createBookingRequest = async (req, res) => {
             owner_id: resolvedOwnerId,     // ✅ SET OWNER ID (resolved from request or property)
             owner_name: ownerName,          // ✅ SET OWNER NAME FROM USER DB
             request_type,
-            bid_amount: request_type === 'bid' ? (bid_amount || bid_max || bid_min || (filter_criteria && (filter_criteria.max_price || filter_criteria.min_price)) || 7000) : 0,
+            bid_amount: request_type === 'bid' ? (bid_amount || bid_max || bid_min || (filter_criteria && (filter_criteria.max_price || filter_criteria.min_price)) || rent_amount || 0) : 0,
             bid_min: request_type === 'bid' ? (bid_min || null) : null,
             bid_max: request_type === 'bid' ? (bid_max || null) : null,
             filter_criteria: filter_criteria || {},
@@ -820,34 +824,52 @@ exports.getBookingRequests = async (req, res) => {
         else if (owner_id) {
             console.log(`🔍 Fetching bookings for owner_id: ${owner_id}`);
             const cleanOwnerId = String(owner_id).trim();
+            const normalizedOwnerId = cleanOwnerId.toUpperCase();
+            const ownerIdCandidates = [...new Set([cleanOwnerId, normalizedOwnerId, cleanOwnerId.toLowerCase()])];
 
             let propIds = [];
             let propVisitIds = [];
             let propNames = [];
 
             try {
-                const ownerProps = await ApprovedProperty.find({
-                    $or: [
-                        { ownerLoginId: cleanOwnerId },
-                        { 'generatedCredentials.loginId': cleanOwnerId },
-                        { owner_id: cleanOwnerId },
-                        { owner: cleanOwnerId }
-                    ]
-                }).select('_id visitId propertyName title').lean();
+                const PropertyModel = require('../models/Property');
+                const [approvedProps, regularProps] = await Promise.all([
+                    ApprovedProperty.find({
+                        $or: [
+                            { ownerLoginId: { $in: ownerIdCandidates } },
+                            { 'generatedCredentials.loginId': { $in: ownerIdCandidates } },
+                            { 'propertyInfo.ownerLoginId': { $in: ownerIdCandidates } },
+                            { owner_id: { $in: ownerIdCandidates } },
+                            { owner: { $in: ownerIdCandidates } }
+                        ]
+                    }).select('_id visitId propertyName title').lean(),
+                    PropertyModel.find({
+                        $or: [
+                            { ownerLoginId: { $in: ownerIdCandidates } },
+                            { owner_id: { $in: ownerIdCandidates } }
+                        ]
+                    }).select('_id visitId propertyName title').lean()
+                ]);
 
-                propIds = ownerProps.map(p => String(p._id));
-                propVisitIds = ownerProps.map(p => p.visitId).filter(Boolean);
-                propNames = ownerProps.map(p => p.propertyName || p.title).filter(Boolean);
+                const allProps = [...(approvedProps || []), ...(regularProps || [])];
+                propIds = allProps.map(p => String(p._id));
+                propVisitIds = allProps.map(p => p.visitId).filter(Boolean);
+                propNames = allProps.map(p => p.propertyName || p.title).filter(Boolean);
             } catch (_) {}
 
+            const ownerRegexPatterns = ownerIdCandidates.map(id => new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'));
             const ownerOr = [
-                { owner_id: cleanOwnerId },
-                { owner_ids: { $in: [cleanOwnerId] }, is_bulk_request: true }
+                { owner_id: { $in: [...ownerIdCandidates, ...ownerRegexPatterns] } },
+                { owner_ids: { $in: ownerIdCandidates }, is_bulk_request: true }
             ];
 
             if (propIds.length > 0) ownerOr.push({ property_id: { $in: propIds } });
             if (propVisitIds.length > 0) ownerOr.push({ property_id: { $in: propVisitIds } });
-            if (propNames.length > 0) ownerOr.push({ property_name: { $in: propNames } });
+            if (propNames.length > 0) {
+                propNames.forEach(n => {
+                    if (n) ownerOr.push({ property_name: new RegExp(n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+                });
+            }
 
             if (query.$or) {
                 query = { $and: [query, { $or: ownerOr }] };

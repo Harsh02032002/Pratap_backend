@@ -975,6 +975,35 @@ async function healChatModerationAndUnblockAccounts() {
       ]
     });
 
+    // 4. Heal existing BookingRequest records with default ₹8,000/₹7,000 notes for properties
+    try {
+      const BookingRequest = mongoose.model('BookingRequest');
+      const bidsToHeal = await BookingRequest.find({
+        $or: [
+          { message: /₹8,000|₹7,000/i },
+          { bid_amount: 8000 },
+          { bid_amount: 7000 }
+        ]
+      }).lean();
+
+      for (const b of bidsToHeal) {
+        const rentAmt = b.rent_amount && b.rent_amount > 0 ? b.rent_amount : 2500;
+        let newMsg = b.message;
+        if (newMsg && (newMsg.includes('8,000') || newMsg.includes('7,000'))) {
+          newMsg = `Tenant Max Budget: ₹${rentAmt.toLocaleString('en-IN')}. If you can offer this property for ₹${rentAmt.toLocaleString('en-IN')}/month, please accept the bid.`;
+        }
+        await BookingRequest.updateOne(
+          { _id: b._id },
+          {
+            $set: {
+              bid_amount: rentAmt,
+              message: newMsg
+            }
+          }
+        );
+      }
+    } catch (_) {}
+
     console.log(`✅ [healChatModeration] Unblocked Harshdeep Kaur (${targetLoginIds.join(', ')}) & purged ${deleteResult.deletedCount || 0} system policy warning messages.`);
   } catch (err) {
     console.error('⚠️ [healChatModeration] Error during heal:', err.message);

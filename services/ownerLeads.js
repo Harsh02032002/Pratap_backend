@@ -36,11 +36,12 @@ async function resolveOwnerPropertyIdentity(ownerIdCandidates, normalizedOwnerId
             ApprovedProperty.find({
                 $or: [
                     { ownerLoginId: { $in: ownerIdCandidates } },
-                    { 'generatedCredentials.loginId': normalizedOwnerId },
+                    { 'generatedCredentials.loginId': { $in: ownerIdCandidates } },
+                    { 'propertyInfo.ownerLoginId': { $in: ownerIdCandidates } },
                     { owner_id: { $in: ownerIdCandidates } },
-                    { owner: normalizedOwnerId }
+                    { owner: { $in: ownerIdCandidates } }
                 ]
-            }).select('_id visitId propertyName title propertyInfo.city').lean()
+            }).select('_id visitId propertyName title propertyInfo.name').lean()
         ]);
 
         const allProps = [...regularProps, ...approvedProps];
@@ -179,7 +180,7 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
     const cleanEmail = String(b.email || '').toLowerCase().trim();
     const isMovedIn = (cleanPhone && movedIn.phones.has(cleanPhone)) || (cleanEmail && movedIn.emails.has(cleanEmail));
     const typeLabel = b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website';
-    const bidFallback = (b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 7000;
+    const bidFallback = (b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || b.rent_amount || b.payment_amount || 0;
 
     return {
         _id: b._id,
@@ -194,7 +195,9 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
         area: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         notes: b.message || (b.request_type === 'direct'
             ? 'Direct booking request from website'
-            : `Tenant Max Budget: ₹${bidFallback.toLocaleString('en-IN')}. If you can offer this property for ₹${bidFallback.toLocaleString('en-IN')}/month, please accept the bid.`),
+            : (bidFallback > 0
+                ? `Tenant Max Budget: ₹${bidFallback.toLocaleString('en-IN')}. If you can offer this property for ₹${bidFallback.toLocaleString('en-IN')}/month, please accept the bid.`
+                : 'Tenant Bid: Open for Bid / Negotiable. Please accept to connect.')),
         preferredCity: b.city || b.filter_criteria?.city || '',
         preferredArea: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         location: b.area ? (b.city ? `${b.area}, ${b.city}` : b.area) : (b.city || ''),
@@ -218,8 +221,10 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
                 if (b.bid_amount && b.bid_amount > 0) return `₹${b.bid_amount.toLocaleString('en-IN')}`;
                 if (b.bid_max && b.bid_max > 0) return `₹${b.bid_max.toLocaleString('en-IN')}`;
                 if (b.filter_criteria?.max_price) return `₹${Number(b.filter_criteria.max_price).toLocaleString('en-IN')}`;
+                if (b.rent_amount && b.rent_amount > 0) return `₹${b.rent_amount.toLocaleString('en-IN')}`;
+                return 'Flexible';
             }
-            return `₹${(b.rent_amount || b.total_amount || 0).toLocaleString('en-IN')}`;
+            return b.rent_amount ? `₹${Number(b.rent_amount).toLocaleString('en-IN')}` : 'N/A';
         })(),
         isBookingRequest: true
     };
