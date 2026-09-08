@@ -736,8 +736,8 @@ exports.login = async (req, res) => {
         console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone} (${phone10}), isLoginId: ${isLoginId}`);
         
         if (isEmail) {
-            // If identifier is email, search by email
-            user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+            // If identifier is email, search by email (case-insensitive + trimmed)
+            user = await User.findOne({ email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') });
         } else if (isPhone) {
             // If identifier is phone, search all common stored formats, then
             // guard against legacy duplicate phone numbers (pre-unique-index
@@ -766,7 +766,7 @@ exports.login = async (req, res) => {
             // Fallback: try all fields
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
             if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
-            if (!user) user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
+            if (!user) user = await User.findOne({ email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') });
             if (!user) {
                 user = await User.findOne({
                     $or: [
@@ -782,7 +782,7 @@ exports.login = async (req, res) => {
         // Fallback for Tenants: Search Tenant collection directly by loginId, email, or phone
         if (!user) {
             const tenantOr = [
-                { email: normalizedIdentifier.toLowerCase() }
+                { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') }
             ];
             if (isPhone && phone10) {
                 tenantOr.push(
@@ -833,7 +833,9 @@ exports.login = async (req, res) => {
                 { loginId: `ROOMHY${normalizedIdentifier}` },
                 { loginId: new RegExp(`${normalizedIdentifier}$`, 'i') },
                 { loginId: normalizedIdentifier.toLowerCase() },
-                { email: normalizedIdentifier.toLowerCase() }
+                { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
+                { 'profile.email': new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
+                { checkinEmail: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') }
             ];
             if (isPhone && phone10) {
                 ownerOr.push(
@@ -879,7 +881,7 @@ exports.login = async (req, res) => {
         if (!user) {
             const kycUser = await KYCVerification.findOne({
                 $or: [
-                    { email: normalizedIdentifier.toLowerCase() },
+                    { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
                     { phone: normalizedIdentifier },
                     { loginId: normalizedIdentifier.toLowerCase() },
                     { loginId: normalizedIdentifier.toUpperCase() }
@@ -1152,6 +1154,7 @@ exports.login = async (req, res) => {
 
         // Guard: if no user found or password didn't match, return 401
         if (!user || !isMatch) {
+            console.log(`[LOGIN DEBUG] ❌ Login failed for ${normalizedIdentifier}: userFound=${Boolean(user)}, isMatch=${isMatch}`);
             return res.status(401).json({ message: 'Invalid credentials' });
         }
 

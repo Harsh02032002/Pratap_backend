@@ -738,6 +738,12 @@ const moveoutCompletionSchedule = cron.schedule('0 1 * * *', async () => {
 module.exports = {
     startCronJobs: () => {
         initDemoOwner(); // Ensure DEMO owner is ready
+        try {
+            const tenantController = require('../controllers/tenantController');
+            tenantController.healPendingPaidTenants().catch(err => {
+                console.error('⚠️ healPendingPaidTenants error:', err.message);
+            });
+        } catch (_) {}
         console.log('🕐 Cron jobs initialized');
         console.log('   - Demo account reset: Daily midnight');
         console.log('   - Rent reminders: Daily 10 AM (10-15th)');

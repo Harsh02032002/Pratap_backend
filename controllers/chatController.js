@@ -445,10 +445,10 @@ exports.getConversation = async (req, res) => {
       { room_id: { $in: user1Variants }, sender_login_id: { $in: user2Variants } },
       { room_id: { $in: user2Variants }, sender_login_id: { $in: user1Variants } },
       { room_id: { $in: allVariants }, sender_login_id: { $in: ['system', 'System'] } },
+      { room_id: { $in: allVariants }, message_type: 'system' },
       { room_id: 'Verified Owner', sender_login_id: { $in: allVariants } },
       { room_id: { $in: allVariants }, sender_login_id: 'Verified Owner' },
-      { conversation_id: pairKey },
-      { message_type: 'system' }
+      { conversation_id: pairKey }
     ];
 
     if (user2SafeRegex) {
@@ -487,7 +487,7 @@ exports.getConversation = async (req, res) => {
       }
 
       if (String(msg.message || '').includes('I have reviewed and accepted your request for')) {
-        const welcomeKey = `${String(msg.conversation_id || '')}:${String(msg.sender_login_id || '').toLowerCase()}:${String(msg.message || '')}`;
+        const welcomeKey = `${String(msg.conversation_id || pairKey)}:${String(msg.message || '').trim()}`;
         if (seenAcceptanceWelcomes.has(welcomeKey)) continue;
         seenAcceptanceWelcomes.add(welcomeKey);
       }

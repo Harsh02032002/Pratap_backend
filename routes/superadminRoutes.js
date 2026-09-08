@@ -1249,7 +1249,7 @@ router.get('/settings', protect, authorize('superadmin'), async (req, res) => {
 // Update System Settings
 router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
   try {
-    const { commission_percentage, gst_percentage, updated_by } = req.body;
+    const { commission_percentage, gst_percentage, bookingAmount, booking_amount, fixedFee, updated_by } = req.body;
     
     if (commission_percentage === undefined || isNaN(Number(commission_percentage))) {
       return res.status(400).json({ success: false, message: 'Invalid commission percentage value' });
@@ -1265,6 +1265,11 @@ router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
     settings.commission_percentage = Number(commission_percentage);
     if (gst_percentage !== undefined && !isNaN(Number(gst_percentage))) {
       settings.gst_percentage = Number(gst_percentage);
+    }
+    const newBookingAmount = bookingAmount ?? booking_amount ?? fixedFee;
+    if (newBookingAmount !== undefined && !isNaN(Number(newBookingAmount)) && Number(newBookingAmount) > 0) {
+      settings.bookingAmount = Number(newBookingAmount);
+      settings.fixedFee = Number(newBookingAmount);
     }
     settings.updated_by = updated_by || 'superadmin';
     await settings.save();

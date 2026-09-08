@@ -181,6 +181,36 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
   } catch (err) {
     const errMsg = err.response?.data?.message || err.message || 'Unknown error';
     console.error('[CashfreePayment] ❌ createPaymentLink failed:', errMsg);
+
+    // ── FAILSAFE FALLBACK ──────────────────────────────────────────────────
+    // If Cashfree live account does not have Payment Links API enabled ('link_creation_api is not enabled'),
+    // fallback automatically to standard Cashfree Order via /pg/orders!
+    if (errMsg.includes('link_creation_api') || errMsg.includes('not enabled') || errMsg.includes('not approved') || err.response?.status === 400 || err.response?.status === 403) {
+      console.log('[CashfreePayment] 🔄 Fallback: Creating standard Cashfree Order for payment link');
+      const cleanBookingId = linkId.replace(/^RMHLINK_/, '').split('_')[0];
+      const returnBaseUrl = process.env.FRONTEND_URL || 'https://roomhy.com';
+      const orderRes = await createOrder({
+        orderId: linkId.slice(0, 45),
+        amount,
+        customerInfo,
+        meta: {
+          note: description,
+          return_url: `${returnBaseUrl}/tenant/tenantdashboard?order_id=${linkId.slice(0, 45)}&rent_id=${cleanBookingId}&amount=${amount}`
+        }
+      });
+
+      if (orderRes.success) {
+        const fallbackUrl = `${returnBaseUrl}/website/pay?bookingId=${cleanBookingId}&amount=${amount}`;
+        return {
+          success: true,
+          link_id: orderRes.order_id || linkId,
+          link_url: fallbackUrl,
+          link_status: 'ACTIVE',
+          isFallbackOrder: true
+        };
+      }
+    }
+
     return { success: false, error: errMsg, details: err.response?.data };
   }
 }

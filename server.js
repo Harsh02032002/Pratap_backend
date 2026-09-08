@@ -819,31 +819,7 @@ app.use((err, req, res, next) => {
     });
 });
 
-// ── Admin Panel (SPA) — served at /admin ────────────────────────────────────
-const fs = require('fs');
-const possibleAdminPaths = [
-    path.join(__dirname, '../roomhy-admin-clone/dist'),   // sibling folder
-    path.join(__dirname, './admin-dist'),                  // same folder as backend
-    path.join(__dirname, '../admin-dist'),                 // one level up
-    '/var/www/roomhy-admin',                              // nginx default
-    '/var/www/html/admin',                                // nginx default 2
-];
-const adminDistPath = possibleAdminPaths.find(p => fs.existsSync(p) && fs.existsSync(path.join(p, 'index.html')));
 
-if (adminDistPath) {
-    app.use('/admin', express.static(adminDistPath, { index: false }));
-    // SPA fallback — use regex to avoid path-to-regexp wildcard issues in Express 5
-    app.get(/^\/admin(\/.*)?$/, (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
-    console.log(`✅ Admin panel served at /admin from: ${adminDistPath}`);
-} else {
-    app.get(/^\/admin(\/.*)?$/, (req, res) => res.send(`
-        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-        <h2>Admin Panel Not Built</h2>
-        <p>Run: <code>cd roomhy-admin-clone && npm run build && cp -r dist ../Roomhy-Backend/admin-dist</code></p>
-        </body></html>
-    `));
-    console.log('ℹ️  Admin panel build not found.');
-}
 
 // 404 handler for unmatched routes
 app.use((req, res) => {

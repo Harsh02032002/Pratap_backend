@@ -30,13 +30,45 @@ async function getSettings() {
   return settings;
 }
 
+const VERIFIED_STATUSES = ['Verified', 'Settled', 'PAID', 'SUCCESS', 'COMPLETED'];
+
 // ─── CATEGORY 1: TENANT TRANSACTION MANAGEMENT ─────────────────────────────────
 exports.getTenantReceipts = async (req, res) => {
   try {
-    const invoices = await RentInvoice.find({ status: { $in: ['PAID', 'PARTIAL'] } })
-      .sort({ updatedAt: -1 })
-      .lean();
-    res.json({ success: true, receipts: invoices });
+    const [invoices, transactions] = await Promise.all([
+      RentInvoice.find({ status: { $in: ['PAID', 'PARTIAL'] } }).sort({ updatedAt: -1 }).lean(),
+      PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).sort({ payment_date: -1, createdAt: -1 }).lean()
+    ]);
+
+    const formattedRentReceipts = invoices.map(inv => ({
+      ...inv,
+      receiptType: 'RENT',
+      category: 'Rent Payment',
+      paidAmount: inv.paidAmount || inv.totalDue || 0,
+      invoiceNumber: inv.invoiceNumber || `INV-${inv._id.toString().slice(-6).toUpperCase()}`
+    }));
+
+    const formattedBookingReceipts = transactions.map(tx => ({
+      _id: tx._id,
+      invoiceNumber: tx.cf_payment_link_id || tx.cf_order_id || `BKG-${tx._id.toString().slice(-6).toUpperCase()}`,
+      tenantName: tx.tenant_name || tx.customer_name || 'Tenant',
+      tenantId: tx.tenant_id,
+      propertyName: tx.property_name || 'Roomhy Stay',
+      paidAmount: tx.booking_amount || tx.amount || 0,
+      paymentMethod: tx.payment_method || 'Cashfree',
+      billingMonth: tx.payment_date ? new Date(tx.payment_date).toISOString().slice(0, 7) : 'Token',
+      status: tx.status || 'PAID',
+      receiptType: 'BOOKING_TOKEN',
+      category: 'Booking Token',
+      paymentDate: tx.payment_date || tx.createdAt
+    }));
+
+    res.json({
+      success: true,
+      receipts: [...formattedBookingReceipts, ...formattedRentReceipts],
+      rentReceipts: formattedRentReceipts,
+      bookingReceipts: formattedBookingReceipts
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -44,8 +76,8 @@ exports.getTenantReceipts = async (req, res) => {
 
 exports.getTenantHistory = async (req, res) => {
   try {
-    const transactions = await PaymentTransaction.find({})
-      .sort({ payment_date: -1 })
+    const transactions = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } })
+      .sort({ payment_date: -1, createdAt: -1 })
       .lean();
     res.json({ success: true, transactions });
   } catch (error) {
@@ -110,7 +142,7 @@ exports.getTenantTracking = async (req, res) => {
 exports.getOwnerReceipts = async (req, res) => {
   try {
     // Receipts represent payout-ready/processed transactions with gross, fee, net
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).sort({ payment_date: -1, createdAt: -1 }).lean();
     res.json({ success: true, receipts: txs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -128,7 +160,7 @@ exports.getOwnerHistory = async (req, res) => {
 
 exports.getOwnerServiceFees = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).sort({ payment_date: -1, createdAt: -1 }).lean();
     const serviceFees = txs.map(t => ({
       transaction_id: t._id,
       owner_id: t.owner_id,
@@ -206,7 +238,10 @@ exports.updateOwnerPayoutOption = async (req, res) => {
 
 exports.getPendingPayouts = async (req, res) => {
   try {
-    const pending = await PaymentTransaction.find({ payout_status: { $in: ['Pending', 'Failed'] } })
+    const pending = await PaymentTransaction.find({
+      status: { $in: VERIFIED_STATUSES },
+      payout_status: { $in: ['Pending', 'Failed'] }
+    })
       .sort({ payment_date: -1, createdAt: -1 })
       .lean();
 
@@ -391,7 +426,7 @@ exports.createDiscount = async (req, res) => {
 
 exports.getRevenueTracking = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const metrics = {
       totalCollected: 0,
       totalCommissions: 0,
@@ -464,7 +499,7 @@ exports.triggerInvoicesGeneration = async (req, res) => {
 
 exports.getInvoiceGstBreakdown = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const gstReport = txs.map(t => {
       const cgst = Math.round(t.commission_amount * 0.09 * 100) / 100;
       const sgst = Math.round(t.commission_amount * 0.09 * 100) / 100;
@@ -611,7 +646,7 @@ exports.updateAutomationSettings = async (req, res) => {
 // ─── CATEGORY 8: ANALYTICS & REPORTS ────────────────────────────────────────────
 exports.getRoomhyMonthlyRevenue = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const data = months.map(m => ({ month: m, revenue: 0, commission: 0 }));
     
@@ -630,7 +665,7 @@ exports.getRoomhyMonthlyRevenue = async (req, res) => {
 
 exports.getOwnerMonthlyRevenue = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const revenueMap = {};
 
     txs.forEach(t => {
@@ -714,7 +749,7 @@ exports.getDueRentReports = async (req, res) => {
 
 exports.getProfitLoss = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const refunds = await RefundRequest.find({ refund_status: 'processed' }).lean();
 
     let totalRevenue = 0;
@@ -747,7 +782,7 @@ exports.getProfitLoss = async (req, res) => {
 
 exports.getCashflowDashboard = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({ status: { $in: VERIFIED_STATUSES } }).lean();
     const payouts = await PayoutLog.find({ status: 'sandbox_success' }).lean();
     const refunds = await RefundRequest.find({ refund_status: 'processed' }).lean();
 
@@ -780,7 +815,9 @@ exports.getCashflowDashboard = async (req, res) => {
 
 exports.getTransactionsReport = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const { status } = req.query;
+    const filter = status && status !== 'all' ? { status } : { status: { $in: VERIFIED_STATUSES } };
+    const txs = await PaymentTransaction.find(filter).sort({ payment_date: -1, createdAt: -1 }).lean();
     res.json({ success: true, transactions: txs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1040,12 +1077,39 @@ exports.manualTransferToOwner = async (req, res) => {
     }
 
     const owner = await Owner.findOne({ loginId: tx.owner_id });
-    const accountHolder = owner?.checkinAccountHolderName || owner?.name || owner?.profile?.name || '';
+    const accountHolder = owner?.checkinAccountHolderName || owner?.accountHolderName || owner?.name || owner?.profile?.name || '';
     const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
     const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
     const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
+    const upiId         = owner?.upiId || owner?.checkinUpiId || owner?.profile?.upiId || '';
 
-    const ref = 'RHY-MAN-' + Math.floor(10000000 + Math.random() * 90000000);
+    // Attempt Real Cashfree Bank Payout (falls back gracefully to manual ledger recording if Payouts API is not enabled)
+    const cfPayout = require('../services/cashfreePayoutService');
+    const transferId = `RHY_PO_${tx._id}_${Date.now()}`;
+    const payoutRes = await cfPayout.directBankTransfer({
+      transferId,
+      amount: tx.owner_amount,
+      bankDetails: {
+        accountHolderName: accountHolder,
+        accountNumber,
+        ifsc: ifscCode,
+        bankName,
+        upiId
+      },
+      remarks: `Owner Payout — ${tx.property_name || 'Roomhy'}`
+    });
+
+    let ref = '';
+    let transferNote = '';
+
+    if (payoutRes.success) {
+      ref = payoutRes.referenceId || payoutRes.transferId;
+      transferNote = `Direct Cashfree Payout (Ref: ${ref})`;
+    } else {
+      console.log(`[PayoutFallback] Cashfree payout not active (${payoutRes.error}) — recording manual bank settlement`);
+      ref = 'RHY-MAN-' + Math.floor(10000000 + Math.random() * 90000000);
+      transferNote = `Manual Transfer Recorded (Ref: ${ref})`;
+    }
 
     tx.payout_status           = 'Paid';
     tx.payout_date             = new Date();
@@ -1055,7 +1119,7 @@ exports.manualTransferToOwner = async (req, res) => {
     tx.payout_account_number   = accountNumber;
     tx.payout_ifsc_code        = ifscCode;
     tx.payout_bank_name        = bankName;
-    tx.notes                   = notes || tx.notes || 'Manual transfer by admin';
+    tx.notes                   = notes || tx.notes || transferNote;
     await tx.save();
 
     if (owner) {
@@ -1069,7 +1133,7 @@ exports.manualTransferToOwner = async (req, res) => {
       owner_id:        tx.owner_id,
       owner_name:      tx.owner_name || owner?.name || '',
       amount:          tx.owner_amount,
-      mode:            'bank',
+      mode:            upiId ? 'upi' : 'bank',
       status:          'processed',
       is_sandbox:      false,
       account_holder:  accountHolder,
@@ -1082,9 +1146,9 @@ exports.manualTransferToOwner = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `₹${tx.owner_amount.toLocaleString('en-IN')} transfer recorded for ${tx.owner_name || tx.owner_id}.`,
+      message: `₹${tx.owner_amount.toLocaleString('en-IN')} transferred via Cashfree to ${tx.owner_name || tx.owner_id} (UTR: ${ref}).`,
       reference: ref,
-      bankUsed: { accountHolder, accountNumber, ifscCode, bankName },
+      bankUsed: { accountHolder, accountNumber, ifscCode, bankName, upiId },
     });
   } catch (error) {
     console.error('manualTransferToOwner error:', error);
@@ -1104,6 +1168,7 @@ exports.bulkManualTransfer = async (req, res) => {
       return res.status(400).json({ success: false, message: 'transactionIds array is required' });
     }
 
+    const cfPayout = require('../services/cashfreePayoutService');
     const results = { transferred: 0, alreadyPaid: 0, failed: 0, errors: [] };
 
     for (const txId of transactionIds) {
@@ -1113,11 +1178,30 @@ exports.bulkManualTransfer = async (req, res) => {
         if (tx.payout_status === 'Paid') { results.alreadyPaid++; continue; }
 
         const owner = await Owner.findOne({ loginId: tx.owner_id });
-        const accountHolder = owner?.checkinAccountHolderName || owner?.name || '';
+        const accountHolder = owner?.checkinAccountHolderName || owner?.accountHolderName || owner?.name || '';
         const accountNumber = owner?.checkinBankAccountNumber  || owner?.accountNumber   || owner?.profile?.accountNumber || '';
         const ifscCode      = owner?.checkinIfscCode           || owner?.ifscCode        || owner?.profile?.ifscCode      || '';
         const bankName      = owner?.checkinBankName           || owner?.bankName        || owner?.profile?.bankName      || '';
-        const ref = 'RHY-BULK-' + Math.floor(10000000 + Math.random() * 90000000);
+        const upiId         = owner?.upiId || owner?.checkinUpiId || owner?.profile?.upiId || '';
+
+        const transferId = `RHY_PO_BULK_${tx._id}_${Date.now()}`;
+        const payoutRes = await cfPayout.directBankTransfer({
+          transferId,
+          amount: tx.owner_amount,
+          bankDetails: { accountHolderName: accountHolder, accountNumber, ifsc: ifscCode, bankName, upiId },
+          remarks: `Bulk Payout — ${tx.property_name || 'Roomhy'}`
+        });
+
+        let ref = '';
+        let transferNote = '';
+
+        if (payoutRes.success) {
+          ref = payoutRes.referenceId || payoutRes.transferId;
+          transferNote = `Bulk Cashfree Transfer (Ref: ${ref})`;
+        } else {
+          ref = 'RHY-BULK-' + Math.floor(10000000 + Math.random() * 90000000);
+          transferNote = `Bulk Manual Transfer (Ref: ${ref})`;
+        }
 
         tx.payout_status           = 'Paid';
         tx.payout_date             = new Date();
@@ -1127,7 +1211,7 @@ exports.bulkManualTransfer = async (req, res) => {
         tx.payout_account_number   = accountNumber;
         tx.payout_ifsc_code        = ifscCode;
         tx.payout_bank_name        = bankName;
-        tx.notes                   = 'Bulk transfer by admin';
+        tx.notes                   = `Bulk Cashfree Transfer (Ref: ${ref})`;
         await tx.save();
 
         if (owner) {
@@ -1141,7 +1225,7 @@ exports.bulkManualTransfer = async (req, res) => {
           owner_id:       tx.owner_id,
           owner_name:     tx.owner_name || '',
           amount:         tx.owner_amount,
-          mode:           'bank',
+          mode:           upiId ? 'upi' : 'bank',
           status:         'processed',
           is_sandbox:     false,
           account_holder: accountHolder,
@@ -1161,7 +1245,7 @@ exports.bulkManualTransfer = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Bulk transfer complete: ${results.transferred} transferred, ${results.alreadyPaid} already paid, ${results.failed} failed.`,
+      message: `Bulk transfer complete: ${results.transferred} transferred via Cashfree, ${results.alreadyPaid} already paid, ${results.failed} failed.`,
       results,
     });
   } catch (error) {

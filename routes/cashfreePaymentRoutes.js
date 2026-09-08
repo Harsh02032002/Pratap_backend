@@ -11,7 +11,7 @@ const router  = express.Router();
 const ctrl    = require('../controllers/cashfreePaymentController');
 const webhookCtrl = require('../controllers/cashfreePaymentWebhookController');
 const { verifyCashfreeWebhook } = require('../middleware/cashfreeWebhookMiddleware');
-const { authMiddleware, requireRole } = require('../middleware/authMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // ── Cashfree Payment Webhook Endpoint ──────────────────────────────────────
 // Endpoint: POST /api/payments/cashfree/webhook

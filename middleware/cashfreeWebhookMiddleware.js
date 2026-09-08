@@ -11,8 +11,8 @@ function verifyCashfreeWebhook(webhookType = 'payment') {
     const isTestMode = cfEnv === 'SANDBOX' || cfEnv === 'TEST';
 
     const secret = webhookType === 'payout'
-      ? process.env.CASHFREE_PAYOUT_WEBHOOK_SECRET
-      : process.env.CASHFREE_WEBHOOK_SECRET;
+      ? (process.env.CASHFREE_PAYOUT_WEBHOOK_SECRET || process.env.CASHFREE_PAYOUT_CLIENT_SECRET)
+      : (process.env.CASHFREE_WEBHOOK_SECRET || process.env.CASHFREE_SECRET_KEY);
 
     // Rule: If CASHFREE_ENV=TEST (or SANDBOX), skip verification even if secret is missing
     if (isTestMode) {
