@@ -718,6 +718,8 @@ exports.initiateRefund = async (req, res) => {
  * GET /api/payments/cashfree/history
  * Query: ?page=1&limit=20&owner_id=&wallet_status=&status=
  */
+const VERIFIED_STATUSES = ['Verified', 'Settled', 'PAID', 'SUCCESS', 'COMPLETED'];
+
 exports.getPaymentHistory = async (req, res) => {
   try {
     const { page = 1, limit = 20, owner_id, wallet_status, status } = req.query;
@@ -725,7 +727,11 @@ exports.getPaymentHistory = async (req, res) => {
 
     if (owner_id)       filter.owner_id       = owner_id;
     if (wallet_status)  filter.wallet_status   = wallet_status;
-    if (status)         filter.status          = status;
+    if (status && status !== 'all') {
+      filter.status = status;
+    } else if (!status) {
+      filter.status = { $in: VERIFIED_STATUSES };
+    }
 
     // Owners can only see their own transactions
     const user = req.user;

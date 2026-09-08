@@ -9,13 +9,25 @@
 
 const axios = require('axios');
 
+function isPlaceholder(val) {
+  if (!val) return true;
+  const str = String(val).trim().toUpperCase();
+  return str.startsWith('YOUR_') || str.includes('YOUR_LIVE_') || str.includes('PLACEHOLDER') || str.length < 5;
+}
+
 function getConfig() {
   const env = (process.env.CASHFREE_ENV || process.env.CASHFREE_MODE || 'TEST').toUpperCase();
   const isSandbox = env !== 'PROD' && process.env.CASHFREE_MODE !== 'production';
 
+  const rawClientId = process.env.CASHFREE_PAYOUT_CLIENT_ID || process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '';
+  const rawSecretKey = process.env.CASHFREE_PAYOUT_CLIENT_SECRET || process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '';
+
+  const clientId = isPlaceholder(rawClientId) ? '' : rawClientId;
+  const secretKey = isPlaceholder(rawSecretKey) ? '' : rawSecretKey;
+
   return {
-    clientId:     process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '',
-    secretKey:    process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '',
+    clientId,
+    secretKey,
     baseUrl:      isSandbox ? 'https://sandbox.cashfree.com/payout' : 'https://api.cashfree.com/payout',
     payoutApiUrl: isSandbox ? 'https://payout-api.cashfree.com/payout' : 'https://payout-api.cashfree.com/payout',
     isSandbox,
@@ -78,7 +90,7 @@ async function directBankTransfer({ transferId, amount, bankDetails = {}, remark
   if (!config.clientId || !config.secretKey) {
     return {
       success: false,
-      error: 'Cashfree credentials not configured (CASHFREE_APP_ID / CASHFREE_SECRET_KEY)',
+      error: 'Cashfree Payout credentials missing or placeholder detected in server .env. Please configure CASHFREE_PAYOUT_CLIENT_ID and CASHFREE_PAYOUT_CLIENT_SECRET from Cashfree Dashboard -> Payouts -> Developers.',
     };
   }
 
