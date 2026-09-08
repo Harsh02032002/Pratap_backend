@@ -12,6 +12,17 @@ const { evaluateInvoice, getEffectiveConfig } = require("../services/invoiceServ
 const PaymentTransaction = require("../models/PaymentTransaction");
 const SystemSettings = require("../models/SystemSettings");
 
+const CASH_REQUEST_RETRY_COOLDOWN_MS = 2 * 60 * 1000;
+
+function cashRetrySecondsRemaining(rejectedAt, now = Date.now()) {
+  if (!rejectedAt) return 0;
+  const elapsed = now - new Date(rejectedAt).getTime();
+  if (!Number.isFinite(elapsed) || elapsed >= CASH_REQUEST_RETRY_COOLDOWN_MS) return 0;
+  return Math.ceil((CASH_REQUEST_RETRY_COOLDOWN_MS - elapsed) / 1000);
+}
+
+exports.cashRetrySecondsRemaining = cashRetrySecondsRemaining;
+
 async function getTenantProfileByLoginId(loginId) {
   const normalizedLoginId = String(loginId || "")
     .trim()
@@ -1481,6 +1492,14 @@ exports.requestCashPayment = async (req, res) => {
             message: "A cash request already exists for this rent",
           });
       }
+      const retryAfterSeconds = cashRetrySecondsRemaining(rent.cashRejectedAt);
+      if (String(rent.cashRequestStatus || "").toLowerCase() === "rejected" && retryAfterSeconds > 0) {
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${retryAfterSeconds} seconds before requesting cash payment again`,
+          retryAfterSeconds,
+        });
+      }
       rent.paymentMethod = "cash";
       rent.paymentStatus = rent.paymentStatus === "paid" ? "paid" : "pending";
       rent.rentAmount = rentAmount || rent.rentAmount;
@@ -1612,7 +1631,7 @@ exports.listCashRequests = async (req, res) => {
       cashRequestStatus: { $in: statuses },
     })
       .sort({ cashRequestedAt: -1, updatedAt: -1 })
-      .populate("tenantId", "name email phone roomNo bedNo")
+      .populate("tenantId", "name email phone roomNo bedNo loginId")
       .populate("propertyId", "title")
       .lean();
 
@@ -1730,6 +1749,13 @@ exports.approveCashRequest = async (req, res) => {
         });
     }
 
+    const ownerEmail = await resolveOwnerEmail(ownerId);
+    if (!ownerEmail) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Owner email missing in profile" });
+    }
+
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const expiry = new Date(Date.now() + 5 * 60 * 1000);
     rent.cashRequestStatus = "owner_approved";
@@ -1763,13 +1789,6 @@ exports.approveCashRequest = async (req, res) => {
       ownerId,
     );
 
-    const ownerEmail = await resolveOwnerEmail(ownerId);
-    if (!ownerEmail) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Owner email missing in profile" });
-    }
-
     const isPendingPast = rent.collectionMonth && rent.collectionMonth !== new Date().toISOString().slice(0, 7);
     const monthUi = rent.collectionMonth ? new Date(`${rent.collectionMonth}-01`).toLocaleString('en-US', { month: 'long', year: 'numeric' }) : "Rent";
     const emailSubject = isPendingPast ? `RoomHy Pending Cash Payment Verification OTP (${monthUi})` : "RoomHy Cash Payment Verification OTP";
@@ -1782,12 +1801,22 @@ exports.approveCashRequest = async (req, res) => {
                 <p style="font-size:12px;color:#666;">Expires in 5 minutes. Single use only.</p>
             </div>
         `;
-    await sendMail(
-      ownerEmail,
-      emailSubject,
-      "",
-      html,
-    );
+    try {
+      await sendMail(ownerEmail, emailSubject, "", html);
+    } catch (mailError) {
+      rent.cashRequestStatus = "pending_approval";
+      rent.cashApprovedAt = undefined;
+      rent.cashReceivedAt = undefined;
+      rent.cashOtpHash = undefined;
+      rent.cashOtpExpiry = undefined;
+      rent.cashOtpSentAt = undefined;
+      rent.cashOtpAttempts = 0;
+      await rent.save();
+      return res.status(502).json({
+        success: false,
+        message: "Owner approval was not completed because the OTP email could not be sent",
+      });
+    }
     await createRentAudit(
       "OTP_SENT",
       {
@@ -1851,14 +1880,14 @@ exports.rejectCashRequest = async (req, res) => {
     rent.cashOtpSentAt = undefined;
     await rent.save();
 
+    const rejectionMessage = `${reason || "Your cash payment request was rejected by the owner."} You can try again after 2 minutes.`;
     await Notification.create({
       toLoginId: String(rent.tenantLoginId || "").toUpperCase(),
       from: ownerId,
       type: "cash_payment_rejected",
       meta: {
         title: "Cash Payment Request Rejected",
-        message:
-          reason || "Your cash payment request was rejected by the owner",
+        message: rejectionMessage,
         rentId: String(rent._id),
       },
       read: false,
@@ -1881,8 +1910,8 @@ exports.rejectCashRequest = async (req, res) => {
         await sendMail(
           tenantEmail,
           emailSubject,
-          reason || "Your cash payment request was rejected by the owner.",
-          `<div style="font-family:Arial,sans-serif;"><h3>${emailSubject}</h3><p>${reason || "Your cash payment request was rejected by the owner."}</p></div>`,
+          rejectionMessage,
+          `<div style="font-family:Arial,sans-serif;"><h3>${emailSubject}</h3><p>${rejectionMessage}</p></div>`,
         );
       }
     } catch (_) { }
@@ -1899,7 +1928,12 @@ exports.rejectCashRequest = async (req, res) => {
       ownerId,
     );
 
-    return res.json({ success: true, message: "Cash request rejected", rent });
+    return res.json({
+      success: true,
+      message: "Cash request rejected. The tenant can retry after 2 minutes.",
+      retryAfterSeconds: 120,
+      rent,
+    });
   } catch (err) {
     console.error("rejectCashRequest error:", err);
     return res.status(500).json({ success: false, message: err.message });
