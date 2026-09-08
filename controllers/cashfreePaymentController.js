@@ -14,12 +14,12 @@
  *   GET  /api/payments/cashfree/history
  */
 
-const mongoose           = require('mongoose');
+const mongoose = require('mongoose');
 const PaymentTransaction = require('../models/PaymentTransaction');
-const BookingRequest     = require('../models/BookingRequest');
-const Owner              = require('../models/Owner');
-const Notification       = require('../models/Notification');
-const SystemSettings     = require('../models/SystemSettings');
+const BookingRequest = require('../models/BookingRequest');
+const Owner = require('../models/Owner');
+const Notification = require('../models/Notification');
+const SystemSettings = require('../models/SystemSettings');
 const cfPay = require('../services/cashfreePaymentService');
 
 // The public onboarding page historically sent its signed payment-link JWT in
@@ -55,7 +55,7 @@ async function getCommissionSettings() {
     const s = await SystemSettings.findOne().lean();
     return {
       commission: s?.commissionPercentage ?? 10,
-      gst:        s?.gstPercentage ?? 18,
+      gst: s?.gstPercentage ?? 18,
     };
   } catch {
     return { commission: 10, gst: 18 };
@@ -64,8 +64,8 @@ async function getCommissionSettings() {
 
 function calcBreakdown(amount, commissionPct, gstPct) {
   const commissionAmount = parseFloat(((amount * commissionPct) / 100).toFixed(2));
-  const gstAmount        = parseFloat(((commissionAmount * gstPct) / 100).toFixed(2));
-  const ownerAmount      = parseFloat((amount - commissionAmount - gstAmount).toFixed(2));
+  const gstAmount = parseFloat(((commissionAmount * gstPct) / 100).toFixed(2));
+  const ownerAmount = parseFloat((amount - commissionAmount - gstAmount).toFixed(2));
   return { commissionAmount, gstAmount, ownerAmount };
 }
 
@@ -92,7 +92,7 @@ exports.createOrder = async (req, res) => {
     // Track the actual Rent / RentInvoice docs for cashfreeOrderId stamping
     let rentDoc = null;
     let rentInvoiceDoc = null;
-    
+
     if (isValidObjectId) {
       booking = await BookingRequest.findById(bookingId).lean();
     }
@@ -206,8 +206,8 @@ exports.createOrder = async (req, res) => {
       orderId,
       amount,
       customerInfo: {
-        id:    sanitizeId(booking.user_id),
-        name:  customerInfo.name  || booking.name,
+        id: sanitizeId(booking.user_id),
+        name: customerInfo.name || booking.name,
         email: customerInfo.email || booking.email,
         phone: customerInfo.phone || booking.phone,
       },
@@ -228,22 +228,22 @@ exports.createOrder = async (req, res) => {
       if (rentDoc?._id) {
         await Rent.findByIdAndUpdate(rentDoc._id, {
           $set: { cashfreeOrderId: orderResult.cf_order_id }
-        }).catch(() => {});
+        }).catch(() => { });
       }
       if (rentInvoiceDoc?._id) {
         await RentInvoice.findByIdAndUpdate(rentInvoiceDoc._id, {
           $set: { cashfreeOrderId: orderResult.cf_order_id }
-        }).catch(() => {});
+        }).catch(() => { });
       }
       // If bookingId itself is a RentInvoice (common case), stamp it directly
       if (!rentInvoiceDoc && isValidObjectId) {
         await RentInvoice.findByIdAndUpdate(bookingId, {
           $set: { cashfreeOrderId: orderResult.cf_order_id }
-        }).catch(() => {});
+        }).catch(() => { });
         // Also stamp the corresponding Rent doc
         await Rent.findByIdAndUpdate(bookingId, {
           $set: { cashfreeOrderId: orderResult.cf_order_id }
-        }).catch(() => {});
+        }).catch(() => { });
       }
     } catch (stampErr) {
       console.warn('[CashfreePaymentCtrl] cashfreeOrderId stamp warning:', stampErr.message);
@@ -254,40 +254,40 @@ exports.createOrder = async (req, res) => {
     const { commissionAmount, gstAmount, ownerAmount } = calcBreakdown(amount, settings.commission, settings.gst);
 
     await PaymentTransaction.create({
-      cf_order_id:           orderResult.cf_order_id,
-      cf_order_token:        orderResult.order_token,
-      booking_id:            bookingId || 'N/A',
-      rent_id:               rentDoc?._id ? String(rentDoc._id) : (isValidObjectId ? bookingId : null),
-      invoice_id:            rentInvoiceDoc?._id ? String(rentInvoiceDoc._id) : null,
-      property_id:           (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
-      property_name:         booking.property_name || booking.propertyName || booking.propertyTitle || '',
-      tenant_id:             booking.user_id || booking.tenantId || 'tenant_user',
-      tenant_name:           booking.name || booking.tenantName || '',
-      owner_id:              booking.owner_id || booking.ownerId || 'OWNER',
-      owner_login_id:        booking.owner_id || booking.ownerId || 'OWNER',
-      owner_name:            booking.owner_name || booking.ownerName || '',
-      move_in_date:          booking.check_in_date || booking.checkInDate || null,
-      booking_amount:        amount,
+      cf_order_id: orderResult.cf_order_id,
+      cf_order_token: orderResult.order_token,
+      booking_id: bookingId || 'N/A',
+      rent_id: rentDoc?._id ? String(rentDoc._id) : (isValidObjectId ? bookingId : null),
+      invoice_id: rentInvoiceDoc?._id ? String(rentInvoiceDoc._id) : null,
+      property_id: (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
+      property_name: booking.property_name || booking.propertyName || booking.propertyTitle || '',
+      tenant_id: booking.user_id || booking.tenantId || 'tenant_user',
+      tenant_name: booking.name || booking.tenantName || '',
+      owner_id: booking.owner_id || booking.ownerId || 'OWNER',
+      owner_login_id: booking.owner_id || booking.ownerId || 'OWNER',
+      owner_name: booking.owner_name || booking.ownerName || '',
+      move_in_date: booking.check_in_date || booking.checkInDate || null,
+      booking_amount: amount,
       commission_percentage: settings.commission,
-      commission_amount:     commissionAmount,
-      gst_percentage:        settings.gst,
-      gst_amount:            gstAmount,
-      owner_amount:          ownerAmount,
-      status:                'Created',
-      payout_status:         'Pending',
-      wallet_status:         'pending',
-      payment_method:        'cashfree',
+      commission_amount: commissionAmount,
+      gst_percentage: settings.gst,
+      gst_amount: gstAmount,
+      owner_amount: ownerAmount,
+      status: 'Created',
+      payout_status: 'Pending',
+      wallet_status: 'pending',
+      payment_method: 'cashfree',
     });
 
     return res.json({
-      success:            true,
-      cf_order_id:        orderResult.cf_order_id,
-      order_id:           orderResult.order_id,
+      success: true,
+      cf_order_id: orderResult.cf_order_id,
+      order_id: orderResult.order_id,
       payment_session_id: orderResult.payment_session_id,
-      order_token:        orderResult.order_token,
+      order_token: orderResult.order_token,
       amount,
-      return_url:         returnUrl,
-      isSandbox:          orderResult.isSandbox,
+      return_url: returnUrl,
+      isSandbox: orderResult.isSandbox,
     });
 
   } catch (err) {
@@ -325,7 +325,7 @@ exports.createPaymentLink = async (req, res) => {
 
     // Authorization: only the booking's owner or superadmin can send link
     if (user && user.role === 'owner' &&
-        String(booking.owner_id).toUpperCase() !== String(user.loginId || '').toUpperCase()) {
+      String(booking.owner_id).toUpperCase() !== String(user.loginId || '').toUpperCase()) {
       return res.status(403).json({ success: false, message: 'You do not own this booking' });
     }
 
@@ -337,7 +337,7 @@ exports.createPaymentLink = async (req, res) => {
       amount,
       description: `Booking Payment — ${booking.property_name || 'Roomhy'}`,
       customerInfo: {
-        name:  customerInfo.name  || booking.name  || 'Tenant',
+        name: customerInfo.name || booking.name || 'Tenant',
         email: customerInfo.email || booking.email || 'tenant@roomhy.com',
         phone: customerInfo.phone || booking.phone || '9999999999',
       },
@@ -357,25 +357,25 @@ exports.createPaymentLink = async (req, res) => {
       {
         $set: {
           cf_payment_link_id: linkResult.link_id,
-          cf_payment_link:    linkResult.link_url,
-          booking_amount:     amount,
+          cf_payment_link: linkResult.link_url,
+          booking_amount: amount,
           commission_percentage: settings.commission,
-          commission_amount:  commissionAmount,
-          gst_percentage:     settings.gst,
-          gst_amount:         gstAmount,
-          owner_amount:       ownerAmount,
-          property_id:        (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
-          property_name:      booking.property_name || booking.propertyName || booking.propertyTitle || '',
-          tenant_id:          booking.user_id || booking.tenantId || 'tenant_user',
-          tenant_name:        booking.name || booking.tenantName || '',
-          owner_id:           booking.owner_id || booking.ownerId || 'OWNER',
-          owner_name:         booking.owner_name || booking.ownerName || '',
-          move_in_date:       booking.check_in_date || booking.checkInDate || null,
-          payment_method:     'cashfree',
+          commission_amount: commissionAmount,
+          gst_percentage: settings.gst,
+          gst_amount: gstAmount,
+          owner_amount: ownerAmount,
+          property_id: (booking.property_id || booking.propertyId || 'N/A').toString().trim() || 'N/A',
+          property_name: booking.property_name || booking.propertyName || booking.propertyTitle || '',
+          tenant_id: booking.user_id || booking.tenantId || 'tenant_user',
+          tenant_name: booking.name || booking.tenantName || '',
+          owner_id: booking.owner_id || booking.ownerId || 'OWNER',
+          owner_name: booking.owner_name || booking.ownerName || '',
+          move_in_date: booking.check_in_date || booking.checkInDate || null,
+          payment_method: 'cashfree',
         },
         $setOnInsert: {
-          status:       'Created',
-          wallet_status:'pending',
+          status: 'Created',
+          wallet_status: 'pending',
         }
       },
       { upsert: true, new: true }
@@ -385,7 +385,7 @@ exports.createPaymentLink = async (req, res) => {
     await BookingRequest.findByIdAndUpdate(bookingId, {
       $set: {
         payment_link_sent_at: new Date(),
-        payment_id:           linkResult.link_id,
+        payment_id: linkResult.link_id,
       }
     });
 
@@ -395,13 +395,13 @@ exports.createPaymentLink = async (req, res) => {
       const admins = await User.find({ role: 'superadmin' }).lean();
       await Promise.all(admins.map(a =>
         Notification.create({
-          toRole:    'superadmin',
+          toRole: 'superadmin',
           toLoginId: a.loginId || '',
-          from:      String(user?.loginId || booking.owner_id),
-          type:      'payment_link_generated',
-          title:     '💳 Payment Link Sent',
-          message:   `Owner ${booking.owner_name || ''} sent a payment link of ₹${amount} for booking #${bookingId}`,
-          meta:      { bookingId, amount, linkUrl: linkResult.link_url }
+          from: String(user?.loginId || booking.owner_id),
+          type: 'payment_link_generated',
+          title: '💳 Payment Link Sent',
+          message: `Owner ${booking.owner_name || ''} sent a payment link of ₹${amount} for booking #${bookingId}`,
+          meta: { bookingId, amount, linkUrl: linkResult.link_url }
         })
       ));
     } catch (notifErr) {
@@ -409,8 +409,8 @@ exports.createPaymentLink = async (req, res) => {
     }
 
     return res.json({
-      success:  true,
-      link_id:  linkResult.link_id,
+      success: true,
+      link_id: linkResult.link_id,
       link_url: linkResult.link_url,
       link_expiry_time: linkResult.link_expiry_time,
       amount,
@@ -431,9 +431,9 @@ exports.createPaymentLink = async (req, res) => {
  */
 exports.handleWebhook = async (req, res) => {
   try {
-    const rawBody  = req.rawBody || JSON.stringify(req.body);
-    const sig      = req.headers['x-webhook-signature'] || '';
-    const ts       = req.headers['x-webhook-timestamp'] || '';
+    const rawBody = req.rawBody || JSON.stringify(req.body);
+    const sig = req.headers['x-webhook-signature'] || '';
+    const ts = req.headers['x-webhook-timestamp'] || '';
 
     // Verify signature
     const valid = cfPay.verifyWebhookSignature(rawBody, sig, ts);
@@ -451,8 +451,8 @@ exports.handleWebhook = async (req, res) => {
     // ── PAYMENT SUCCESS ──────────────────────────────────────────────────────
     if (eventType === 'PAYMENT_SUCCESS_WEBHOOK') {
       const { order, payment } = data;
-      const orderId    = order?.order_id;
-      const cfOrderId  = order?.cf_order_id;
+      const orderId = order?.order_id;
+      const cfOrderId = order?.cf_order_id;
       const cfPaymentId = payment?.cf_payment_id;
       const paymentAmount = payment?.payment_amount || order?.order_amount || 0;
       const paymentMethod = payment?.payment_method || 'cashfree';
@@ -485,11 +485,11 @@ exports.handleWebhook = async (req, res) => {
       const newWalletStatus = isCashPayment ? 'skipped' : 'held';
 
       // Update transaction
-      tx.cf_payment_id   = String(cfPaymentId);
-      tx.status          = 'Verified';
-      tx.wallet_status   = newWalletStatus;
-      tx.payment_date    = new Date();
-      tx.raw_webhook     = event;
+      tx.cf_payment_id = String(cfPaymentId);
+      tx.status = 'Verified';
+      tx.wallet_status = newWalletStatus;
+      tx.payment_date = new Date();
+      tx.raw_webhook = event;
       if (newWalletStatus === 'held') tx.held_at = new Date();
       await tx.save();
 
@@ -497,10 +497,10 @@ exports.handleWebhook = async (req, res) => {
       if (tx.booking_id) {
         await BookingRequest.findByIdAndUpdate(tx.booking_id, {
           $set: {
-            payment_status:       'completed',
+            payment_status: 'completed',
             payment_completed_at: new Date(),
             booking_confirmed_at: new Date(),
-            booking_status:       'confirmed',
+            booking_status: 'confirmed',
           }
         });
       }
@@ -515,13 +515,13 @@ exports.handleWebhook = async (req, res) => {
         // Notify owner
         try {
           await Notification.create({
-            toRole:    'owner',
+            toRole: 'owner',
             toLoginId: String(tx.owner_id),
-            from:      'system',
-            type:      'payment_received',
-            title:     '💰 Payment Received',
-            message:   `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is now available in your wallet.`,
-            meta:      { bookingId: tx.booking_id, amount: tx.owner_amount }
+            from: 'system',
+            type: 'payment_received',
+            title: '💰 Payment Received',
+            message: `Tenant paid ₹${tx.booking_amount}. Your share ₹${tx.owner_amount} is now available in your wallet.`,
+            meta: { bookingId: tx.booking_id, amount: tx.owner_amount }
           });
         } catch (notifErr) {
           console.warn('[CashfreePaymentCtrl] Owner notification failed:', notifErr.message);
@@ -623,23 +623,23 @@ exports.getPaymentStatus = async (req, res) => {
 
     const rawCfStatus = String(cfStatus?.status || cfStatus?.link?.link_status || '').toUpperCase();
     const isPaid = (tx && (tx.status === 'Verified' || tx.status === 'Settled')) ||
-                   rawCfStatus === 'PAID' || rawCfStatus === 'SUCCESS' || rawCfStatus === 'PAID_SUCCESSFULLY';
+      rawCfStatus === 'PAID' || rawCfStatus === 'SUCCESS' || rawCfStatus === 'PAID_SUCCESSFULLY';
 
     if (isPaid && tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
       await PaymentTransaction.updateOne(
         { _id: tx._id },
         { $set: { status: 'Verified', payout_status: 'Pending', wallet_status: 'held', held_at: new Date() } }
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     return res.json({
-      success:    true,
-      status:     isPaid ? 'PAID' : (rawCfStatus || tx?.status || 'PENDING'),
-      db_status:  tx?.status,
-      cf_status:  rawCfStatus,
+      success: true,
+      status: isPaid ? 'PAID' : (rawCfStatus || tx?.status || 'PENDING'),
+      db_status: tx?.status,
+      cf_status: rawCfStatus,
       wallet_status: tx?.wallet_status,
       transaction: tx,
-      cashfree:   cfStatus?.order || cfStatus?.link || null,
+      cashfree: cfStatus?.order || cfStatus?.link || null,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -683,11 +683,11 @@ exports.initiateRefund = async (req, res) => {
     }
 
     // Update transaction
-    tx.refund_id     = refundResult.refund_id;
+    tx.refund_id = refundResult.refund_id;
     tx.refund_amount = refundAmount;
     tx.refund_status = refundResult.refund_status;
-    tx.refund_date   = new Date();
-    tx.status        = 'Refunded';
+    tx.refund_date = new Date();
+    tx.status = 'Refunded';
     tx.wallet_status = 'skipped';
     await tx.save();
 
@@ -700,8 +700,8 @@ exports.initiateRefund = async (req, res) => {
     }
 
     return res.json({
-      success:       true,
-      refund_id:     refundResult.refund_id,
+      success: true,
+      refund_id: refundResult.refund_id,
       refund_status: refundResult.refund_status,
       refund_amount: refundAmount,
     });
@@ -718,20 +718,14 @@ exports.initiateRefund = async (req, res) => {
  * GET /api/payments/cashfree/history
  * Query: ?page=1&limit=20&owner_id=&wallet_status=&status=
  */
-const VERIFIED_STATUSES = ['Verified', 'Settled', 'PAID', 'SUCCESS', 'COMPLETED'];
-
 exports.getPaymentHistory = async (req, res) => {
   try {
     const { page = 1, limit = 20, owner_id, wallet_status, status } = req.query;
     const filter = {};
 
-    if (owner_id)       filter.owner_id       = owner_id;
-    if (wallet_status)  filter.wallet_status   = wallet_status;
-    if (status && status !== 'all') {
-      filter.status = status;
-    } else if (!status) {
-      filter.status = { $in: VERIFIED_STATUSES };
-    }
+    if (owner_id) filter.owner_id = owner_id;
+    if (wallet_status) filter.wallet_status = wallet_status;
+    if (status) filter.status = status;
 
     // Owners can only see their own transactions
     const user = req.user;
@@ -750,17 +744,17 @@ exports.getPaymentHistory = async (req, res) => {
     ]);
 
     const summary = {
-      totalAmount:     0,
-      heldAmount:      0,
+      totalAmount: 0,
+      heldAmount: 0,
       availableAmount: 0,
       withdrawnAmount: 0,
     };
 
     transactions.forEach(tx => {
       summary.totalAmount += tx.booking_amount || 0;
-      if (tx.wallet_status === 'held')      summary.heldAmount      += tx.owner_amount || 0;
-      if (tx.wallet_status === 'available') summary.availableAmount  += tx.owner_amount || 0;
-      if (tx.wallet_status === 'withdrawn') summary.withdrawnAmount  += tx.owner_amount || 0;
+      if (tx.wallet_status === 'held') summary.heldAmount += tx.owner_amount || 0;
+      if (tx.wallet_status === 'available') summary.availableAmount += tx.owner_amount || 0;
+      if (tx.wallet_status === 'withdrawn') summary.withdrawnAmount += tx.owner_amount || 0;
     });
 
     return res.json({
@@ -863,7 +857,7 @@ exports.verifyRentPayment = async (req, res) => {
             cashfreeOrderId: orderId,
             cashfreePaymentId: cfPaymentId,
           }
-        }).catch(() => {});
+        }).catch(() => { });
       }
       ownerLoginId = ownerLoginId || rentDoc.ownerLoginId;
       paidAmount = paidAmount || rentDoc.totalDue || rentDoc.rentAmount;
@@ -883,7 +877,7 @@ exports.verifyRentPayment = async (req, res) => {
             cashfreeOrderId: orderId,
             cashfreePaymentId: cfPaymentId,
           }
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       // 5. Create RentPayment receipt (for owner's Rent Collection view)
@@ -924,7 +918,7 @@ exports.verifyRentPayment = async (req, res) => {
     if (tx && tx.status !== 'Verified') {
       await PaymentTransaction.findByIdAndUpdate(tx._id, {
         $set: { status: 'Verified', wallet_status: 'held', held_at: new Date() }
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
     // 7. Notify owner — in-app notification + email
@@ -963,7 +957,7 @@ exports.verifyRentPayment = async (req, res) => {
               <p style="color: #6b7280; font-size: 13px;">The payment has been recorded automatically. You can view it in your Rent Collection dashboard.</p>
             </div>
           `;
-          await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${paidAmount} received from ${tenantName}`, html).catch(() => {});
+          await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${paidAmount} received from ${tenantName}`, html).catch(() => { });
         }
       } catch (emailErr) {
         console.warn('[verifyRentPayment] Email warn:', emailErr.message);

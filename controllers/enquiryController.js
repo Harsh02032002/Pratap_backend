@@ -110,9 +110,9 @@ exports.listEnquiries = async (req, res) => {
     // previously had none of this and showed no website leads at all.
     const identity = await resolveOwnerPropertyIdentity(ownerIdCandidates, normalizedOwnerId);
     const bookingRequests = await BookingRequest
-        .find(buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity }))
-        .sort({ created_at: -1 })
-        .lean();
+      .find(buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity }))
+      .sort({ created_at: -1 })
+      .lean();
 
     const movedIn = await loadMovedInIndex(ownerIdCandidates);
     const activeTenantPhones = movedIn.phones;
@@ -227,12 +227,8 @@ exports.updateEnquiry = async (req, res) => {
             const welcomeMsg = `Hello ${tenantName}! 👋 I have reviewed and accepted your request for "${propertyName}". 🏠 I have enabled chat for our conversation so we can discuss the next steps and move-in details. Looking forward to hosting you!`;
             const pairKey = [String(normalizedOwnerId).toUpperCase(), String(normalizedUserId)].sort().join(':').toUpperCase();
 
-            const existingWelcome = await ChatMessage.exists({
-              conversation_id: pairKey,
-              message: welcomeMsg
-            });
-            if (!existingWelcome) {
-              await ChatMessage.create({
+            await Promise.all([
+              ChatMessage.create({
                 room_id: normalizedUserId,
                 conversation_id: pairKey,
                 sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
@@ -242,8 +238,19 @@ exports.updateEnquiry = async (req, res) => {
                 message_type: 'text',
                 created_at: new Date(),
                 updated_at: new Date()
-              });
-            }
+              }),
+              ChatMessage.create({
+                room_id: normalizedOwnerId,
+                conversation_id: pairKey,
+                sender_login_id: String(normalizedUserId || '').toLowerCase(),
+                sender_name: tenantName,
+                sender_role: 'website_user',
+                message: welcomeMsg,
+                message_type: 'text',
+                created_at: new Date(),
+                updated_at: new Date()
+              })
+            ]);
 
             // Dispatch WhatsApp notification to tenant
             const { sendTextMessage } = require('../utils/whatsappBot');

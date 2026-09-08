@@ -132,98 +132,98 @@ router.post('/request', auditTrail('owners'), ownerController.requestOwner);
 // Owner subscription / trial status check (placed before /:loginId to prevent route collision)
 // GET /api/owners/subscription-status?loginId=OWN001
 router.get('/subscription-status', async (req, res) => {
-  try {
-    const loginId = String(req.query.loginId || '').trim();
-    if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
+    try {
+        const loginId = String(req.query.loginId || '').trim();
+        if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
 
-    const SystemSettings = require('../models/SystemSettings');
-    const User = require('../models/user');
-    let owner = await Owner.findOne({
-      $or: [
-        { loginId: normalizeLoginId(loginId) },
-        { email: loginId.toLowerCase() },
-        { phone: loginId },
-        { 'profile.phone': loginId }
-      ],
-      isDeleted: { $ne: true }
-    })
-      .select('loginId name createdAt subscription')
-      .lean();
+        const SystemSettings = require('../models/SystemSettings');
+        const User = require('../models/user');
+        let owner = await Owner.findOne({
+            $or: [
+                { loginId: normalizeLoginId(loginId) },
+                { email: loginId.toLowerCase() },
+                { phone: loginId },
+                { 'profile.phone': loginId }
+            ],
+            isDeleted: { $ne: true }
+        })
+            .select('loginId name createdAt subscription')
+            .lean();
 
-    if (!owner) {
-      // Fallback: check User collection for owner role
-      const userDoc = await User.findOne({
-        $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
-        role: 'owner'
-      }).select('loginId name createdAt subscription').lean();
+        if (!owner) {
+            // Fallback: check User collection for owner role
+            const userDoc = await User.findOne({
+                $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
+                role: 'owner'
+            }).select('loginId name createdAt subscription').lean();
 
-      if (userDoc) {
-        owner = userDoc;
-      }
+            if (userDoc) {
+                owner = userDoc;
+            }
+        }
+
+        const settings = await SystemSettings.findOne().lean();
+
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+        const trialDays = settings?.ownerTrialDays ?? 1;
+        const price = settings?.ownerSubscriptionPrice ?? null;
+        const currency = settings?.ownerSubscriptionCurrency || 'INR';
+
+        const now = new Date();
+        const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
+        let endDate = owner.subscription?.trialEndDate;
+        if (!endDate && trialDays) {
+            endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
+        }
+
+        const isSubscribed = owner.subscription?.isSubscribed || false;
+        const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
+
+        // Subscribed check
+        if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
+            return res.json({
+                success: true,
+                status: 'subscribed',
+                trialExpired: false,
+                daysRemaining: null,
+                trialEndDate: subscriptionExpiry,
+                price,
+                currency
+            });
+        }
+
+        // Trial not configured
+        if (!endDate) {
+            return res.json({
+                success: true,
+                status: 'trial_unconfigured',
+                trialExpired: false,
+                daysRemaining: null,
+                trialEndDate: null,
+                price,
+                currency
+            });
+        }
+
+        const msRemaining = new Date(endDate).getTime() - now.getTime();
+        const trialExpired = msRemaining <= 0;
+        const daysRemaining = trialExpired ? 0 : Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+
+        return res.json({
+            success: true,
+            status: trialExpired ? 'expired' : 'trial_active',
+            trialExpired,
+            daysRemaining,
+            trialEndDate: endDate,
+            trialStartDate: startDate,
+            price,
+            currency
+        });
+    } catch (err) {
+        console.error('❌ subscription-status error:', err.message);
+        return res.status(500).json({ success: false, message: err.message });
     }
-
-    const settings = await SystemSettings.findOne().lean();
-
-    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
-
-    const trialDays = settings?.ownerTrialDays ?? 1;
-    const price = settings?.ownerSubscriptionPrice ?? null;
-    const currency = settings?.ownerSubscriptionCurrency || 'INR';
-
-    const now = new Date();
-    const startDate = owner.subscription?.trialStartDate || owner.createdAt || now;
-    let endDate = owner.subscription?.trialEndDate;
-    if (!endDate && trialDays) {
-      endDate = new Date(new Date(startDate).getTime() + trialDays * 24 * 60 * 60 * 1000);
-    }
-
-    const isSubscribed = owner.subscription?.isSubscribed || false;
-    const subscriptionExpiry = owner.subscription?.subscriptionExpiry;
-
-    // Subscribed check
-    if (isSubscribed && subscriptionExpiry && new Date(subscriptionExpiry) > now) {
-      return res.json({
-        success: true,
-        status: 'subscribed',
-        trialExpired: false,
-        daysRemaining: null,
-        trialEndDate: subscriptionExpiry,
-        price,
-        currency
-      });
-    }
-
-    // Trial not configured
-    if (!endDate) {
-      return res.json({
-        success: true,
-        status: 'trial_unconfigured',
-        trialExpired: false,
-        daysRemaining: null,
-        trialEndDate: null,
-        price,
-        currency
-      });
-    }
-
-    const msRemaining = new Date(endDate).getTime() - now.getTime();
-    const trialExpired = msRemaining <= 0;
-    const daysRemaining = trialExpired ? 0 : Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
-
-    return res.json({
-      success: true,
-      status: trialExpired ? 'expired' : 'trial_active',
-      trialExpired,
-      daysRemaining,
-      trialEndDate: endDate,
-      trialStartDate: startDate,
-      price,
-      currency
-    });
-  } catch (err) {
-    console.error('❌ subscription-status error:', err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
 });
 
 // 2c. Approve owner request (Super Admin Action)
@@ -256,14 +256,14 @@ router.delete('/:loginId', protect, authorize('superadmin'), auditTrail('owners'
         }
 
         const isObjId = mongoose.Types.ObjectId.isValid(param);
-        const query = isObjId 
+        const query = isObjId
             ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { email: param.toLowerCase() }] }
             : { $or: [{ loginId: param.toUpperCase() }, { email: param.toLowerCase() }] };
 
         const owner = await Owner.findOne(query);
         const User = require('../models/user');
-        const userQuery = isObjId 
-            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { role: 'owner', email: param.toLowerCase() }] } 
+        const userQuery = isObjId
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { role: 'owner', email: param.toLowerCase() }] }
             : { $or: [{ loginId: param.toUpperCase() }, { role: 'owner', email: param.toLowerCase() }] };
         const userDoc = await User.findOne(userQuery);
 
@@ -334,7 +334,7 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
         }
 
         const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
-        const query = isObjId 
+        const query = isObjId
             ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
             : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
 
@@ -928,104 +928,104 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail
 
 // POST /api/owners/create-subscription-order — Create Cashfree order for owner subscription
 router.post('/create-subscription-order', async (req, res) => {
-  try {
-    const { loginId } = req.body;
-    const cleanId = String(loginId || req.query.loginId || '').trim();
-    if (!cleanId) return res.status(400).json({ success: false, message: 'loginId required' });
+    try {
+        const { loginId } = req.body;
+        const cleanId = String(loginId || req.query.loginId || '').trim();
+        if (!cleanId) return res.status(400).json({ success: false, message: 'loginId required' });
 
-    const SystemSettings = require('../models/SystemSettings');
-    const cfPay = require('../services/cashfreePaymentService');
+        const SystemSettings = require('../models/SystemSettings');
+        const cfPay = require('../services/cashfreePaymentService');
 
-    const [owner, settings] = await Promise.all([
-      Owner.findOne({ loginId: normalizeLoginId(cleanId) }),
-      SystemSettings.findOne().lean()
-    ]);
+        const [owner, settings] = await Promise.all([
+            Owner.findOne({ loginId: normalizeLoginId(cleanId) }),
+            SystemSettings.findOne().lean()
+        ]);
 
-    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
-    const price = Number(settings?.ownerSubscriptionPrice || 999);
-    const orderId = `SUB_OWNER_${owner.loginId}_${Date.now()}`;
+        const price = Number(settings?.ownerSubscriptionPrice || 999);
+        const orderId = `SUB_OWNER_${owner.loginId}_${Date.now()}`;
 
-    const orderResult = await cfPay.createOrder({
-      orderId,
-      amount: price,
-      currency: 'INR',
-      customerInfo: {
-        id: owner.loginId,
-        name: owner.name || 'Owner',
-        email: owner.email || 'owner@roomhy.com',
-        phone: owner.phone || '9999999999'
-      },
-      meta: {
-        note: `Roomhy Owner Subscription (${owner.loginId})`
-      }
-    });
+        const orderResult = await cfPay.createOrder({
+            orderId,
+            amount: price,
+            currency: 'INR',
+            customerInfo: {
+                id: owner.loginId,
+                name: owner.name || 'Owner',
+                email: owner.email || 'owner@roomhy.com',
+                phone: owner.phone || '9999999999'
+            },
+            meta: {
+                note: `Roomhy Owner Subscription (${owner.loginId})`
+            }
+        });
 
-    if (!orderResult.success) {
-      return res.status(502).json({ success: false, message: orderResult.error || 'Failed to create payment order' });
+        if (!orderResult.success) {
+            return res.status(502).json({ success: false, message: orderResult.error || 'Failed to create payment order' });
+        }
+
+        return res.json({
+            success: true,
+            order_id: orderResult.order_id || orderId,
+            cf_order_id: orderResult.cf_order_id,
+            payment_session_id: orderResult.payment_session_id,
+            amount: price,
+            currency: 'INR'
+        });
+    } catch (err) {
+        console.error('❌ create-subscription-order error:', err.message);
+        return res.status(500).json({ success: false, message: err.message });
     }
-
-    return res.json({
-      success: true,
-      order_id: orderResult.order_id || orderId,
-      cf_order_id: orderResult.cf_order_id,
-      payment_session_id: orderResult.payment_session_id,
-      amount: price,
-      currency: 'INR'
-    });
-  } catch (err) {
-    console.error('❌ create-subscription-order error:', err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
 });
 
 // POST /api/owners/verify-subscription-payment — Verify Cashfree payment & extend subscription
 router.post('/verify-subscription-payment', async (req, res) => {
-  try {
-    const { loginId, order_id } = req.body;
-    const cleanId = String(loginId || '').trim();
-    const orderId = String(order_id || '').trim();
+    try {
+        const { loginId, order_id } = req.body;
+        const cleanId = String(loginId || '').trim();
+        const orderId = String(order_id || '').trim();
 
-    if (!cleanId || !orderId) {
-      return res.status(400).json({ success: false, message: 'loginId and order_id required' });
+        if (!cleanId || !orderId) {
+            return res.status(400).json({ success: false, message: 'loginId and order_id required' });
+        }
+
+        const cfPay = require('../services/cashfreePaymentService');
+        const statusRes = await cfPay.getOrderStatus(orderId);
+
+        const isPaid = statusRes.success && (statusRes.status === 'PAID' || statusRes.order?.order_status === 'PAID');
+        if (!isPaid) {
+            return res.status(400).json({ success: false, message: 'Payment not verified or pending' });
+        }
+
+        const owner = await Owner.findOne({ loginId: normalizeLoginId(cleanId) });
+        if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
+
+        if (!owner.subscription) owner.subscription = {};
+        const now = new Date();
+        const currentExpiry = owner.subscription.subscriptionExpiry ? new Date(owner.subscription.subscriptionExpiry) : now;
+        const baseDate = currentExpiry > now ? currentExpiry : now;
+        const newExpiry = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+        owner.subscription.isSubscribed = true;
+        owner.subscription.subscriptionExpiry = newExpiry;
+        owner.subscription.lastPaidAt = now;
+        owner.subscription.lastOrderId = orderId;
+        owner.subscription.status = 'subscribed';
+
+        await owner.save();
+
+        console.log(`✅ Subscription activated for Owner ${owner.loginId} until ${newExpiry.toISOString()}`);
+
+        return res.json({
+            success: true,
+            message: 'Subscription payment verified and account activated!',
+            subscriptionExpiry: newExpiry
+        });
+    } catch (err) {
+        console.error('❌ verify-subscription-payment error:', err.message);
+        return res.status(500).json({ success: false, message: err.message });
     }
-
-    const cfPay = require('../services/cashfreePaymentService');
-    const statusRes = await cfPay.getOrderStatus(orderId);
-
-    const isPaid = statusRes.success && (statusRes.status === 'PAID' || statusRes.order?.order_status === 'PAID');
-    if (!isPaid) {
-      return res.status(400).json({ success: false, message: 'Payment not verified or pending' });
-    }
-
-    const owner = await Owner.findOne({ loginId: normalizeLoginId(cleanId) });
-    if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
-
-    if (!owner.subscription) owner.subscription = {};
-    const now = new Date();
-    const currentExpiry = owner.subscription.subscriptionExpiry ? new Date(owner.subscription.subscriptionExpiry) : now;
-    const baseDate = currentExpiry > now ? currentExpiry : now;
-    const newExpiry = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-    owner.subscription.isSubscribed = true;
-    owner.subscription.subscriptionExpiry = newExpiry;
-    owner.subscription.lastPaidAt = now;
-    owner.subscription.lastOrderId = orderId;
-    owner.subscription.status = 'subscribed';
-
-    await owner.save();
-
-    console.log(`✅ Subscription activated for Owner ${owner.loginId} until ${newExpiry.toISOString()}`);
-
-    return res.json({
-      success: true,
-      message: 'Subscription payment verified and account activated!',
-      subscriptionExpiry: newExpiry
-    });
-  } catch (err) {
-    console.error('❌ verify-subscription-payment error:', err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
 });
 
 module.exports = router;

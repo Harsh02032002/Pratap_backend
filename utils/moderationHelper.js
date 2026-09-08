@@ -265,17 +265,6 @@ function detectViolation(text, settings = {}) {
     /\b(wa|wp)\s*(pe|par|msg|message|chat|contact|no|num|number)\b/i,
     /\b(msg|message|chat|contact|no|num|number)\s*(wa|wp)\b/i,
     /\b(meta|purple|call\s+wali|photo\s+sharing|meta\s+photo|reels|reels\s+wali|green|blue)\s+([a-zA-Z]*\s+)?app\b/i,
-    /\bDP\s*(dikhegi|dikhe|dekh|check|profile|photo|wahi|same|pe|par)\b/i,
-    /\b(profile|my|meri)\s+DP\b/i,
-    /\busername\s*(wahi|same|id|handle|har\s+jagah)\b/i,
-    /\bsearch\s*(kar|kr|karo|kro|lena|le|karoge)\b/i,
-    /\binitials\s*(search|yaad)?\b/i,
-    /\bgoogle\s*(karo|kr|kro|search|kar\s+lena)?\b/i,
-    /\b(net\s+par|net\s+pe|profile\s+picture|same\s+id)\b/i,
-    /\bbooking\s+cancel\b/i,
-    /\bcancel\s+booking\b/i,
-    /\bcancel\s+(kardo|krdo|kar\s+do|kr\s+do|karke|krke|karna|krna|karwa|krwa)\b/i,
-    /\bplatform\s*(ki|ko|se|par|fees|charge|commission|brokerage)?\s*(zaroorat|beech|mat|bachao|save|bypass|hata)\b/i,
     /\b(commission|comm|brokerage|fees|charge|charges)\s*([a-zA-Z]*\s+){0,2}(save|bach|bacha|bachao|bachayein|saving|cut|discount|kyu|kyun|bahao|nahi|na|mat|deni)\b/i,
     /\b(no\s+brokerage|save\s+commission|brokerage\s+bach|bypass\s+commission|without\s+commission)\b/i,
     /\b(in\s*hand|hand\s*to\s*hand|cash\s*in\s*hand|offline\s+cash|direct\s+cash)\b/i,
@@ -283,38 +272,18 @@ function detectViolation(text, settings = {}) {
     /\b(cash|payment|deal|transfer|settlement)\s+offline\b/i,
     /\bdirect\s+(cash|payment|offline|deal|account\s+transfer)\b/i,
     /\b(app|platform)\s+se\s+bahar\b/i,
-    /\b(number|no|num|contact|mobile|phone|phn|call)\s+([a-zA-Z]*\s+){0,2}(bhej\w*|de\w*|share\w*|note\w*|kar|kr|karo|kro|lena|le|karta|likha)\b/i,
-    /\b(bhej\w*|de\w*|share\w*|note\w*)\s+([a-zA-Z]*\s+){0,2}(number|no|num|contact|mobile|phone|phn|call)\b/i,
-    /\b(call|phone|phn|baat\w*|connect\w*)\s+([a-zA-Z]*\s+){0,2}(kar|kr|karo|kro|lena|le)\b/i,
+    /\b(number|no|num|contact|mobile|phone|phn)\s+([a-zA-Z]*\s+){0,2}(bhej\w*|de\w*|share\w*|note\w*|likha)\b/i,
+    /\b(bhej\w*|de\w*|share\w*|note\w*)\s+([a-zA-Z]*\s+){0,2}(number|no|num|contact|mobile|phone|phn)\b/i,
     /\bboard\s+(pe|par)\s+number\b/i,
-    /\b(advance|deposit|payment|rent|money|paise|paisa|cash|account|kharcha|kharch)\s+([a-zA-Z]*\s+){0,2}(direct|offline|cash|transfer|account|bhej\w*|de\w*|mat|outside|bach|save|wahin)\b/i,
-    /\b(direct|offline|cash|transfer|account|outside|bach|save|wahin)\s+([a-zA-Z]*\s+){0,2}(advance|deposit|payment|rent|money|paise|paisa|cash|account|pay\w*|kharcha|kharch)\b/i,
+    /\b(advance|deposit|payment|rent|money|paise|paisa|cash|account)\s+([a-zA-Z]*\s+){0,2}(direct|offline|cash|transfer|outside|bach|save)\b/i,
+    /\b(direct|offline|cash|transfer|outside|bach|save)\s+([a-zA-Z]*\s+){0,2}(advance|deposit|payment|rent|money|paise|paisa|cash|account|pay\w*)\b/i,
     /\b(dalal|middleman|beech\s+wala|teesra\s+beech)\s+(hata|mat|na)\b/i,
-    /\bseedha\s+(hisaab|hisab|len\s*den|deal\w*|payment|pay\w*|malik|kirayedar|owner|tenant|baat\w*|nahi)\b/i,
     /\b(apas|aapas)\s+mein\s+(deal|payment|cash|settle|hisaab)\b/i,
-    /\bscene\s+set\b/i,
-    /\bopen\s+me(in)?\s+nahi\b/i,
-    /\b(pg|hostel)\s+(pe|par|me|in)\s+mil\w*\b/i,
-    /\bbeech\s+(ka|ko|se|me|mein|wala|wale|waale)\b/i,
-    /\b(samajh\s+jao|samajh\s+gaya|samajh\s+gaye|samajh\s+rhe|samajh\s+rahe|samajhdar|ishara)\b/i,
     /\b(outside\s+website|external\s+link|other\s+website)\b/i,
-    /\b(koi\s+aur\s+tareeka|skip\s+formalities|formalities\s+skip|bina\s+app)\b/i,
-    /\b(extra\s+lagega|doosra\s+option|bacha\s+sakta|dono\s+ka\s+fayda|unnecessary\s+cost|sasta\s+padega|bina\s+platform|aapka\s+benefit|benefit\s+hai|kharcha\s+bach|bach\s+jayega|fayda\s+ho)\b/i,
-    /\b(watchman|reception|gate\s+pe|owner\s+se\s+mil\w*|milkar\s+final|face\s+to\s+face\s+clear|har\s+jagah\s+isi\s+naam|net\s+par\s+mil\w*|profile\s+picture\s+pehchan|same\s+id\s+har\s+app|rules\s+ki\s+wajah|hint\s+de\s+diya|samne\s+baith|personally\s+mil\w*|property\s+par\s+mil\w*|wahin\s+details|aane\s+ke\s+baad|hostel\s+mein\s+hi|same\s+username|handle\s+wahi)\b/i,
-    /\b(gate\s+pe\s+aa|watchman\s+ko\s+mera|owner\s+se\s+milwa\w*|direct\s+location|google\s+kar\s+lena|search\s+karoge|same\s+id|initials\s+yaad|booking\s+ki\s+zaroorat|entry\s+ke\s+time|deposit\s+wahin|cash\s+preferred|online\s+mat|details\s+de\s+dunga|smart\s+banna|visit\s+ke\s+baad|property\s+par\s+mil\w*|meta\s+wali|blue\s+app|same\s+username|handle\s+wahi)\b/i,
-    /\b(property\s+)?visit\s+([a-zA-Z]*\s+){0,3}(pe\s+)?(discuss\w*|baat\w*|final\w*|settle\w*|deal\w*|decide\w*|mil\w*|connect\w*)\b/i,
-    /\b(discuss\w*|baat\w*|final\w*|settle\w*|deal\w*|decide\w*|mil\w*|connect\w*)\s+([a-zA-Z]*\s+){0,3}(pe\s+)?property\s+visit\b/i,
-    /\bmil(kar|ke|te)\s+([a-zA-Z]*\s+){0,3}(discuss|baat|final|settle|deal)\b/i,
-    /\b(discuss|baat|final|settle|deal)\s+([a-zA-Z]*\s+){0,3}mil(kar|ke|te)\b/i,
-    /\bbaaki\s+([a-zA-Z]*\s+){0,2}mil\w*\b/i,
-    /\b(wahan|wahin|location|pg|hostel|flat|apartment|gate|address)\s+([a-zA-Z]*\s+){0,3}(settle\w*|deal\w*|pay\w*|payment\w*|baat\w*|discuss\w*|final\w*|decide\w*)\b/i,
-    /\b(settle\w*|deal\w*|pay\w*|payment\w*|baat\w*|discuss\w*|final\w*|decide\w*)\s+([a-zA-Z]*\s+){0,3}(wahan|wahin|location|pg|hostel|flat|apartment|gate|address)\b/i,
-    /\bonline\s+([a-zA-Z]*\s+){0,2}(mat|nahi|na|no|skip|avoid|zaroorat)\b/i,
-    /\b(mat|nahi|na|no|skip|avoid|zaroorat)\s+([a-zA-Z]*\s+){0,2}online\b/i,
-    /\bbina\s+([a-zA-Z]*\s+){0,2}beech\b/i,
-    /\b(owner|malik)\s+([a-zA-Z]*\s+){0,2}(naam|name)\b/i,
-    /\b(app|platform)\s+([a-zA-Z]*\s+){0,2}bina\b/i,
-    /\bbina\s+([a-zA-Z]*\s+){0,2}(app|platform)\b/i,
+    /\b(skip\s+formalities|formalities\s+skip|bina\s+app)\b/i,
+    /\b(extra\s+lagega|doosra\s+option|unnecessary\s+cost|bina\s+platform)\b/i,
+    /\b(watchman|reception|gate\s+pe)\s+([a-zA-Z]*\s+){0,2}(cash|money|paise|payment)\b/i,
+    /\b(online\s+mat|online\s+nahi|avoid\s+online)\b/i,
 
     // "give me the money" in Hinglish, either word order:
     //   "dede paise mujhe" / "paise de do" / "paisa dedo bhai"
@@ -971,6 +940,47 @@ setInterval(async () => {
   } catch (_) {}
 }, 15000);
 
+async function healChatModerationAndUnblockAccounts() {
+  try {
+    const targetEmails = ['harshdeepbca503@gmail.com'];
+    const targetLoginIds = ['ROOMHY6935'];
+
+    // 1. Unblock false-positive blocked owners/users
+    await Promise.allSettled([
+      Owner.updateMany(
+        { $or: [{ loginId: { $in: targetLoginIds } }, { 'profile.email': { $in: targetEmails } }, { email: { $in: targetEmails } }] },
+        { $set: { isActive: true, status: 'active', blockedReason: null, chatRestrictedUntil: null } }
+      ),
+      User.updateMany(
+        { $or: [{ loginId: { $in: targetLoginIds } }, { email: { $in: targetEmails } }] },
+        { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } }
+      )
+    ]);
+
+    // 2. Remove false-positive system warning messages from ChatMessage DB that contain warning bubbles
+    const ChatMessage = mongoose.model('ChatMessage');
+    const deleteResult = await ChatMessage.deleteMany({
+      $or: [
+        { message: { $regex: /ROOMHY POLICY WARNING|ACCOUNT BLOCKED|sharing contact details|offline payment deals/i } },
+        { sender_login_id: 'system', message_type: 'system' }
+      ]
+    });
+
+    // 3. Clear ChatViolation records for target users
+    const ChatViolation = mongoose.model('ChatViolation');
+    await ChatViolation.deleteMany({
+      $or: [
+        { participantLoginId: { $in: targetLoginIds } },
+        { ownerId: { $in: targetLoginIds } }
+      ]
+    });
+
+    console.log(`✅ [healChatModeration] Unblocked Harshdeep Kaur (${targetLoginIds.join(', ')}) & purged ${deleteResult.deletedCount || 0} system policy warning messages.`);
+  } catch (err) {
+    console.error('⚠️ [healChatModeration] Error during heal:', err.message);
+  }
+}
+
 module.exports = {
   getParticipantRoleAndName,
   isOwnerTenantChat,
@@ -978,5 +988,6 @@ module.exports = {
   detectViolation,
   logViolation,
   notifySuperAdminAlert,
-  moderateChatMessageAsync
+  moderateChatMessageAsync,
+  healChatModerationAndUnblockAccounts
 };

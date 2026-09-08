@@ -248,65 +248,10 @@ exports.completeTenantAgreementAndNotify = async (loginId, { requestId = '', pro
     try {
         if (tenant.paymentLinkStatus !== 'sent' && tenant.paymentLinkStatus !== 'paid') {
             const Rent = require('../models/Rent');
-            const BookingRequest = require('../models/BookingRequest');
-            const PaymentTransaction = require('../models/PaymentTransaction');
-
-            // 1. Check if tenant has paid booking token amount
-            let bookingTokenPaid = 0;
-            const booking = await BookingRequest.findOne({
-                $or: [
-                    { user_id: tenant.loginId },
-                    { email: tenant.email },
-                    { phone: tenant.phone }
-                ],
-                payment_status: { $in: ['completed', 'PAID', 'SUCCESS', 'confirmed'] }
-            }).sort({ createdAt: -1 }).lean();
-
-            if (booking) {
-                bookingTokenPaid = Number(booking.payment_amount || booking.booking_amount || 0);
-            }
-
-            if (!bookingTokenPaid) {
-                const tx = await PaymentTransaction.findOne({
-                    $or: [
-                        { tenant_id: tenant.loginId },
-                        { tenant_name: tenant.name }
-                    ],
-                    status: { $in: ['PAID', 'SUCCESS', 'VERIFIED'] }
-                }).sort({ createdAt: -1 }).lean();
-                if (tx) {
-                    bookingTokenPaid = Number(tx.booking_amount || tx.amount || 0);
-                }
-            }
-
             let rent = await Rent.findOne({ tenantId: tenant._id, paymentStatus: 'pending' }).sort({ createdAt: -1 });
-            const rawAgreedRent = Number(tenant.agreedRent || booking?.rent_amount || booking?.total_amount || 0);
-
-            // ── Smart Double-Deduction Protection ──
-            // If owner entered total rent (6000) -> deduct token (500) -> net 5500.
-            // If owner already entered net rent (5500) -> do NOT deduct token again!
-            let netRentDue = rawAgreedRent;
-            let actualDeduction = 0;
-
-            if (bookingTokenPaid > 0 && rawAgreedRent > 0) {
-                const baseRoomRent = Number(tenant.baseRoomRent || tenant.roomRent || 0);
-                const isAlreadyNet = baseRoomRent > 0 && Math.abs(rawAgreedRent - (baseRoomRent - bookingTokenPaid)) <= 5;
-
-                if (isAlreadyNet) {
-                    netRentDue = rawAgreedRent;
-                    actualDeduction = 0;
-                    console.log(`[PAYMENT LINK] Smart Protection: Owner entered net rent (₹${rawAgreedRent}) directly. Token ₹${bookingTokenPaid} was already subtracted.`);
-                } else {
-                    actualDeduction = Math.min(rawAgreedRent, bookingTokenPaid);
-                    netRentDue = Math.max(0, rawAgreedRent - actualDeduction);
-                    console.log(`[PAYMENT LINK] Token Deduction: Total Agreed ₹${rawAgreedRent} - Token Paid ₹${actualDeduction} = Net Due ₹${netRentDue}`);
-                }
-            }
-
-            const advanceChargeAmount = Math.max(0, parseInt(tenant.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
-            const calculatedTotalDue = netRentDue + advanceChargeAmount;
-
             if (!rent) {
+                const rentAmount = tenant.agreedRent || 0;
+                const advanceChargeAmount = Math.max(0, parseInt(tenant.digitalCheckin?.agreementDetails?.advanceCharge, 10) || 0);
                 rent = new Rent({
                     tenantId: tenant._id,
                     tenantLoginId: tenant.loginId,
@@ -316,16 +261,14 @@ exports.completeTenantAgreementAndNotify = async (loginId, { requestId = '', pro
                     ownerLoginId: tenant.ownerLoginId,
                     propertyName: tenant.propertyTitle || 'RoomHy Property',
                     roomNumber: tenant.roomNo || '',
-                    rentAmount: rawAgreedRent > 0 ? rawAgreedRent : (tenant.rentAmount || 0),
+                    rentAmount,
                     advanceChargeAmount,
-                    bookingTokenDeduction: bookingTokenPaid,
-                    totalDue: calculatedTotalDue > 0 ? calculatedTotalDue : (rawAgreedRent + advanceChargeAmount),
+                    totalDue: rentAmount + advanceChargeAmount,
                     paymentStatus: 'pending'
                 });
                 await rent.save();
-                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}, Agreed: ₹${rawAgreedRent}, Token Paid: ₹${bookingTokenPaid}, Net Due: ₹${rent.totalDue}`);
+                console.log(`[PAYMENT LINK] Rent record created: ${rent._id}, advance: ${advanceChargeAmount}`);
             }
-
             const rentRecordId = rent._id;
             const jwtSecret = process.env.JWT_SECRET;
             if (!jwtSecret) throw new Error('JWT_SECRET missing');
@@ -345,59 +288,28 @@ exports.completeTenantAgreementAndNotify = async (loginId, { requestId = '', pro
             if (tenant.paymentLinkStatus !== 'sent') {
                 console.log(`[PAYMENT LINK] Sending email to: ${tenant.email}`);
 
-                const subject = `RoomHy Onboarding Payment — ${tenant.propertyTitle || 'RoomHy Property'}`;
+                const subject = `RoomHy Onboarding — ${tenant.propertyTitle || 'RoomHy Property'}`;
                 const paymentHtml = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f4;padding:40px 16px;">
     <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #dddddd;border-radius:12px;overflow:hidden;">
-        <tr><td style="padding:24px 32px;background:#0FA596;color:#ffffff;">
-          <p style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">RoomHy</p>
-          <p style="margin:4px 0 0;font-size:12px;opacity:0.9;color:#ffffff;">KYC Verified &amp; Rental Agreement Complete</p>
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #dddddd;">
+        <tr><td style="padding:24px 32px;border-bottom:1px solid #dddddd;">
+          <p style="margin:0;font-size:20px;font-weight:700;color:#111111;">RoomHy</p>
         </td></tr>
         <tr><td style="padding:32px;">
           <p style="margin:0 0 16px;font-size:15px;color:#333333;">Dear <strong>${tenant.name || 'Tenant'}</strong>,</p>
-          <p style="margin:0 0 20px;font-size:14px;color:#555555;line-height:1.7;">Your KYC verification &amp; digital rental agreement have been completed successfully for <strong>${tenant.propertyTitle || 'RoomHy Property'}</strong>${tenant.roomNo ? ', Room ' + tenant.roomNo : ''}.</p>
-          
-          <!-- Payment Breakdown Box -->
-          <table width="100%" cellpadding="12" cellspacing="0" border="0" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:24px;font-size:13px;color:#374151;">
-            <tr style="border-bottom:1px solid #e5e7eb;">
-              <td style="font-weight:600;">Agreed Monthly Rent</td>
-              <td align="right" style="font-weight:700;color:#111827;">₹${(rawAgreedRent || rent.rentAmount || 0).toLocaleString('en-IN')}</td>
-            </tr>
-            ${actualDeduction > 0 ? `
-            <tr style="border-bottom:1px solid #e5e7eb;color:#059669;">
-              <td style="font-weight:600;">Booking Token Advance Deducted</td>
-              <td align="right" style="font-weight:700;">- ₹${actualDeduction.toLocaleString('en-IN')}</td>
-            </tr>
-            ` : bookingTokenPaid > 0 ? `
-            <tr style="border-bottom:1px solid #e5e7eb;color:#059669;">
-              <td style="font-weight:600;">Booking Token Advance Status</td>
-              <td align="right" style="font-weight:700;">₹${bookingTokenPaid.toLocaleString('en-IN')} (Already Subtracted in Agreed Amount)</td>
-            </tr>
-            ` : ''}
-            ${advanceChargeAmount > 0 ? `
-            <tr style="border-bottom:1px solid #e5e7eb;">
-              <td style="font-weight:600;">Security Deposit / Advance Charge</td>
-              <td align="right" style="font-weight:700;color:#111827;">+ ₹${advanceChargeAmount.toLocaleString('en-IN')}</td>
-            </tr>
-            ` : ''}
-            <tr style="background:#f3f4f6;font-size:15px;">
-              <td style="font-weight:800;color:#0FA596;">Net Payable Balance</td>
-              <td align="right" style="font-weight:800;color:#0FA596;">₹${(rent.totalDue || calculatedTotalDue).toLocaleString('en-IN')}</td>
-            </tr>
-          </table>
-
-          <p style="margin:0 0 24px;font-size:14px;color:#555555;line-height:1.7;">Please click the button below to complete your remaining onboarding payment securely via Cashfree:</p>
-          <table cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
-            <tr><td style="background:#0FA596;border-radius:8px;">
-              <a href="${paymentUrl}" style="display:inline-block;background:#0FA596;color:#ffffff;text-decoration:none;padding:14px 32px;font-size:14px;font-weight:700;font-family:Arial,Helvetica,sans-serif;border-radius:8px;">Proceed to Payment (₹${(rent.totalDue || calculatedTotalDue).toLocaleString('en-IN')})</a>
+          <p style="margin:0 0 16px;font-size:14px;color:#555555;line-height:1.7;">Your KYC verification and rental agreement have been completed successfully for <strong>${tenant.propertyTitle || 'RoomHy Property'}</strong>${tenant.roomNo ? ', Room ' + tenant.roomNo : ''}.</p>
+          <p style="margin:0 0 24px;font-size:14px;color:#555555;line-height:1.7;">To complete your onboarding, please proceed with the security deposit and first month payment using the link below.</p>
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr><td style="background:#111111;">
+              <a href="${paymentUrl}" style="display:inline-block;background:#111111;color:#ffffff;text-decoration:none;padding:13px 28px;font-size:14px;font-weight:600;font-family:Arial,Helvetica,sans-serif;">Proceed to Payment</a>
             </td></tr>
           </table>
-          <p style="margin:20px 0 0;font-size:12px;color:#888888;">If the button does not work, copy and paste this link in your browser:<br><span style="color:#0FA596;word-break:break-all;">${paymentUrl}</span></p>
-          <p style="margin:12px 0 0;font-size:12px;color:#888888;">This link is valid for 72 hours. Please do not share it with anyone.</p>
+          <p style="margin:20px 0 0;font-size:12px;color:#888888;">If the button does not work, copy and paste this link in your browser:<br><span style="color:#333333;word-break:break-all;">${paymentUrl}</span></p>
+          <p style="margin:20px 0 0;font-size:12px;color:#888888;">This link is valid for 72 hours. Please do not share it with anyone.</p>
         </td></tr>
         <tr><td style="border-top:1px solid #dddddd;padding:20px 32px;background:#f9f9f9;">
           <p style="margin:0;font-size:12px;color:#888888;line-height:1.8;"><strong style="color:#555555;">RoomHy Support Team</strong><br>Email: support@roomhy.com | Website: www.roomhy.com<br>&copy; ${new Date().getFullYear()} RoomHy. All rights reserved.</p>
@@ -407,13 +319,14 @@ exports.completeTenantAgreementAndNotify = async (loginId, { requestId = '', pro
   </table>
 </body>
 </html>`;
-                const paymentText = `Dear ${tenant.name || 'Tenant'},\n\nYour KYC and rental agreement for ${tenant.propertyTitle || 'RoomHy Property'} are complete.\nAgreed Rent: ₹${rawAgreedRent}\nToken Paid: -₹${bookingTokenPaid}\nNet Payable: ₹${rent.totalDue || calculatedTotalDue}\n\nPlease proceed with your payment using the link below:\n${paymentUrl}\n\nThis link is valid for 72 hours.\n\nRoomHy Support Team\nsupport@roomhy.com`;
+                const paymentText = `Dear ${tenant.name || 'Tenant'},\n\nYour KYC and rental agreement for ${tenant.propertyTitle || 'RoomHy Property'} are complete.\n\nPlease proceed with your onboarding payment using the link below:\n${paymentUrl}\n\nThis link is valid for 72 hours.\n\nRoomHy Support Team\nsupport@roomhy.com`;
                 await sendMail(tenant.email, subject, paymentText, paymentHtml);
                 tenant.paymentLinkStatus = 'sent';
                 await tenant.save();
                 console.log(`[PAYMENT LINK] ✓ Successfully sent to ${tenant.email} for ${tenant.loginId}`);
             } // end if not already sent
         } else {
+            console.log(`[PAYMENT LINK] Skipped - paymentLinkStatus is paid`);
             console.log(`[PAYMENT LINK] Skipped - paymentLinkStatus is ${tenant.paymentLinkStatus}`);
         }
     } catch (paymentLinkErr) {

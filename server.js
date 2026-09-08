@@ -7,13 +7,6 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const dns = require('dns');
-
-// Always load env from this folder, regardless of where the process was started.
-// This MUST stay above every local require() below: modules like
-// middleware/security.js read process.env into top-level constants at require
-// time, so loading .env any later leaves them silently using their fallbacks.
-dotenv.config({ path: path.join(__dirname, '.env') });
-
 const { startCronJobs } = require('./services/cronJobs');
 const { registerAllCronJobs } = require('./jobs/dailyRentEvaluator');
 const { registerAutoMarkAbsentJob } = require('./jobs/autoMarkAbsentJob');
@@ -66,7 +59,8 @@ try {
     console.warn('⚠️ Could not override DNS servers:', dnsErr.message);
 }
 
-// .env is loaded at the top of this file, before the local requires that read it.
+// Always load env from this folder, regardless of where the process was started.
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const server = http.createServer(app);
@@ -200,10 +194,10 @@ const seoController = require('./controllers/seoController');
 app.use(async (req, res, next) => {
     if (req.method !== 'GET') return next();
     const reqPath = req.path;
-    if (reqPath.startsWith('/api/') || 
-        reqPath.startsWith('/assets/') || 
-        reqPath.startsWith('/images/') || 
-        reqPath.startsWith('/js/') || 
+    if (reqPath.startsWith('/api/') ||
+        reqPath.startsWith('/assets/') ||
+        reqPath.startsWith('/images/') ||
+        reqPath.startsWith('/js/') ||
         reqPath === '/sitemap.xml' ||
         reqPath.includes('.')) {
         return next();
@@ -283,6 +277,12 @@ if (!mongoUri) {
         // Pool saturation is the failure mode behind "random" API timeouts —
         // observe it rather than inferring it.
         attachPoolMonitor(mongoose.connection);
+        try {
+            const { healChatModerationAndUnblockAccounts } = require('./utils/moderationHelper');
+            await healChatModerationAndUnblockAccounts();
+        } catch (healErr) {
+            console.warn('⚠️ healChatModeration error:', healErr.message);
+        }
     } catch (err) {
         console.error('❌ MongoDB connection error:', err.message);
         console.warn('⚠️ Starting server anyway; API calls may fail until DB reconnects');
@@ -514,14 +514,14 @@ try {
     console.log('  ✓ approvedPropertiesRoutes (as /api/approvals)');
     app.use('/api/website-property-data', require('./routes/websitePropertyDataRoutes'));
     console.log('  ✓ websitePropertyDataRoutes');
-    
-    try { 
+
+    try {
         app.use('/api/website-properties', require('./routes/websitePropertyRoutes'));
         console.log('  ✓ websitePropertyRoutes');
-    } catch(e) { 
-        console.log('  ⚠️  websitePropertyRoutes not loaded:', e.message); 
+    } catch (e) {
+        console.log('  ⚠️  websitePropertyRoutes not loaded:', e.message);
     }
-    
+
     app.use('/api/chat', require('./routes/chatRoutes'));
     console.log('  ✓ chatRoutes');
     app.use('/api/email', require('./routes/emailRoutes'));
@@ -611,7 +611,7 @@ try {
     console.log('  ✓ cashfreePaymentRoutes');
     app.use('/api/payouts/cashfree', require('./routes/cashfreePayoutRoutes'));
     console.log('  ✓ cashfreePayoutRoutes');
-    
+
     console.log('✅ All routes loaded');
 
 } catch (err) {
@@ -662,8 +662,8 @@ app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
         tenant.moveInDate = testDate;
         await tenant.save();
 
-        const now = new Date(); now.setHours(0,0,0,0);
-        const start = new Date(testDate); start.setHours(0,0,0,0);
+        const now = new Date(); now.setHours(0, 0, 0, 0);
+        const start = new Date(testDate); start.setHours(0, 0, 0, 0);
         const daysSince = Math.floor((now - start) / 86400000);
         const monthDiff = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
         const dayInMonthDiff = now.getDate() - start.getDate();
@@ -685,7 +685,7 @@ app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
                 actions.push('owner_notified');
             }
             if (tenant.email) {
-                await sendMail(tenant.email, '⚠️ Your Roomhy Agreement Has Expired', `Dear ${tenant.name}, your agreement has expired.`, `<h2>Agreement Expired</h2><p>Your account is now inactive. Contact your property owner.</p>`).catch(() => {});
+                await sendMail(tenant.email, '⚠️ Your Roomhy Agreement Has Expired', `Dear ${tenant.name}, your agreement has expired.`, `<h2>Agreement Expired</h2><p>Your account is now inactive. Contact your property owner.</p>`).catch(() => { });
                 actions.push('email_sent');
             }
         }
@@ -819,7 +819,31 @@ app.use((err, req, res, next) => {
     });
 });
 
+// ── Admin Panel (SPA) — served at /admin ────────────────────────────────────
+const fs = require('fs');
+const possibleAdminPaths = [
+    path.join(__dirname, '../roomhy-admin-clone/dist'),   // sibling folder
+    path.join(__dirname, './admin-dist'),                  // same folder as backend
+    path.join(__dirname, '../admin-dist'),                 // one level up
+    '/var/www/roomhy-admin',                              // nginx default
+    '/var/www/html/admin',                                // nginx default 2
+];
+const adminDistPath = possibleAdminPaths.find(p => fs.existsSync(p) && fs.existsSync(path.join(p, 'index.html')));
 
+if (adminDistPath) {
+    app.use('/admin', express.static(adminDistPath, { index: false }));
+    // SPA fallback — use regex to avoid path-to-regexp wildcard issues in Express 5
+    app.get(/^\/admin(\/.*)?$/, (req, res) => res.sendFile(path.join(adminDistPath, 'index.html')));
+    console.log(`✅ Admin panel served at /admin from: ${adminDistPath}`);
+} else {
+    app.get(/^\/admin(\/.*)?$/, (req, res) => res.send(`
+        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h2>Admin Panel Not Built</h2>
+        <p>Run: <code>cd roomhy-admin-clone && npm run build && cp -r dist ../Roomhy-Backend/admin-dist</code></p>
+        </body></html>
+    `));
+    console.log('ℹ️  Admin panel build not found.');
+}
 
 // 404 handler for unmatched routes
 app.use((req, res) => {
@@ -840,7 +864,7 @@ function startServer() {
         console.log('🌐 Running in serverless environment, skipping server start');
         return;
     }
-    
+
     if (server.listening) return;
 
     // Backstops for pathological sockets — NOT the request deadline.
@@ -854,7 +878,7 @@ function startServer() {
         if (err.code === 'EADDRINUSE') {
             console.warn(`⚠️ Port ${PORT} in use. Retrying connection in 1.5s...`);
             setTimeout(() => {
-                try { server.close(); } catch (_) {}
+                try { server.close(); } catch (_) { }
                 server.listen(PORT, '0.0.0.0');
             }, 1500);
         } else {
@@ -864,7 +888,7 @@ function startServer() {
 
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`\n✅ Backend API running on http://localhost:${PORT}\n`);
-        
+
         // Start cron jobs for automated rent reminders
         try {
             startCronJobs();
@@ -881,6 +905,12 @@ function startServer() {
 // Vercel serverless function export
 if (process.env.VERCEL) {
     module.exports = app;
+}
+// Local development does NOT call startServer() here: the mongoose.connect
+// block above owns startup, on both the success and the failure path. Calling
+// it at module load raced the connection and started the cron jobs before the
+// database was reachable (see the note there).
+module.exports = app;
 }
 // Local development does NOT call startServer() here: the mongoose.connect
 // block above owns startup, on both the success and the failure path. Calling

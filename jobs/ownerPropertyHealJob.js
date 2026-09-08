@@ -222,7 +222,7 @@ async function healOwnerProperties(loginId, opts = {}) {
     }
     await flush();
   } finally {
-    await cursor.close().catch(() => {});
+    await cursor.close().catch(() => { });
   }
 
   if (stats.repaired > 0 || stats.failed > 0) {
@@ -268,7 +268,7 @@ async function runOwnerPropertyHealJob() {
     let budget = MAX_PROPERTIES_PER_RUN;
 
     // Page through owners rather than loading them all at once.
-    for (;;) {
+    for (; ;) {
       const owners = await withReadDeadline(
         Owner.find({ isDeleted: { $ne: true } })
           .select('loginId')
@@ -371,7 +371,7 @@ async function runOwnerPropertyHealJob() {
             invoicesProcessed: totals.repaired,
           },
         }
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     return totals;
@@ -388,11 +388,11 @@ async function runOwnerPropertyHealJob() {
             errorMessage: err.message,
           },
         }
-      ).catch(() => {});
+      ).catch(() => { });
     }
     return null;
   } finally {
-    await releaseLock(JOB_NAME).catch(() => {});
+    await releaseLock(JOB_NAME).catch(() => { });
   }
 }
 

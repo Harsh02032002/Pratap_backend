@@ -33,23 +33,6 @@ router.get('/config/razorpay-key', (req, res) => {
     }
 });
 
-// Get Public Platform Config (e.g. Booking Token Amount set by Superadmin)
-router.get('/config/settings', async (req, res) => {
-    try {
-        const SystemSettings = require('../models/SystemSettings');
-        const settings = await SystemSettings.findOne().lean();
-        const bookingAmount = settings?.bookingAmount || settings?.fixedFee || 500;
-        res.json({
-            success: true,
-            bookingAmount: Number(bookingAmount),
-            commissionPercentage: settings?.commission_percentage || 10,
-            gstPercentage: settings?.gst_percentage || 18,
-        });
-    } catch (error) {
-        res.json({ success: true, bookingAmount: 500 });
-    }
-});
-
 // Create Razorpay order for booking payment
 router.post('/create-order', (req, res) => {
     try {

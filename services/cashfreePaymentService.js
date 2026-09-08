@@ -28,10 +28,10 @@ function getConfig() {
   const isSandbox = env !== 'PROD';
   return {
     isSandbox,
-    appId:         process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '',
-    secretKey:     process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '',
+    appId: process.env.CASHFREE_APP_ID || process.env.CASHFREE_CLIENT_ID || process.env.CF_APP_ID || '',
+    secretKey: process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET || process.env.CF_SECRET_KEY || '',
     webhookSecret: process.env.CASHFREE_WEBHOOK_SECRET || '',
-    apiVersion:    '2025-01-01',
+    apiVersion: '2025-01-01',
     baseUrl: isSandbox
       ? 'https://sandbox.cashfree.com/pg'
       : 'https://api.cashfree.com/pg',
@@ -40,11 +40,11 @@ function getConfig() {
 
 function getHeaders(config) {
   return {
-    'x-client-id':     config.appId,
+    'x-client-id': config.appId,
     'x-client-secret': config.secretKey,
-    'x-api-version':   config.apiVersion,
-    'Content-Type':    'application/json',
-    'Accept':          'application/json',
+    'x-api-version': config.apiVersion,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
   };
 }
 
@@ -77,18 +77,18 @@ async function createOrder({ orderId, amount, currency = 'INR', customerInfo = {
 
   try {
     const payload = {
-      order_id:       orderId,
-      order_amount:   parseFloat(amount.toFixed(2)),
+      order_id: orderId,
+      order_amount: parseFloat(amount.toFixed(2)),
       order_currency: currency,
       customer_details: {
-        customer_id:    sanitizeCustomerId(customerInfo.id),
-        customer_name:  customerInfo.name || 'Tenant',
+        customer_id: sanitizeCustomerId(customerInfo.id),
+        customer_name: customerInfo.name || 'Tenant',
         customer_email: customerInfo.email || 'tenant@roomhy.com',
         customer_phone: customerInfo.phone || '9999999999',
       },
       order_meta: {
-        return_url:  meta.return_url || `https://roomhy.com/payment-status?order_id={order_id}`,
-        notify_url:  meta.notify_url || `${process.env.API_URL || 'https://api.roomhy.com'}/api/payments/cashfree/webhook`,
+        return_url: meta.return_url || `https://roomhy.com/payment-status?order_id={order_id}`,
+        notify_url: meta.notify_url || `${process.env.API_URL || 'https://api.roomhy.com'}/api/payments/cashfree/webhook`,
       },
       order_note: meta.note || 'Roomhy Booking Payment',
     };
@@ -101,13 +101,13 @@ async function createOrder({ orderId, amount, currency = 'INR', customerInfo = {
     console.log(`[CashfreePayment] ✅ Order created: ${data.cf_order_id} | ₹${amount}`);
 
     return {
-      success:            true,
-      cf_order_id:        data.cf_order_id,
-      order_id:           data.order_id,
-      order_token:        data.order_token,       // Legacy field
+      success: true,
+      cf_order_id: data.cf_order_id,
+      order_id: data.order_id,
+      order_token: data.order_token,       // Legacy field
       payment_session_id: data.payment_session_id, // v2025 field for JS SDK
-      order_status:       data.order_status,
-      isSandbox:          config.isSandbox,
+      order_status: data.order_status,
+      isSandbox: config.isSandbox,
     };
   } catch (err) {
     const errMsg = err.response?.data?.message || err.message || 'Unknown error';
@@ -142,19 +142,19 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
     const expiryStr = expiry.toISOString(); // Valid ISO8601 string (e.g. 2026-08-13T01:04:40.000Z)
 
     const payload = {
-      link_id:          linkId,
-      link_amount:      parseFloat(amount.toFixed(2)),
-      link_currency:    'INR',
-      link_purpose:     description,
+      link_id: linkId,
+      link_amount: parseFloat(amount.toFixed(2)),
+      link_currency: 'INR',
+      link_purpose: description,
       link_partial_payments: false,
       customer_details: {
-        customer_name:  customerInfo.name || 'Tenant',
+        customer_name: customerInfo.name || 'Tenant',
         customer_email: customerInfo.email || 'tenant@roomhy.com',
         customer_phone: customerInfo.phone || '9999999999',
       },
       link_expiry_time: expiryStr,
       link_notify: {
-        send_sms:   true,
+        send_sms: true,
         send_email: true,
       },
       link_meta: {
@@ -171,46 +171,16 @@ async function createPaymentLink({ linkId, amount, description = 'Roomhy Booking
     console.log(`[CashfreePayment] ✅ Payment link created: ${data.link_id} | URL: ${data.link_url}`);
 
     return {
-      success:          true,
-      link_id:          data.link_id,
-      link_url:         data.link_url,
-      link_status:      data.link_status,
+      success: true,
+      link_id: data.link_id,
+      link_url: data.link_url,
+      link_status: data.link_status,
       link_expiry_time: data.link_expiry_time,
-      isSandbox:        config.isSandbox,
+      isSandbox: config.isSandbox,
     };
   } catch (err) {
     const errMsg = err.response?.data?.message || err.message || 'Unknown error';
     console.error('[CashfreePayment] ❌ createPaymentLink failed:', errMsg);
-
-    // ── FAILSAFE FALLBACK ──────────────────────────────────────────────────
-    // If Cashfree live account does not have Payment Links API enabled ('link_creation_api is not enabled'),
-    // fallback automatically to standard Cashfree Order via /pg/orders!
-    if (errMsg.includes('link_creation_api') || errMsg.includes('not enabled') || errMsg.includes('not approved') || err.response?.status === 400 || err.response?.status === 403) {
-      console.log('[CashfreePayment] 🔄 Fallback: Creating standard Cashfree Order for payment link');
-      const cleanBookingId = linkId.replace(/^RMHLINK_/, '').split('_')[0];
-      const returnBaseUrl = process.env.FRONTEND_URL || 'https://roomhy.com';
-      const orderRes = await createOrder({
-        orderId: linkId.slice(0, 45),
-        amount,
-        customerInfo,
-        meta: {
-          note: description,
-          return_url: `${returnBaseUrl}/tenant/tenantdashboard?order_id=${linkId.slice(0, 45)}&rent_id=${cleanBookingId}&amount=${amount}`
-        }
-      });
-
-      if (orderRes.success) {
-        const fallbackUrl = `${returnBaseUrl}/website/pay?bookingId=${cleanBookingId}&amount=${amount}`;
-        return {
-          success: true,
-          link_id: orderRes.order_id || linkId,
-          link_url: fallbackUrl,
-          link_status: 'ACTIVE',
-          isFallbackOrder: true
-        };
-      }
-    }
-
     return { success: false, error: errMsg, details: err.response?.data };
   }
 }
@@ -237,8 +207,8 @@ async function getLinkStatus(linkId) {
 
     return {
       success: true,
-      link:    data,
-      status:  data.link_status, // 'PAID' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED'
+      link: data,
+      status: data.link_status, // 'PAID' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED'
     };
   } catch (err) {
     const errMsg = err.response?.data?.message || err.message;
@@ -268,8 +238,8 @@ async function getOrderStatus(cfOrderId) {
 
     return {
       success: true,
-      order:   data,
-      status:  data.order_status,  // 'ACTIVE' | 'PAID' | 'EXPIRED' | 'CANCELLED'
+      order: data,
+      status: data.order_status,  // 'ACTIVE' | 'PAID' | 'EXPIRED' | 'CANCELLED'
     };
   } catch (err) {
     const errMsg = err.response?.data?.message || err.message;
@@ -319,8 +289,8 @@ async function initiateRefund({ cfOrderId, refundId, amount, reason = 'Refund' }
   try {
     const payload = {
       refund_amount: parseFloat(amount.toFixed(2)),
-      refund_id:     refundId,
-      refund_note:   reason,
+      refund_id: refundId,
+      refund_note: reason,
     };
 
     const { data } = await axios.post(
@@ -332,8 +302,8 @@ async function initiateRefund({ cfOrderId, refundId, amount, reason = 'Refund' }
     console.log(`[CashfreePayment] ✅ Refund initiated: ${data.refund_id} | ₹${amount} | Status: ${data.refund_status}`);
 
     return {
-      success:       true,
-      refund_id:     data.refund_id,
+      success: true,
+      refund_id: data.refund_id,
       refund_status: data.refund_status,
       refund_amount: data.refund_amount,
       data,

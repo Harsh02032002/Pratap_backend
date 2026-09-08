@@ -58,78 +58,78 @@ const sanitizePropertyPayload = (data = {}) => {
 // been explicitly taken offline. Legacy documents predate isLiveOnWebsite, so only
 // an explicit `false` counts as offline.
 const isPropertyLive = (property) =>
-    property.isLiveOnWebsite !== false && ['active', 'approved'].includes(property.status);
+  property.isLiveOnWebsite !== false && ['active', 'approved'].includes(property.status);
 
 // Helper: Sync Property to ApprovedProperty for website visibility
 const syncToApprovedProperty = async (property) => {
-    if (!isPropertyLive(property)) return;
-    try {
-        const vId = property.visitId || property._id.toString();
-        const listingImages = flattenListingImages(property);
-        const featuredImage = property.featuredImage || listingImages[0] || "";
-        const approvedPropertyData = {
-            visitId: vId,
-            propertyId: property.propertyId || property._id.toString(),
-            enquiry_id: property.enquiry_id || property._id.toString(),
-            propertyCategory: property.propertyCategory || "",
-            tier: property.tier || "",
-            state: property.state || "",
-            pincode: property.pincode || "",
-            landmark: property.landmark || "",
-            contact: property.contact || {},
-            videoUrl: property.videoUrl || "",
-            images: listingImages,
-            featuredImage,
-            propertyInfo: {
-                name: property.title || 'Property',
-                city: property.city || 'Unknown',
-                area: property.locality || property.area || 'Unknown',
-                address: property.address || '',
-                rent: property.monthlyRent || 0,
-                propertyType: property.propertyType || 'pg',
-                genderSuitability: property.gender || 'any',
-                amenities: property.amenities?.map(a => typeof a === 'string' ? a : a.name) || [],
-                photos: listingImages,
-                latitude: property.latitude,
-                longitude: property.longitude,
-                description: property.description || ''
-            },
-            // Sync root level fields for premium UI
-            amenities: property.amenities || [],
-            propertyViews: (property.propertyViews || []).filter((v) => {
-                const label = String(v?.label || '').toLowerCase();
-                return !label.includes('camera') && !label.includes('live');
-            }),
-            facilities: property.facilities || {},
-            exclusiveBenefits: property.exclusiveBenefits || [],
-            roomTypes: property.roomTypes || [],
-            propertyDetails: property.propertyDetails || {},
-            pricing: property.pricing || {},
-            policies: property.policies || {},
-            tenantDescription: property.tenantDescription || "",
-            seo: property.seo || {},
-            latitude: property.latitude,
-            longitude: property.longitude,
-            generatedCredentials: {
-                ownerName: property.ownerName || 'Verified Owner',
-                loginId: property.ownerLoginId || ''
-            },
-            isLiveOnWebsite: true,
-            // Must stay 'approved': the public website endpoints
-            // (/api/approved-properties/public/approved and /all) filter on it.
-            status: 'approved',
-            updatedAt: new Date()
-        };
+  if (!isPropertyLive(property)) return;
+  try {
+    const vId = property.visitId || property._id.toString();
+    const listingImages = flattenListingImages(property);
+    const featuredImage = property.featuredImage || listingImages[0] || "";
+    const approvedPropertyData = {
+      visitId: vId,
+      propertyId: property.propertyId || property._id.toString(),
+      enquiry_id: property.enquiry_id || property._id.toString(),
+      propertyCategory: property.propertyCategory || "",
+      tier: property.tier || "",
+      state: property.state || "",
+      pincode: property.pincode || "",
+      landmark: property.landmark || "",
+      contact: property.contact || {},
+      videoUrl: property.videoUrl || "",
+      images: listingImages,
+      featuredImage,
+      propertyInfo: {
+        name: property.title || 'Property',
+        city: property.city || 'Unknown',
+        area: property.locality || property.area || 'Unknown',
+        address: property.address || '',
+        rent: property.monthlyRent || 0,
+        propertyType: property.propertyType || 'pg',
+        genderSuitability: property.gender || 'any',
+        amenities: property.amenities?.map(a => typeof a === 'string' ? a : a.name) || [],
+        photos: listingImages,
+        latitude: property.latitude,
+        longitude: property.longitude,
+        description: property.description || ''
+      },
+      // Sync root level fields for premium UI
+      amenities: property.amenities || [],
+      propertyViews: (property.propertyViews || []).filter((v) => {
+        const label = String(v?.label || '').toLowerCase();
+        return !label.includes('camera') && !label.includes('live');
+      }),
+      facilities: property.facilities || {},
+      exclusiveBenefits: property.exclusiveBenefits || [],
+      roomTypes: property.roomTypes || [],
+      propertyDetails: property.propertyDetails || {},
+      pricing: property.pricing || {},
+      policies: property.policies || {},
+      tenantDescription: property.tenantDescription || "",
+      seo: property.seo || {},
+      latitude: property.latitude,
+      longitude: property.longitude,
+      generatedCredentials: {
+        ownerName: property.ownerName || 'Verified Owner',
+        loginId: property.ownerLoginId || ''
+      },
+      isLiveOnWebsite: true,
+      // Must stay 'approved': the public website endpoints
+      // (/api/approved-properties/public/approved and /all) filter on it.
+      status: 'approved',
+      updatedAt: new Date()
+    };
 
-        await ApprovedProperty.findOneAndUpdate(
-            { visitId: vId },
-            approvedPropertyData,
-            { upsert: true, new: true }
-        );
-        console.log(`✅ Synced property ${property._id} to website`);
-    } catch (err) {
-        console.error('❌ Sync to ApprovedProperty failed:', err);
-    }
+    await ApprovedProperty.findOneAndUpdate(
+      { visitId: vId },
+      approvedPropertyData,
+      { upsert: true, new: true }
+    );
+    console.log(`✅ Synced property ${property._id} to website`);
+  } catch (err) {
+    console.error('❌ Sync to ApprovedProperty failed:', err);
+  }
 };
 
 // Create / Add a new Property with auto-geocoding
@@ -155,21 +155,21 @@ exports.addProperty = async (req, res) => {
     const isSuperAdmin = req.user && ['superadmin', 'admin'].includes(req.user.role);
     const isEmployeeOrManager = req.user && ['employee', 'manager', 'areamanager'].includes(req.user.role);
     const isStaff = isSuperAdmin || req.body.status === 'active';
-    
+
     if (isSuperAdmin || req.body.status === 'active') {
-        propertyData.status = req.body.status || 'active'; 
-        propertyData.isPublished = propertyData.status === 'active';
-        propertyData.isLiveOnWebsite = propertyData.status === 'active';
+      propertyData.status = req.body.status || 'active';
+      propertyData.isPublished = propertyData.status === 'active';
+      propertyData.isLiveOnWebsite = propertyData.status === 'active';
     } else {
-        // employee, areamanager, owner — all go to pending_approval
-        propertyData.status = 'pending_approval';
-        propertyData.isPublished = false;
-        propertyData.isLiveOnWebsite = false;
-        if (isEmployeeOrManager) {
-            propertyData.isEmployeeSubmitted = true;
-            propertyData.submittedByRole = req.user.role;
-            propertyData.submittedByLoginId = req.user.loginId || '';
-        }
+      // employee, areamanager, owner — all go to pending_approval
+      propertyData.status = 'pending_approval';
+      propertyData.isPublished = false;
+      propertyData.isLiveOnWebsite = false;
+      if (isEmployeeOrManager) {
+        propertyData.isEmployeeSubmitted = true;
+        propertyData.submittedByRole = req.user.role;
+        propertyData.submittedByLoginId = req.user.loginId || '';
+      }
     }
 
     // Auto-assign to area employee for pending properties
@@ -190,7 +190,7 @@ exports.addProperty = async (req, res) => {
           autoAssignedTo = areaEmployee.loginId;
           autoAssignedToName = areaEmployee.name;
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const property = new Property(propertyData);
@@ -323,88 +323,88 @@ exports.getPropertyById = async (req, res) => {
 
 // Get ALL Properties (For Super Admin & Area Manager lists) with Pagination
 exports.getAllProperties = async (req, res) => {
-    try {
-        const { applyPropertyScope } = require('../utils/scopeHelpers');
-        let filter = { isDeleted: { $ne: true } };
+  try {
+    const { applyPropertyScope } = require('../utils/scopeHelpers');
+    let filter = { isDeleted: { $ne: true } };
 
-        if (req.employeeScope && req.employeeScope.isEmployee) {
-            filter = applyPropertyScope(req, filter);
-        }
-
-        if (req.query.ownerLoginId) {
-            filter.ownerLoginId = String(req.query.ownerLoginId).toUpperCase();
-        }
-        if (req.query.pendingApproval === 'true') {
-            filter.status = 'pending_approval';
-        }
-        if (req.query.pendingChanges === 'true') {
-            filter['pendingChanges.status'] = 'pending';
-        }
-        if (req.query.assignedTo) {
-            const assignedVal = String(req.query.assignedTo).trim();
-            const isObjId = mongoose.Types.ObjectId.isValid(assignedVal);
-            const assignedClause = [
-                { 'pendingChanges.assignedToName': new RegExp(`^${assignedVal}$`, 'i') },
-                { 'assignedToName': new RegExp(`^${assignedVal}$`, 'i') }
-            ];
-            if (isObjId) {
-                assignedClause.push({ 'pendingChanges.assignedTo': new mongoose.Types.ObjectId(assignedVal) });
-                assignedClause.push({ 'assignedTo': new mongoose.Types.ObjectId(assignedVal) });
-            }
-            if (filter.$or) {
-                filter = { $and: [filter, { $or: assignedClause }] };
-            } else {
-                filter.$or = assignedClause;
-            }
-        }
-        
-        const page = parseInt(req.query.page) || 1;
-        const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
-        const skip = (page - 1) * limit;
-        
-        // Run counts in parallel
-        const [total, publishedCount, inactiveCount, rejectedCount] = await Promise.all([
-            Property.countDocuments(filter),
-            Property.countDocuments({ ...filter, $or: [{ isLiveOnWebsite: true }, { status: 'active' }] }),
-            Property.countDocuments({ ...filter, status: 'inactive' }),
-            Property.countDocuments({ ...filter, status: 'blocked' })
-        ]);
-        
-        const pendingCount = total - (publishedCount + inactiveCount + rejectedCount);
- 
-        const { flattenListingImages } = require('../utils/propertyGallery');
-        const properties = await Property.find(filter)
-            .populate('owner', 'name phone email')
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
-
-        // Sanitize property images array to strictly exclude live camera photos
-        const cleanedProperties = properties.map(p => {
-            const obj = p.toObject ? p.toObject() : { ...p };
-            const cleanImages = flattenListingImages(obj);
-            obj.images = cleanImages;
-            obj.featuredImage = cleanImages[0] || '';
-            return obj;
-        });
-
-        res.json({ 
-            success: true, 
-            properties: cleanedProperties, 
-            total,
-            page,
-            totalPages: Math.ceil(total / limit),
-            stats: {
-                published: publishedCount,
-                pending: Math.max(0, pendingCount),
-                inactive: inactiveCount,
-                rejected: rejectedCount
-            }
-        });
-    } catch (err) {
-        console.error("Get Properties Error:", err);
-        res.status(500).json({ success: false, message: 'Server error' });
+    if (req.employeeScope && req.employeeScope.isEmployee) {
+      filter = applyPropertyScope(req, filter);
     }
+
+    if (req.query.ownerLoginId) {
+      filter.ownerLoginId = String(req.query.ownerLoginId).toUpperCase();
+    }
+    if (req.query.pendingApproval === 'true') {
+      filter.status = 'pending_approval';
+    }
+    if (req.query.pendingChanges === 'true') {
+      filter['pendingChanges.status'] = 'pending';
+    }
+    if (req.query.assignedTo) {
+      const assignedVal = String(req.query.assignedTo).trim();
+      const isObjId = mongoose.Types.ObjectId.isValid(assignedVal);
+      const assignedClause = [
+        { 'pendingChanges.assignedToName': new RegExp(`^${assignedVal}$`, 'i') },
+        { 'assignedToName': new RegExp(`^${assignedVal}$`, 'i') }
+      ];
+      if (isObjId) {
+        assignedClause.push({ 'pendingChanges.assignedTo': new mongoose.Types.ObjectId(assignedVal) });
+        assignedClause.push({ 'assignedTo': new mongoose.Types.ObjectId(assignedVal) });
+      }
+      if (filter.$or) {
+        filter = { $and: [filter, { $or: assignedClause }] };
+      } else {
+        filter.$or = assignedClause;
+      }
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
+    const skip = (page - 1) * limit;
+
+    // Run counts in parallel
+    const [total, publishedCount, inactiveCount, rejectedCount] = await Promise.all([
+      Property.countDocuments(filter),
+      Property.countDocuments({ ...filter, $or: [{ isLiveOnWebsite: true }, { status: 'active' }] }),
+      Property.countDocuments({ ...filter, status: 'inactive' }),
+      Property.countDocuments({ ...filter, status: 'blocked' })
+    ]);
+
+    const pendingCount = total - (publishedCount + inactiveCount + rejectedCount);
+
+    const { flattenListingImages } = require('../utils/propertyGallery');
+    const properties = await Property.find(filter)
+      .populate('owner', 'name phone email')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    // Sanitize property images array to strictly exclude live camera photos
+    const cleanedProperties = properties.map(p => {
+      const obj = p.toObject ? p.toObject() : { ...p };
+      const cleanImages = flattenListingImages(obj);
+      obj.images = cleanImages;
+      obj.featuredImage = cleanImages[0] || '';
+      return obj;
+    });
+
+    res.json({
+      success: true,
+      properties: cleanedProperties,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+      stats: {
+        published: publishedCount,
+        pending: Math.max(0, pendingCount),
+        inactive: inactiveCount,
+        rejected: rejectedCount
+      }
+    });
+  } catch (err) {
+    console.error("Get Properties Error:", err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 };
 
 // Update property with new fields (amenities, benefits, views)
@@ -415,7 +415,7 @@ exports.updateProperty = async (req, res) => {
     if (Object.prototype.hasOwnProperty.call(updateData, 'locationCode') || !updateData.locationCode) {
       updateData.locationCode = deriveLocationCode(updateData);
     }
-    
+
     // Auto-geocode if address changed and coordinates are not already provided
     if ((!updateData.latitude || !updateData.longitude) && updateData.address && updateData.address.trim()) {
       try {
@@ -426,7 +426,7 @@ exports.updateProperty = async (req, res) => {
         console.warn('Geocoding failed:', geoErr.message);
       }
     }
-    
+
     let property = await Property.findById(propId);
     if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
 
@@ -443,20 +443,20 @@ exports.updateProperty = async (req, res) => {
     // Must be the exact inverse of the sync guard, otherwise a synced property
     // gets deleted again in the same request.
     if (!isPropertyLive(property)) {
-        try {
-            await ApprovedProperty.deleteMany({
-                visitId: property.visitId || property._id.toString()
-            });
-            console.log(`Removed property ${property._id} from ApprovedProperty (Inactive or Not Live)`);
-        } catch (removeErr) {
-            console.warn('Failed to remove property from website listing:', removeErr);
-        }
+      try {
+        await ApprovedProperty.deleteMany({
+          visitId: property.visitId || property._id.toString()
+        });
+        console.log(`Removed property ${property._id} from ApprovedProperty (Inactive or Not Live)`);
+      } catch (removeErr) {
+        console.warn('Failed to remove property from website listing:', removeErr);
+      }
     }
-    
+
     // Clear API cache to reflect changes immediately
     clearCache('/api/approved-properties');
     clearCache('/api/properties');
-    
+
     res.json({ success: true, message: 'Property updated successfully', property });
   } catch (err) {
     console.error('Update Property Error:', err);
@@ -483,7 +483,7 @@ exports.ownerEditRequest = async (req, res) => {
     // edits — never trust the ownerLoginId in the request body for this,
     // it's only used below for the notification text.
     if (!PROPERTY_ADMIN_ROLES.has(req.user.role) &&
-        String(property.ownerLoginId || '').toUpperCase() !== String(req.user.loginId || '').toUpperCase()) {
+      String(property.ownerLoginId || '').toUpperCase() !== String(req.user.loginId || '').toUpperCase()) {
       return res.status(403).json({ success: false, message: 'You do not have permission to edit this property.' });
     }
 
@@ -640,201 +640,201 @@ exports.rejectOwnerChanges = async (req, res) => {
 
 // Publish property (Super Admin action)
 exports.publishProperty = async (req, res) => {
-    try {
-        const propId = req.params.id;
-        const property = await Property.findById(propId);
-        if (!property) return res.status(404).json({ message: 'Property not found' });
+  try {
+    const propId = req.params.id;
+    const property = await Property.findById(propId);
+    if (!property) return res.status(404).json({ message: 'Property not found' });
 
-        property.status = 'active';
-        property.isPublished = true;
-        property.isLiveOnWebsite = true;
-        await property.save();
+    property.status = 'active';
+    property.isPublished = true;
+    property.isLiveOnWebsite = true;
+    await property.save();
 
-        // Sync with ApprovedProperty collection for website visibility
-        await syncToApprovedProperty(property);
+    // Sync with ApprovedProperty collection for website visibility
+    await syncToApprovedProperty(property);
 
-        // Clear API cache to reflect changes immediately
-        clearCache('/api/approved-properties');
-        clearCache('/api/properties');
+    // Clear API cache to reflect changes immediately
+    clearCache('/api/approved-properties');
+    clearCache('/api/properties');
 
-        res.json({ success: true, message: 'Property published successfully', property });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
-    }
+    res.json({ success: true, message: 'Property published successfully', property });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 // Unpublish property (Super Admin action)
 exports.unpublishProperty = async (req, res) => {
+  try {
+    const propId = req.params.id;
+    const property = await Property.findById(propId);
+    if (!property) return res.status(404).json({ message: 'Property not found' });
+
+    property.isPublished = false;
+    property.isLiveOnWebsite = false;
+    await property.save();
+
+    // Remove from ApprovedProperty
     try {
-        const propId = req.params.id;
-        const property = await Property.findById(propId);
-        if (!property) return res.status(404).json({ message: 'Property not found' });
-
-        property.isPublished = false;
-        property.isLiveOnWebsite = false;
-        await property.save();
-
-        // Remove from ApprovedProperty
-        try {
-            await ApprovedProperty.deleteMany({
-                $or: [
-                    { visitId: property.visitId || property._id.toString() },
-                    { propertyId: property.propertyId || "" },
-                    { 'generatedCredentials.loginId': property.ownerLoginId || "" }
-                ]
-            });
-        } catch (syncErr) {
-            console.error('Removal from ApprovedProperty failed during unpublish:', syncErr);
-        }
-
-        // Clear API cache to reflect changes immediately
-        clearCache('/api/approved-properties');
-        clearCache('/api/properties');
-
-        res.json({ success: true, message: 'Property unpublished successfully' });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error' });
+      await ApprovedProperty.deleteMany({
+        $or: [
+          { visitId: property.visitId || property._id.toString() },
+          { propertyId: property.propertyId || "" },
+          { 'generatedCredentials.loginId': property.ownerLoginId || "" }
+        ]
+      });
+    } catch (syncErr) {
+      console.error('Removal from ApprovedProperty failed during unpublish:', syncErr);
     }
+
+    // Clear API cache to reflect changes immediately
+    clearCache('/api/approved-properties');
+    clearCache('/api/properties');
+
+    res.json({ success: true, message: 'Property unpublished successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 // Submit property enquiry (from list.html)
 exports.submitEnquiry = async (req, res) => {
-    try {
-        const enquiryData = req.body;
+  try {
+    const enquiryData = req.body;
 
-        // Find area manager based on city/locality
-        const city = enquiryData.city || enquiryData.locality;
-        let assignedManager = null;
+    // Find area manager based on city/locality
+    const city = enquiryData.city || enquiryData.locality;
+    let assignedManager = null;
 
-        if (city) {
-            // Try to find area manager by city or area code
-            assignedManager = await Employee.findOne({
-                role: 'areamanager',
-                $or: [
-                    { city: new RegExp(city, 'i') },
-                    { area: new RegExp(city, 'i') },
-                    { areaCode: new RegExp(city.substring(0, 2), 'i') },
-                    { locationCode: new RegExp(city.substring(0, 2), 'i') }
-                ],
-                isActive: true
-            });
-        }
-
-        // If no specific manager found, assign to first available area manager
-        if (!assignedManager) {
-            assignedManager = await Employee.findOne({
-                role: 'areamanager',
-                isActive: true
-            });
-        }
-
-        // Create the enquiry
-        const enquiry = new Enquiry({
-            ...enquiryData,
-            status: 'pending_review',
-            assignedTo: assignedManager ? assignedManager.loginId : null,
-            ts: Date.now()
-        });
-
-        await enquiry.save();
-
-        // Send notification to area manager if assigned
-        if (assignedManager) {
-            const notification = new Notification({
-                to: assignedManager.loginId,
-                from: 'SYSTEM',
-                type: 'property_enquiry',
-                title: 'New Property Enquiry',
-                message: `New property enquiry from ${enquiryData.owner_name || 'Unknown'} for ${enquiryData.property_name || 'Property'} in ${city || 'Unknown location'}`,
-                data: {
-                    enquiryId: enquiry._id,
-                    propertyName: enquiryData.property_name,
-                    ownerName: enquiryData.owner_name,
-                    city: city
-                },
-                read: false,
-                createdAt: new Date()
-            });
-
-            await notification.save();
-        }
-
-        res.json({
-            success: true,
-            message: 'Property enquiry submitted successfully',
-            enquiry: enquiry,
-            assignedTo: assignedManager ? `${assignedManager.name} (${assignedManager.loginId})` : 'No area manager found'
-        });
-
-    } catch (err) {
-        console.error('Submit Enquiry Error:', err);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to submit enquiry',
-            error: err.message
-        });
+    if (city) {
+      // Try to find area manager by city or area code
+      assignedManager = await Employee.findOne({
+        role: 'areamanager',
+        $or: [
+          { city: new RegExp(city, 'i') },
+          { area: new RegExp(city, 'i') },
+          { areaCode: new RegExp(city.substring(0, 2), 'i') },
+          { locationCode: new RegExp(city.substring(0, 2), 'i') }
+        ],
+        isActive: true
+      });
     }
+
+    // If no specific manager found, assign to first available area manager
+    if (!assignedManager) {
+      assignedManager = await Employee.findOne({
+        role: 'areamanager',
+        isActive: true
+      });
+    }
+
+    // Create the enquiry
+    const enquiry = new Enquiry({
+      ...enquiryData,
+      status: 'pending_review',
+      assignedTo: assignedManager ? assignedManager.loginId : null,
+      ts: Date.now()
+    });
+
+    await enquiry.save();
+
+    // Send notification to area manager if assigned
+    if (assignedManager) {
+      const notification = new Notification({
+        to: assignedManager.loginId,
+        from: 'SYSTEM',
+        type: 'property_enquiry',
+        title: 'New Property Enquiry',
+        message: `New property enquiry from ${enquiryData.owner_name || 'Unknown'} for ${enquiryData.property_name || 'Property'} in ${city || 'Unknown location'}`,
+        data: {
+          enquiryId: enquiry._id,
+          propertyName: enquiryData.property_name,
+          ownerName: enquiryData.owner_name,
+          city: city
+        },
+        read: false,
+        createdAt: new Date()
+      });
+
+      await notification.save();
+    }
+
+    res.json({
+      success: true,
+      message: 'Property enquiry submitted successfully',
+      enquiry: enquiry,
+      assignedTo: assignedManager ? `${assignedManager.name} (${assignedManager.loginId})` : 'No area manager found'
+    });
+
+  } catch (err) {
+    console.error('Submit Enquiry Error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit enquiry',
+      error: err.message
+    });
+  }
 };
 
 // Delete property
 exports.deleteProperty = async (req, res) => {
-    try {
-        const propId = req.params.id;
-        const property = await Property.findById(propId);
-        if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
+  try {
+    const propId = req.params.id;
+    const property = await Property.findById(propId);
+    if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
 
-        // Remove ALL instances from ApprovedProperty as well (to clear duplicates)
-        await ApprovedProperty.deleteMany({
-            $or: [
-                { visitId: property.visitId || property._id.toString() },
-                { propertyId: property.propertyId || "" },
-                { 'generatedCredentials.loginId': property.ownerLoginId || "" }
-            ]
-        });
+    // Remove ALL instances from ApprovedProperty as well (to clear duplicates)
+    await ApprovedProperty.deleteMany({
+      $or: [
+        { visitId: property.visitId || property._id.toString() },
+        { propertyId: property.propertyId || "" },
+        { 'generatedCredentials.loginId': property.ownerLoginId || "" }
+      ]
+    });
 
-        // 1. Soft delete all rooms belonging to this property
-        const Room = require('../models/Room');
-        await Room.updateMany({ property: propId }, { $set: { isDeleted: true } });
+    // 1. Soft delete all rooms belonging to this property
+    const Room = require('../models/Room');
+    await Room.updateMany({ property: propId }, { $set: { isDeleted: true } });
 
-        // 2. Mark all active/pending tenants in this property as checked out / inactive (Ex-Tenants) and soft-delete their credentials
-        const Tenant = require('../models/Tenant');
-        const User = require('../models/user');
-        
-        const propertyTenants = await Tenant.find({ property: propId });
-        for (const tenant of propertyTenants) {
-            // Soft delete user login credentials
-            if (tenant.user) {
-                await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
-            }
-            if (tenant.loginId) {
-                await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
-            }
-            
-            // Set status to inactive, set isDeleted, and clear active mongoose room ref
-            tenant.status = 'inactive';
-            tenant.isDeleted = true;
-            tenant.room = undefined;
-            await tenant.save();
-        }
+    // 2. Mark all active/pending tenants in this property as checked out / inactive (Ex-Tenants) and soft-delete their credentials
+    const Tenant = require('../models/Tenant');
+    const User = require('../models/user');
 
-        // Soft delete the property itself
-        property.isDeleted = true;
-        property.status = 'inactive';
-        property.isPublished = false;
-        property.isLiveOnWebsite = false;
-        await property.save();
+    const propertyTenants = await Tenant.find({ property: propId });
+    for (const tenant of propertyTenants) {
+      // Soft delete user login credentials
+      if (tenant.user) {
+        await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
+      }
+      if (tenant.loginId) {
+        await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
+      }
 
-        // Clear API cache to reflect changes immediately
-        clearCache('/api/approved-properties');
-        clearCache('/api/properties');
-
-        res.json({ success: true, message: 'Property deleted successfully' });
-    } catch (err) {
-        console.error('Delete Property Error:', err);
-        res.status(500).json({ success: false, message: 'Failed to delete property', error: err.message });
+      // Set status to inactive, set isDeleted, and clear active mongoose room ref
+      tenant.status = 'inactive';
+      tenant.isDeleted = true;
+      tenant.room = undefined;
+      await tenant.save();
     }
+
+    // Soft delete the property itself
+    property.isDeleted = true;
+    property.status = 'inactive';
+    property.isPublished = false;
+    property.isLiveOnWebsite = false;
+    await property.save();
+
+    // Clear API cache to reflect changes immediately
+    clearCache('/api/approved-properties');
+    clearCache('/api/properties');
+
+    res.json({ success: true, message: 'Property deleted successfully' });
+  } catch (err) {
+    console.error('Delete Property Error:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete property', error: err.message });
+  }
 };
 
 // Assign property verification task to employee
@@ -844,64 +844,64 @@ exports.syncToApprovedProperty = syncToApprovedProperty;
 exports.isPropertyLive = isPropertyLive;
 
 exports.assignPropertyVerification = async (req, res) => {
-    try {
-        const propId = req.params.id;
-        const { employeeId, employeeName } = req.body;
-        const property = await Property.findById(propId);
-        if (!property) {
-            return res.status(404).json({ success: false, message: "Property not found" });
-        }
-
-        // Auto-assign to employee of same city/area if no employee specified
-        let assignedEmployeeId = employeeId;
-        let assignedEmployeeName = employeeName;
-
-        if (!assignedEmployeeId) {
-            // Find employee matching property's city/area
-            const propertyCity = property.city || property.locationCode || '';
-            const propertyArea = property.locality || property.area || '';
-            
-            const matchingEmployee = await Employee.findOne({
-                isActive: true,
-                isDeleted: false,
-                $or: [
-                    { city: propertyCity },
-                    { locationCode: propertyCity },
-                    { area: propertyArea },
-                    { areaCode: propertyArea }
-                ]
-            });
-
-            if (matchingEmployee) {
-                assignedEmployeeId = matchingEmployee._id;
-                assignedEmployeeName = matchingEmployee.name;
-            } else {
-                // No employee found for this area
-                return res.json({ 
-                    success: false, 
-                    message: "No employee of that area, you can assign",
-                    autoAssignFailed: true,
-                    property 
-                });
-            }
-        }
-        
-        // If it's a new property pending approval (status === 'pending_approval')
-        if (property.status === 'pending_approval') {
-            property.assignedTo = assignedEmployeeId;
-            property.assignedToName = assignedEmployeeName;
-        } else if (property.pendingChanges && property.pendingChanges.status === 'pending') {
-            // If it's an edit request
-            property.pendingChanges.assignedTo = assignedEmployeeId;
-            property.pendingChanges.assignedToName = assignedEmployeeName;
-        } else {
-            return res.status(400).json({ success: false, message: "Property has no pending creation or edit request to assign" });
-        }
-
-        await property.save();
-        res.json({ success: true, message: `Property verification assigned to ${assignedEmployeeName}`, property });
-    } catch (err) {
-        console.error("Error assigning property verification:", err);
-        res.status(500).json({ success: false, message: err.message });
+  try {
+    const propId = req.params.id;
+    const { employeeId, employeeName } = req.body;
+    const property = await Property.findById(propId);
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
     }
+
+    // Auto-assign to employee of same city/area if no employee specified
+    let assignedEmployeeId = employeeId;
+    let assignedEmployeeName = employeeName;
+
+    if (!assignedEmployeeId) {
+      // Find employee matching property's city/area
+      const propertyCity = property.city || property.locationCode || '';
+      const propertyArea = property.locality || property.area || '';
+
+      const matchingEmployee = await Employee.findOne({
+        isActive: true,
+        isDeleted: false,
+        $or: [
+          { city: propertyCity },
+          { locationCode: propertyCity },
+          { area: propertyArea },
+          { areaCode: propertyArea }
+        ]
+      });
+
+      if (matchingEmployee) {
+        assignedEmployeeId = matchingEmployee._id;
+        assignedEmployeeName = matchingEmployee.name;
+      } else {
+        // No employee found for this area
+        return res.json({
+          success: false,
+          message: "No employee of that area, you can assign",
+          autoAssignFailed: true,
+          property
+        });
+      }
+    }
+
+    // If it's a new property pending approval (status === 'pending_approval')
+    if (property.status === 'pending_approval') {
+      property.assignedTo = assignedEmployeeId;
+      property.assignedToName = assignedEmployeeName;
+    } else if (property.pendingChanges && property.pendingChanges.status === 'pending') {
+      // If it's an edit request
+      property.pendingChanges.assignedTo = assignedEmployeeId;
+      property.pendingChanges.assignedToName = assignedEmployeeName;
+    } else {
+      return res.status(400).json({ success: false, message: "Property has no pending creation or edit request to assign" });
+    }
+
+    await property.save();
+    res.json({ success: true, message: `Property verification assigned to ${assignedEmployeeName}`, property });
+  } catch (err) {
+    console.error("Error assigning property verification:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
 };

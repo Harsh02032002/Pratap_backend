@@ -62,7 +62,7 @@ async function sendEmail(to, subject, html) {
 exports.forgotPasswordRequestOTP = async (req, res) => {
     try {
         const { email } = req.body;
-        
+
         if (!email) {
             return res.status(400).json({ message: 'Email is required' });
         }
@@ -89,11 +89,11 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         // If not found in User collection, check AreaManager collection
         if (!user) {
             try {
-                user = await AreaManager.findOne({ 
+                user = await AreaManager.findOne({
                     email: email.toLowerCase(),
                     isActive: true
                 });
-                
+
                 if (user) {
                     console.log('[ForgotPassword] Found user in AreaManager collection:', user.email);
                 }
@@ -105,11 +105,11 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         // If not found, check Employee collection
         if (!user) {
             try {
-                user = await Employee.findOne({ 
+                user = await Employee.findOne({
                     email: email.toLowerCase(),
                     isActive: true
                 });
-                
+
                 if (user) {
                     console.log('[ForgotPassword] Found user in Employee collection:', user.email);
                 }
@@ -177,8 +177,8 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         }
 
         // Always return success (email may fail in development)
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: 'OTP sent to your email and WhatsApp. Please check your inbox and spam folder.',
             // In development mode, return OTP for testing
             ...(process.env.NODE_ENV === 'development' && { demo_otp: otp })
@@ -233,8 +233,8 @@ exports.forgotPasswordVerifyOTP = async (req, res) => {
         // Clear OTP after successful verification
         otpStore.delete(email);
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: 'OTP verified successfully',
             token: resetToken
         });
@@ -342,8 +342,8 @@ exports.forgotPasswordReset = async (req, res) => {
 
         await sendEmail(email, 'RoomHy - Password Reset Successful', confirmHtml);
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: 'Password reset successful. You can now login with your new password.',
             redirect: '/website/index'
         });
@@ -720,24 +720,24 @@ exports.login = async (req, res) => {
     try {
         const { identifier, password } = req.body; // identifier = email, loginId, or phone
         const normalizedIdentifier = String(identifier || '').trim();
-        
+
         // Determine identifier type
         const isEmail = normalizedIdentifier.includes('@');
         const cleanDigits = normalizedIdentifier.replace(/\D/g, '');
         const phone10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : '';
         const isPhone = phone10.length === 10;
         const isLoginId = /^roomhy/i.test(normalizedIdentifier) || /^\d{3,6}$/.test(normalizedIdentifier);
-        
+
         if (!normalizedIdentifier || !password) return res.status(400).json({ message: 'Missing credentials' });
-        
+
         // Build comprehensive query based on identifier - use precise matching to avoid wrong user login
         let user = null;
-        
+
         console.log(`[LOGIN DEBUG] Attempting login with identifier: ${normalizedIdentifier}, isEmail: ${isEmail}, isPhone: ${isPhone} (${phone10}), isLoginId: ${isLoginId}`);
-        
+
         if (isEmail) {
-            // If identifier is email, search by email (case-insensitive + trimmed)
-            user = await User.findOne({ email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') });
+            // If identifier is email, search by email
+            user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
         } else if (isPhone) {
             // If identifier is phone, search all common stored formats, then
             // guard against legacy duplicate phone numbers (pre-unique-index
@@ -766,7 +766,7 @@ exports.login = async (req, res) => {
             // Fallback: try all fields
             user = await User.findOne({ loginId: normalizedIdentifier.toUpperCase() });
             if (!user) user = await User.findOne({ loginId: normalizedIdentifier.toLowerCase() });
-            if (!user) user = await User.findOne({ email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') });
+            if (!user) user = await User.findOne({ email: normalizedIdentifier.toLowerCase() });
             if (!user) {
                 user = await User.findOne({
                     $or: [
@@ -782,7 +782,7 @@ exports.login = async (req, res) => {
         // Fallback for Tenants: Search Tenant collection directly by loginId, email, or phone
         if (!user) {
             const tenantOr = [
-                { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') }
+                { email: normalizedIdentifier.toLowerCase() }
             ];
             if (isPhone && phone10) {
                 tenantOr.push(
@@ -833,9 +833,7 @@ exports.login = async (req, res) => {
                 { loginId: `ROOMHY${normalizedIdentifier}` },
                 { loginId: new RegExp(`${normalizedIdentifier}$`, 'i') },
                 { loginId: normalizedIdentifier.toLowerCase() },
-                { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
-                { 'profile.email': new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
-                { checkinEmail: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') }
+                { email: normalizedIdentifier.toLowerCase() }
             ];
             if (isPhone && phone10) {
                 ownerOr.push(
@@ -881,7 +879,7 @@ exports.login = async (req, res) => {
         if (!user) {
             const kycUser = await KYCVerification.findOne({
                 $or: [
-                    { email: new RegExp(`^${normalizedIdentifier.trim()}$`, 'i') },
+                    { email: normalizedIdentifier.toLowerCase() },
                     { phone: normalizedIdentifier },
                     { loginId: normalizedIdentifier.toLowerCase() },
                     { loginId: normalizedIdentifier.toUpperCase() }
@@ -908,7 +906,7 @@ exports.login = async (req, res) => {
                 }
             }
         }
-        
+
         let isMatch = false;
 
         if (user) {
@@ -916,7 +914,7 @@ exports.login = async (req, res) => {
             const isDemoAccount = user.loginId === 'ROOMHY0000';
             if (isDemoAccount && user.isActive === false) {
                 // Auto-heal demo account in background
-                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active', requirePasswordReset: false } }).catch(() => {});
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active', requirePasswordReset: false } }).catch(() => { });
                 user.isActive = true;
                 user.status = 'active';
             }
@@ -925,7 +923,7 @@ exports.login = async (req, res) => {
             if (user.role === 'owner' && user.isActive === false) {
                 user.isActive = true;
                 user.status = 'active';
-                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => { });
             }
 
             // Ex-tenant lockout. Must run BEFORE the auto-heal below, which
@@ -955,7 +953,7 @@ exports.login = async (req, res) => {
             if (user.role === 'tenant' && user.isActive === false) {
                 user.isActive = true;
                 user.status = 'active';
-                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => {});
+                User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => { });
             }
 
             if (!isDemoAccount && user.role !== 'owner' && user.role !== 'tenant' && user.isActive === false) {
@@ -999,12 +997,12 @@ exports.login = async (req, res) => {
 
             // Owners can login using email, loginId, or phone
             isMatch = await user.matchPassword(password);
-            
+
             // Plain-text password fallback for legacy records or Owner credentials
             if (!isMatch && user.password && String(user.password) === String(password)) {
                 isMatch = true;
                 user.password = password; // Will be re-hashed by pre-save hook
-                await user.save().catch(() => {});
+                await user.save().catch(() => { });
             }
 
             let ownerDocForPass = null;
@@ -1015,7 +1013,7 @@ exports.login = async (req, res) => {
                     if (ownerPass && String(ownerPass).trim() === String(password).trim()) {
                         isMatch = true;
                         user.password = password;
-                        await user.save().catch(() => {});
+                        await user.save().catch(() => { });
                     }
                 }
             }
@@ -1056,7 +1054,7 @@ exports.login = async (req, res) => {
                     return res.status(403).json({ message: 'Your owner account KYC is pending. Please complete KYC using the link sent to your email.' });
                 }
             }
-            
+
             if (isMatch) {
                 // Check if Owner model or User model requires reset
                 let reqReset = user.requirePasswordReset || false;
@@ -1109,7 +1107,7 @@ exports.login = async (req, res) => {
             if (areaManager) {
                 if (areaManager.isActive === false) return res.status(403).json({ message: 'Account disabled' });
                 isMatch = (areaManager.password === password);
-                
+
                 if (isMatch) {
                     user = {
                         _id: areaManager._id,
@@ -1126,7 +1124,7 @@ exports.login = async (req, res) => {
                 if (employee) {
                     if (employee.isActive === false) return res.status(403).json({ message: 'Account disabled' });
                     isMatch = (employee.password === password);
-                    
+
                     if (isMatch) {
                         if (employee.requirePasswordReset) {
                             return res.status(200).json({
@@ -1154,7 +1152,6 @@ exports.login = async (req, res) => {
 
         // Guard: if no user found or password didn't match, return 401
         if (!user || !isMatch) {
-            console.log(`[LOGIN DEBUG] ❌ Login failed for ${normalizedIdentifier}: userFound=${Boolean(user)}, isMatch=${isMatch}`);
             return res.status(401).json({ message: 'Invalid credentials' });
         }
 
@@ -1173,15 +1170,15 @@ exports.login = async (req, res) => {
                     user.assignedProperties = empRecord.assignedProperties || [];
                     user.assignedOwners = empRecord.assignedOwners || [];
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
 
         const token = generateToken(user);
-        res.json({ 
-            token, 
-            user: { 
-                id: user._id || user.id, 
-                name: user.name, 
+        res.json({
+            token,
+            user: {
+                id: user._id || user.id,
+                name: user.name,
                 email: user.email,
                 phone: user.phone,
                 role: user.role,
@@ -1191,7 +1188,7 @@ exports.login = async (req, res) => {
                 restrictedModules: user.restrictedModules || [],
                 assignedProperties: user.assignedProperties || [],
                 assignedOwners: user.assignedOwners || []
-            } 
+            }
         });
     } catch (err) {
         console.error(err);
@@ -1203,7 +1200,7 @@ exports.login = async (req, res) => {
 exports.me = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ message: 'Not authorized' });
-        
+
         let permissions = req.user.permissions || [];
         let restrictedModules = req.user.restrictedModules || [];
         let assignedProperties = [];
@@ -1224,7 +1221,7 @@ exports.me = async (req, res) => {
                     assignedProperties = empRecord.assignedProperties || [];
                     assignedOwners = empRecord.assignedOwners || [];
                 }
-            } catch (e) {}
+            } catch (e) { }
         }
 
         res.json({
@@ -1400,8 +1397,8 @@ exports.verifyTenantTemp = async (req, res) => {
             await user.save();
         }
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: 'Verified',
             tenant: {
                 id: tenant ? tenant._id : null,
@@ -1453,10 +1450,10 @@ exports.setTenantPassword = async (req, res) => {
 
         // Auto-login: return JWT on successful password set
         const token = generateToken(user);
-        res.json({ 
-            success: true, 
-            token, 
-            user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, loginId: user.loginId } 
+        res.json({
+            success: true,
+            token,
+            user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, loginId: user.loginId }
         });
     } catch (err) {
         console.error('setTenantPassword error', err);

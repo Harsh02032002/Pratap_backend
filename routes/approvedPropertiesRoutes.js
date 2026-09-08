@@ -11,103 +11,103 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Haversine distance formula (km)
 function getDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-    Math.cos((lat2 * Math.PI) / 180) *
-    Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 // Fetch colleges using bounding box - GROUPED BY CITY with rate limiting
 async function fetchCollegesBBox(properties) {
-  console.log(`🔍 Processing ${properties.length} properties for coordinates`);
-  
-  const cityGroups = {};
-  properties.forEach(p => {
-    const city = p.city || 'unknown';
-    if (!cityGroups[city]) cityGroups[city] = [];
-    cityGroups[city].push(p);
-  });
-  
-  const cities = Object.entries(cityGroups);
-  console.log(`📍 Found ${cities.length} cities:`, cities.map(([city]) => city));
-  
-  // Process cities with 5 second delay between each to avoid rate limits
-  const allColleges = [];
-  for (let i = 0; i < cities.length; i++) {
-    const [city, cityProps] = cities[i];
-    console.log(`\n🏙️ [${i + 1}/${cities.length}] Processing ${city} (${cityProps.length} properties)`);
-    
-    // Wait 5 seconds between cities (except first one)
-    if (i > 0) {
-      console.log(`⏳ Waiting 5 seconds before next API call...`);
-      await new Promise(resolve => setTimeout(resolve, 5000));
+    console.log(`🔍 Processing ${properties.length} properties for coordinates`);
+
+    const cityGroups = {};
+    properties.forEach(p => {
+        const city = p.city || 'unknown';
+        if (!cityGroups[city]) cityGroups[city] = [];
+        cityGroups[city].push(p);
+    });
+
+    const cities = Object.entries(cityGroups);
+    console.log(`📍 Found ${cities.length} cities:`, cities.map(([city]) => city));
+
+    // Process cities with 5 second delay between each to avoid rate limits
+    const allColleges = [];
+    for (let i = 0; i < cities.length; i++) {
+        const [city, cityProps] = cities[i];
+        console.log(`\n🏙️ [${i + 1}/${cities.length}] Processing ${city} (${cityProps.length} properties)`);
+
+        // Wait 5 seconds between cities (except first one)
+        if (i > 0) {
+            console.log(`⏳ Waiting 5 seconds before next API call...`);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+
+        try {
+            const cityColleges = await fetchCollegesForCity(cityProps, city);
+            allColleges.push(...cityColleges);
+        } catch (error) {
+            console.error(`❌ Failed to fetch colleges for ${city}:`, error.message);
+            // Continue with other cities even if one fails
+        }
     }
-    
-    try {
-      const cityColleges = await fetchCollegesForCity(cityProps, city);
-      allColleges.push(...cityColleges);
-    } catch (error) {
-      console.error(`❌ Failed to fetch colleges for ${city}:`, error.message);
-      // Continue with other cities even if one fails
+
+    // Remove duplicates
+    const uniqueColleges = [];
+    const seen = new Set();
+    for (const college of allColleges) {
+        const key = `${college.name}-${college.lat}-${college.lon}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniqueColleges.push(college);
+        }
     }
-  }
-  
-  // Remove duplicates
-  const uniqueColleges = [];
-  const seen = new Set();
-  for (const college of allColleges) {
-    const key = `${college.name}-${college.lat}-${college.lon}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueColleges.push(college);
-    }
-  }
-  
-  console.log(`\n✅ Total unique colleges fetched: ${uniqueColleges.length}`);
-  return uniqueColleges;
+
+    console.log(`\n✅ Total unique colleges fetched: ${uniqueColleges.length}`);
+    return uniqueColleges;
 }
 
 // Fetch colleges for a single city
 async function fetchCollegesForCity(properties, cityName, retryCount = 0) {
-  const MAX_RETRIES = 2;
-  
-  const coords = properties
-    .map(p => {
-      const lat = p.propertyInfo?.location?.coordinates?.[1] || p.propertyInfo?.latitude;
-      const lng = p.propertyInfo?.location?.coordinates?.[0] || p.propertyInfo?.longitude;
-      return lat && lng ? { lat, lng } : null;
-    })
-    .filter(Boolean);
+    const MAX_RETRIES = 2;
 
-  if (coords.length === 0) {
-    console.log(`⚠️ No coordinates for ${cityName}`);
-    return [];
-  }
+    const coords = properties
+        .map(p => {
+            const lat = p.propertyInfo?.location?.coordinates?.[1] || p.propertyInfo?.latitude;
+            const lng = p.propertyInfo?.location?.coordinates?.[0] || p.propertyInfo?.longitude;
+            return lat && lng ? { lat, lng } : null;
+        })
+        .filter(Boolean);
 
-  const lats = coords.map(c => c.lat);
-  const lngs = coords.map(c => c.lng);
-  const south = Math.min(...lats);
-  const north = Math.max(...lats);
-  const west = Math.min(...lngs);
-  const east = Math.max(...lngs);
+    if (coords.length === 0) {
+        console.log(`⚠️ No coordinates for ${cityName}`);
+        return [];
+    }
 
-  const padding = 0.03;
-  const bbox = `${south - padding},${west - padding},${north + padding},${east + padding}`;
-  const timeout = Math.min(30 + (properties.length * 10), 60);
+    const lats = coords.map(c => c.lat);
+    const lngs = coords.map(c => c.lng);
+    const south = Math.min(...lats);
+    const north = Math.max(...lats);
+    const west = Math.min(...lngs);
+    const east = Math.max(...lngs);
 
-  const cacheKey = `${cityName}-${bbox}`;
-  const cached = overpassCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log(`📋 Using cached data for ${cityName}`);
-    return cached.data;
-  }
+    const padding = 0.03;
+    const bbox = `${south - padding},${west - padding},${north + padding},${east + padding}`;
+    const timeout = Math.min(30 + (properties.length * 10), 60);
 
-  const query = `
+    const cacheKey = `${cityName}-${bbox}`;
+    const cached = overpassCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        console.log(`📋 Using cached data for ${cityName}`);
+        return cached.data;
+    }
+
+    const query = `
     [out:json][timeout:${timeout}];
     (
       node["amenity"="college"](${bbox});
@@ -118,98 +118,98 @@ async function fetchCollegesForCity(properties, cityName, retryCount = 0) {
     out center tags;
   `;
 
-  try {
-    if (retryCount > 0) {
-      console.log(`🔄 Retry ${retryCount} for ${cityName}...`);
-    }
-    
-    console.log(`🌍 Fetching colleges for ${cityName} (timeout: ${timeout}s), bbox: ${bbox}`);
-    
-    const response = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(query),
-    });
+    try {
+        if (retryCount > 0) {
+            console.log(`🔄 Retry ${retryCount} for ${cityName}...`);
+        }
 
-    if (!response.ok) {
-      if (response.status === 504 && retryCount < MAX_RETRIES) {
-        console.warn(`⚠️ Timeout for ${cityName}, waiting 10s before retry...`);
-        await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10s
-        return fetchCollegesForCity(properties, cityName, retryCount + 1);
-      }
-      if (response.status === 429) {
-        console.warn(`⚠️ Rate limit for ${cityName}, waiting 15s...`);
-        await new Promise(resolve => setTimeout(resolve, 15000)); // Wait 15s
-        if (retryCount < MAX_RETRIES) {
-          return fetchCollegesForCity(properties, cityName, retryCount + 1);
+        console.log(`🌍 Fetching colleges for ${cityName} (timeout: ${timeout}s), bbox: ${bbox}`);
+
+        const response = await fetch('https://overpass-api.de/api/interpreter', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'data=' + encodeURIComponent(query),
+        });
+
+        if (!response.ok) {
+            if (response.status === 504 && retryCount < MAX_RETRIES) {
+                console.warn(`⚠️ Timeout for ${cityName}, waiting 10s before retry...`);
+                await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10s
+                return fetchCollegesForCity(properties, cityName, retryCount + 1);
+            }
+            if (response.status === 429) {
+                console.warn(`⚠️ Rate limit for ${cityName}, waiting 15s...`);
+                await new Promise(resolve => setTimeout(resolve, 15000)); // Wait 15s
+                if (retryCount < MAX_RETRIES) {
+                    return fetchCollegesForCity(properties, cityName, retryCount + 1);
+                }
+                return [];
+            }
+            throw new Error(`Overpass API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        const colleges = data.elements
+            .filter(el => el.tags?.name)
+            .map(el => {
+                const lat = el.lat ?? el.center?.lat;
+                const lon = el.lon ?? el.center?.lon;
+                return {
+                    name: el.tags.name,
+                    lat,
+                    lon,
+                    type: el.tags.amenity,
+                };
+            })
+            .filter(c => c.lat && c.lon);
+
+        overpassCache.set(cacheKey, {
+            data: colleges,
+            timestamp: Date.now(),
+        });
+
+        console.log(`✅ Fetched ${colleges.length} colleges for ${cityName}`);
+        return colleges;
+
+    } catch (error) {
+        console.error(`❌ Error fetching colleges for ${cityName}:`, error.message);
+        if (retryCount < MAX_RETRIES && (error.message.includes('504') || error.message.includes('429'))) {
+            console.log(`🔄 Retrying ${cityName} after error...`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            return fetchCollegesForCity(properties, cityName, retryCount + 1);
         }
         return [];
-      }
-      throw new Error(`Overpass API error: ${response.status}`);
     }
-
-    const data = await response.json();
-    
-    const colleges = data.elements
-      .filter(el => el.tags?.name)
-      .map(el => {
-        const lat = el.lat ?? el.center?.lat;
-        const lon = el.lon ?? el.center?.lon;
-        return {
-          name: el.tags.name,
-          lat,
-          lon,
-          type: el.tags.amenity,
-        };
-      })
-      .filter(c => c.lat && c.lon);
-
-    overpassCache.set(cacheKey, {
-      data: colleges,
-      timestamp: Date.now(),
-    });
-
-    console.log(`✅ Fetched ${colleges.length} colleges for ${cityName}`);
-    return colleges;
-
-  } catch (error) {
-    console.error(`❌ Error fetching colleges for ${cityName}:`, error.message);
-    if (retryCount < MAX_RETRIES && (error.message.includes('504') || error.message.includes('429'))) {
-      console.log(`🔄 Retrying ${cityName} after error...`);
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      return fetchCollegesForCity(properties, cityName, retryCount + 1);
-    }
-    return [];
-  }
 }
 
 // Assign nearby colleges to properties
 function assignNearbyColleges(properties, colleges) {
-  return properties.map(property => {
-    const propLat = property.propertyInfo?.location?.coordinates?.[1] || property.propertyInfo?.latitude;
-    const propLng = property.propertyInfo?.location?.coordinates?.[0] || property.propertyInfo?.longitude;
+    return properties.map(property => {
+        const propLat = property.propertyInfo?.location?.coordinates?.[1] || property.propertyInfo?.latitude;
+        const propLng = property.propertyInfo?.location?.coordinates?.[0] || property.propertyInfo?.longitude;
 
-    if (!propLat || !propLng || colleges.length === 0) {
-      return { ...property, nearbyColleges: [] };
-    }
+        if (!propLat || !propLng || colleges.length === 0) {
+            return { ...property, nearbyColleges: [] };
+        }
 
-    const nearbyColleges = colleges
-      .map(college => ({
-        ...college,
-        distance: getDistance(propLat, propLng, college.lat, college.lon),
-      }))
-      .filter(c => c.distance <= 2.0)
-      .sort((a, b) => a.distance - b.distance)
-      .slice(0, 5)
-      .map(c => ({
-        name: c.name,
-        lat: c.lat,
-        lon: c.lon,
-        distance: Math.round(c.distance * 100) / 100,
-      }));
+        const nearbyColleges = colleges
+            .map(college => ({
+                ...college,
+                distance: getDistance(propLat, propLng, college.lat, college.lon),
+            }))
+            .filter(c => c.distance <= 2.0)
+            .sort((a, b) => a.distance - b.distance)
+            .slice(0, 5)
+            .map(c => ({
+                name: c.name,
+                lat: c.lat,
+                lon: c.lon,
+                distance: Math.round(c.distance * 100) / 100,
+            }));
 
-    return { ...property, nearbyColleges };
-  });
+        return { ...property, nearbyColleges };
+    });
 }
 
 // Setup credentials endpoint
@@ -397,7 +397,7 @@ router.get('/all', applyEmployeeScope, async (req, res) => {
 
         // Get total count first
         const totalCount = await ApprovedProperty.countDocuments(filter);
-        
+
         const properties = await ApprovedProperty.find(filter).sort({ approvedAt: -1 });
 
         console.log('✅ [approved-properties/all] Found', properties.length, 'approved properties (Total:', totalCount + ')');
@@ -443,15 +443,15 @@ router.get('/city/:city', async (req, res) => {
 
         console.log('🔍 [approved-properties/city] Fetching properties for city:', city);
 
-        
+
 
         // Get total count for this city
         const totalCount = await ApprovedProperty.countDocuments({
             'propertyInfo.city': city,
             isLiveOnWebsite: true
         });
-        
-        const properties = await ApprovedProperty.find({ 
+
+        const properties = await ApprovedProperty.find({
             status: { $in: ['approved', 'live'] },
             isLiveOnWebsite: true
         }).sort({ approvedAt: -1 });
@@ -504,29 +504,29 @@ router.get('/public/approved', async (req, res) => {
             isLiveOnWebsite: { $ne: false },
             status: { $in: ['approved', 'live', 'active', 'Approved', 'Live', 'Active'] }
         })
-        .select({
-            reuploadRequests: 0,
-            'generatedCredentials.tempPassword': 0,
-            'propertyInfo.ownerGmail': 0,
-            'propertyInfo.ownerPhone': 0,
-            'propertyInfo.ownerEmail': 0,
-            contact: 0,
-            state: 0,
-            pincode: 0,
-            bannerPhoto: 0,
-            websiteBannerPhoto: 0,
-            views: 0,
-            clicks: 0,
-            createdAt: 0,
-            submittedAt: 0,
-            propertyViews: 0,
-            roomTypes: 0,
-            facilities: 0,
-            pricing: 0,
-            policies: 0,
-            description: 0,
-        })
-        .sort({ approvedAt: -1 });
+            .select({
+                reuploadRequests: 0,
+                'generatedCredentials.tempPassword': 0,
+                'propertyInfo.ownerGmail': 0,
+                'propertyInfo.ownerPhone': 0,
+                'propertyInfo.ownerEmail': 0,
+                contact: 0,
+                state: 0,
+                pincode: 0,
+                bannerPhoto: 0,
+                websiteBannerPhoto: 0,
+                views: 0,
+                clicks: 0,
+                createdAt: 0,
+                submittedAt: 0,
+                propertyViews: 0,
+                roomTypes: 0,
+                facilities: 0,
+                pricing: 0,
+                policies: 0,
+                description: 0,
+            })
+            .sort({ approvedAt: -1 });
 
         if (!rawProperties || rawProperties.length === 0) {
             const Property = require('../models/Property');
@@ -548,7 +548,7 @@ router.get('/public/approved', async (req, res) => {
             const key = p.visitId || p.propertyId || p._id.toString();
             if (!uniqueMap.has(key)) uniqueMap.set(key, p);
         });
-        
+
         const properties = Array.from(uniqueMap.values());
 
 
@@ -562,64 +562,64 @@ router.get('/public/approved', async (req, res) => {
         // Transform to match ourproperty.html expectations
 
         const transformedProperties = properties.map(prop => {
-          const propInfo = prop.propertyInfo || {};
-          // city: use stored field, then area as fallback (city is rarely stored directly)
-          const city = prop.city || propInfo.city || propInfo.area || '';
+            const propInfo = prop.propertyInfo || {};
+            // city: use stored field, then area as fallback (city is rarely stored directly)
+            const city = prop.city || propInfo.city || propInfo.area || '';
 
-          // Filter out base64-encoded images — these are data bugs that bloat the payload by 300–800 KB per property
-          const rawImages = prop.images?.length > 0 ? prop.images : (propInfo.photos || []);
-          const images = rawImages.filter(img => img && typeof img === 'string' && !img.startsWith('data:'));
-          // strip photos from propInfo to avoid sending them a second time inside the nested object
-          const { photos: _photos, ownerGmail: _g, ownerPhone: _ph, ownerEmail: _em, ...safeInfo } = propInfo;
+            // Filter out base64-encoded images — these are data bugs that bloat the payload by 300–800 KB per property
+            const rawImages = prop.images?.length > 0 ? prop.images : (propInfo.photos || []);
+            const images = rawImages.filter(img => img && typeof img === 'string' && !img.startsWith('data:'));
+            // strip photos from propInfo to avoid sending them a second time inside the nested object
+            const { photos: _photos, ownerGmail: _g, ownerPhone: _ph, ownerEmail: _em, ...safeInfo } = propInfo;
 
-          const reviewsCount = prop.reviewsCount || (Array.isArray(prop.reviews) ? prop.reviews.length : 0);
-          return {
-            _id: prop._id,
-            visitId: prop.visitId,
-            propertyId: prop.propertyId || prop.visitId,
-            enquiry_id: prop.enquiry_id || prop.visitId,
-            property_name: propInfo.name || 'Property',
-            property_type: propInfo.propertyType || '',
-            tier: prop.tier || '',
-            propertyCategory: prop.propertyCategory || '',
-            locality: propInfo.area || '',
-            city,
-            rent: propInfo.rent || 0,
-            monthlyRent: prop.monthlyRent || propInfo.rent || 0,
-            featuredImage: prop.featuredImage || images[0] || '',
-            images,
-            professionalPhotos: prop.professionalPhotos || [],
-            isVerified: true,
-            rating: reviewsCount > 0 ? (prop.rating || propInfo.rating || 0) : 0,
-            reviewsCount,
-            propertyInfo: safeInfo,
-            amenities: Array.isArray(prop.amenities) ? prop.amenities : (Array.isArray(propInfo.amenities) ? propInfo.amenities : []),
-            propertyDetails: prop.propertyDetails || {},
-            tenantDescription: prop.tenantDescription || '',
-            videoUrl: prop.videoUrl || '',
-            gender: prop.gender || propInfo.genderSuitability || 'Co-ed',
-            status: prop.status,
-            isLiveOnWebsite: prop.isLiveOnWebsite,
-            approvedAt: prop.approvedAt,
-            ownerLoginId: prop.generatedCredentials?.loginId || '',
-            createdBy: prop.generatedCredentials?.loginId || '',
-            nearbyColleges: prop.nearbyColleges || [],
-            highlights: prop.highlights || [],
-            benefits: prop.benefits || [],
-            offers: prop.offers || [],
-            nearbyPlaces: prop.nearbyPlaces || [],
-            ratingBreakdown: prop.ratingBreakdown || {},
-            exclusiveBenefits: prop.exclusiveBenefits || [],
-            latitude: prop.latitude || null,
-            longitude: prop.longitude || null
-          };
+            const reviewsCount = prop.reviewsCount || (Array.isArray(prop.reviews) ? prop.reviews.length : 0);
+            return {
+                _id: prop._id,
+                visitId: prop.visitId,
+                propertyId: prop.propertyId || prop.visitId,
+                enquiry_id: prop.enquiry_id || prop.visitId,
+                property_name: propInfo.name || 'Property',
+                property_type: propInfo.propertyType || '',
+                tier: prop.tier || '',
+                propertyCategory: prop.propertyCategory || '',
+                locality: propInfo.area || '',
+                city,
+                rent: propInfo.rent || 0,
+                monthlyRent: prop.monthlyRent || propInfo.rent || 0,
+                featuredImage: prop.featuredImage || images[0] || '',
+                images,
+                professionalPhotos: prop.professionalPhotos || [],
+                isVerified: true,
+                rating: reviewsCount > 0 ? (prop.rating || propInfo.rating || 0) : 0,
+                reviewsCount,
+                propertyInfo: safeInfo,
+                amenities: Array.isArray(prop.amenities) ? prop.amenities : (Array.isArray(propInfo.amenities) ? propInfo.amenities : []),
+                propertyDetails: prop.propertyDetails || {},
+                tenantDescription: prop.tenantDescription || '',
+                videoUrl: prop.videoUrl || '',
+                gender: prop.gender || propInfo.genderSuitability || 'Co-ed',
+                status: prop.status,
+                isLiveOnWebsite: prop.isLiveOnWebsite,
+                approvedAt: prop.approvedAt,
+                ownerLoginId: prop.generatedCredentials?.loginId || '',
+                createdBy: prop.generatedCredentials?.loginId || '',
+                nearbyColleges: prop.nearbyColleges || [],
+                highlights: prop.highlights || [],
+                benefits: prop.benefits || [],
+                offers: prop.offers || [],
+                nearbyPlaces: prop.nearbyPlaces || [],
+                ratingBreakdown: prop.ratingBreakdown || {},
+                exclusiveBenefits: prop.exclusiveBenefits || [],
+                latitude: prop.latitude || null,
+                longitude: prop.longitude || null
+            };
         });
 
         // Trigger non-blocking slow background fetching for properties missing cached colleges
         try {
-          collegesQueue.enqueueProperties(properties);
+            collegesQueue.enqueueProperties(properties);
         } catch (qErr) {
-          console.warn('⚠️ Could not enqueue properties for college fetching:', qErr.message);
+            console.warn('⚠️ Could not enqueue properties for college fetching:', qErr.message);
         }
 
         // Return proper response with count, total, and pagination info
@@ -704,11 +704,11 @@ router.get('/approved/all', applyEmployeeScope, async (req, res) => {
 router.get('/colleges/all', async (req, res) => {
     try {
         console.log('🎓 [approved-properties/colleges/all] Fetching colleges...');
-        
+
         const properties = await ApprovedProperty.find({
             status: { $in: ['approved', 'live'] }
         }).sort({ approvedAt: -1 });
-        
+
         const transformedProperties = properties.map(prop => {
             const rawProp = prop.toObject ? prop.toObject() : prop;
             return {
@@ -722,24 +722,24 @@ router.get('/colleges/all', async (req, res) => {
                 }
             };
         });
-        
+
         const colleges = await fetchCollegesBBox(transformedProperties);
         const enrichedProperties = assignNearbyColleges(transformedProperties, colleges);
-        
+
         const collegesMap = enrichedProperties.map(p => ({
             propertyId: p._id,
             propertyName: p.property_name,
             city: p.city,
             nearbyColleges: p.nearbyColleges
         }));
-        
+
         res.status(200).json({
             success: true,
             count: collegesMap.length,
             colleges: collegesMap,
             allColleges: [...new Set(colleges.map(c => c.name))].sort()
         });
-        
+
     } catch (error) {
         console.error('❌ Error:', error.message);
         res.status(500).json({

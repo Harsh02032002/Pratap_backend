@@ -1185,24 +1185,30 @@ exports.approveBooking = async (req, res) => {
                     const pairKey = [String(chat.ownerRoomId).toUpperCase(), String(chat.userRoomId)].sort().join(':').toUpperCase();
                     const ownerRoomId = String(chat.ownerRoomId || '').toUpperCase();
                     const userRoomId = String(chat.userRoomId || '').toLowerCase();
-                    const existingWelcome = await ChatMessage.exists({
-                        conversation_id: pairKey,
-                        message: welcomeMsg
-                    });
-                    if (!existingWelcome) {
-                        await ChatMessage.create({
-                            room_id: userRoomId,
-                            sender_login_id: ownerRoomId,
-                            sender_name: ownerName,
-                            sender_role: 'property_owner',
+                    const messageSpecs = [
+                        { room_id: userRoomId, sender_login_id: ownerRoomId, sender_name: ownerName, sender_role: 'property_owner' },
+                        { room_id: ownerRoomId, sender_login_id: userRoomId, sender_name: tenantName, sender_role: 'website_user' }
+                    ];
+
+                    for (const spec of messageSpecs) {
+                        const existingWelcome = await ChatMessage.exists({
+                            room_id: spec.room_id,
                             conversation_id: pairKey,
-                            message: welcomeMsg,
-                            message_type: 'text',
-                            created_at: new Date(),
-                            updated_at: new Date()
+                            sender_login_id: spec.sender_login_id,
+                            message: welcomeMsg
                         });
+                        if (!existingWelcome) {
+                            await ChatMessage.create({
+                                ...spec,
+                                conversation_id: pairKey,
+                                message: welcomeMsg,
+                                message_type: 'text',
+                                created_at: new Date(),
+                                updated_at: new Date()
+                            });
+                        }
                     }
-                    console.log('✅ Automated chat welcome message ensured for chat room');
+                    console.log('✅ Automated chat welcome messages ensured for owner & tenant rooms');
                 } catch (chatMsgErr) {
                     console.error('⚠️ Failed to send automated welcome chat message:', chatMsgErr.message);
                 }
