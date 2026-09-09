@@ -1316,6 +1316,15 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
     }
 
     // ── POST-COMMIT EMAIL DISPATCH ─────────────────────────────────────
+    // Guard: credentialResult may be null if both transaction and fallback failed
+    if (!credentialResult) {
+        console.error(`[ONBOARDING EMAIL] credentialResult is null for ${loginId} — skipping emails, marking failed`);
+        if (updatedTenant) {
+            await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed', receiptEmailStatus: 'failed' } }).catch(() => {});
+        }
+        return false;
+    }
+
     const { loginId: credLoginId, tempPassword } = credentialResult;
 
     console.log(`[ONBOARDING EMAIL] Starting email dispatch for ${updatedTenant.loginId}`);
@@ -1333,10 +1342,12 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
         await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed' } });
     }
 
-    // Email 2: Receipt (to tenant + owner)
+    // Email 2: Receipt / Invoice (to tenant)
     try {
         const rent = rentRecordId ? await Rent.findById(rentRecordId).lean() : null;
-        if (rent && rent.tenantLoginId !== loginId) {
+
+        // Case-insensitive mismatch check — loginIds can be UPPER or lower in different DB fields
+        if (rent && String(rent.tenantLoginId).toUpperCase() !== String(loginId).toUpperCase()) {
             console.error(`[ONBOARDING RECEIPT] Rent/tenant mismatch! rent.tenantLoginId=${rent.tenantLoginId}, expected=${loginId}`);
             throw new Error('Rent-tenant ownership mismatch cross-leakage prevented');
         }
@@ -1347,17 +1358,16 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
             propertyName: updatedTenant.propertyTitle,
             roomNo: updatedTenant.roomNo,
             amount: rent?.rentAmount || updatedTenant.agreedRent,
-            paidAmount: rent?.paidAmount || updatedTenant.agreedRent,
-            paymentMethod: rent?.paymentMethod || 'Razorpay / Cash',
+            paidAmount: rent?.paidAmount || rent?.rentAmount || updatedTenant.agreedRent,
+            paymentMethod: (rent?.paymentMethod === 'cashfree' || rent?.paymentMethod === 'online') ? 'Online (Cashfree)' : (rent?.paymentMethod || 'Online'),
             period: rent?.collectionMonth || new Date().toISOString().slice(0, 7)
         };
 
         await sendReceiptEmail(updatedTenant.email, receiptDetails);
-
         await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { receiptEmailStatus: 'sent' } });
-        console.log(`[ONBOARDING EMAIL] Receipt sent to tenant=${updatedTenant.email}`);
+        console.log(`[ONBOARDING EMAIL] ✓ Receipt/Invoice sent to tenant=${updatedTenant.email}`);
     } catch (receiptEmailErr) {
-        console.error(`[ONBOARDING EMAIL] Receipt FAILED for ${updatedTenant.email}:`, receiptEmailErr.message);
+        console.error(`[ONBOARDING EMAIL] ✗ Receipt FAILED for ${updatedTenant.email}:`, receiptEmailErr.message);
         await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { receiptEmailStatus: 'failed' } });
     }
 
