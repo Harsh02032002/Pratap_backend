@@ -67,7 +67,8 @@ function createMockSandboxOrder({ orderId, amount, currency = 'INR', customerInf
   const timestamp = Date.now();
   const mockCfOrderId = `cf_sb_ord_${timestamp}_${Math.random().toString(36).substring(2, 7)}`;
   const mockPaymentSessionId = `session_sb_mock_${timestamp}_${Math.random().toString(36).substring(2, 9)}`;
-  const returnUrl = meta.return_url || `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/gateway?order_id=${orderId}&rent_id=${orderId}&amount=${amount}`;
+  const tenantBase = (process.env.APP_BASE_URL || process.env.APP_URL || process.env.WEB_APP_URL || 'http://localhost:5173').replace(/\/$/, '');
+  const returnUrl = meta.return_url || `${tenantBase}/payment/gateway?order_id=${orderId}&rent_id=${orderId}&amount=${amount}`;
 
   console.log(`[CashfreePayment] ⚡ Generated Mock Sandbox Order: ${mockCfOrderId} | ₹${amount}`);
 

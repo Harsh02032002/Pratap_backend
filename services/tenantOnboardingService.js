@@ -30,7 +30,9 @@ function resolvePaymentAppBase(frontendOrigin) {
             }
         } catch (_) { /* ignore invalid/untrusted origin */ }
     }
-    let appBase = process.env.FRONTEND_URL || TENANT_APP_DEFAULT;
+    // Always use TENANT_APP_DEFAULT (app.roomhy.com) for payment links —
+    // NOT FRONTEND_URL which points to admin panel / KYC domain.
+    let appBase = TENANT_APP_DEFAULT;
     if (appBase.endsWith('/')) appBase = appBase.slice(0, -1);
     return appBase;
 }

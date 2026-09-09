@@ -198,8 +198,10 @@ exports.createOrder = async (req, res) => {
     const shortId = bookingId.slice(0, 20); // Use first 20 chars of bookingId
     const orderId = `RMH_${shortId}_${timestamp}`;
 
-    // Build return URL — include rent context for post-payment verification
-    const returnBaseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    // Build return URL — always point to tenant app domain (app.roomhy.com),
+    // NOT FRONTEND_URL which is the admin/KYC domain (admin.roomhy.com).
+    const tenantAppBase = process.env.APP_BASE_URL || process.env.APP_URL || process.env.WEB_APP_URL || 'https://app.roomhy.com';
+    const returnBaseUrl = (tenantAppBase || '').replace(/\/$/, '');
     const returnUrl = `${returnBaseUrl}/payment/gateway?token=${requestedBookingId}&order_id=${orderId}&rent_id=${bookingId}&amount=${amount}`;
 
     const orderResult = await cfPay.createOrder({
