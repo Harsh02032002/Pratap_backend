@@ -347,134 +347,132 @@ exports.completeTenantAgreementAndNotify = async (loginId, { requestId = '', pro
     const tenantLoginUrl = `${APP_URL}/tenant/tenantlogin`;
     let loginEmailSent = false;
 
-    // Generate PDF once — used for Cloudinary storage + both emails
-    let agreementPdfBuffer = null;
-    try {
-        agreementPdfBuffer = await generateTenantAgreementPdfBuffer(tenant, record);
-    } catch (pdfErr) {
-        console.error('[TENANT AGREEMENT COMPLETE] PDF generation error:', pdfErr.message);
-    }
-
-    // Upload signed agreement PDF to Cloudinary for persistent access
-    if (agreementPdfBuffer) {
+    // Async background task for PDF generation, Cloudinary upload, Email attachments, and WhatsApp
+    (async () => {
         try {
-            const base64Data = agreementPdfBuffer.toString('base64');
-            const uploadResult = await cloudinary.uploader.upload(
-                `data:application/pdf;base64,${base64Data}`,
-                {
-                    folder: 'roomhy/agreements',
-                    resource_type: 'raw',
-                    public_id: `agreement-${normalizedLoginId}`,
-                    overwrite: true,
-                    use_filename: false
-                }
-            );
-            tenant.digitalCheckin.agreement = {
-                ...(tenant.digitalCheckin.agreement || {}),
-                pdfUrl: uploadResult.secure_url,
-                pdfUploadedAt: new Date()
-            };
-            await tenant.save();
-        } catch (uploadErr) {
-            console.error('[TENANT AGREEMENT COMPLETE] Cloudinary PDF upload error:', uploadErr.message);
-        }
-    }
+            let agreementPdfBuffer = null;
+            try {
+                agreementPdfBuffer = await generateTenantAgreementPdfBuffer(tenant, record);
+            } catch (pdfErr) {
+                console.error('[TENANT AGREEMENT COMPLETE] PDF generation error:', pdfErr.message);
+            }
 
-    // Phase 6.5 Fix: DO NOT send tenant login credentials here!
-    // Credentials are strictly gated behind finalizeOnboardingPayment (post-payment).
-    // BUT the signed agreement PDF copy MUST still go to the tenant.
-    if (tenant.email && agreementPdfBuffer) {
-        try {
-            await sendMail(
-                tenant.email,
-                `Your Signed Agreement — ${tenant.propertyTitle || 'RoomHy Property'}`,
-                `Hi ${tenant.name || 'Tenant'}, your signed agreement is attached. Please retain this for your records.`,
-                buildOwnerTenantSignedEmail(tenant.name || 'Tenant', tenant),
-                {
-                    attachments: [
+            if (agreementPdfBuffer) {
+                try {
+                    const base64Data = agreementPdfBuffer.toString('base64');
+                    const uploadResult = await cloudinary.uploader.upload(
+                        `data:application/pdf;base64,${base64Data}`,
                         {
-                            filename: `RoomHy-Tenant-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
-                            content: agreementPdfBuffer,
-                            contentType: 'application/pdf'
+                            folder: 'roomhy/agreements',
+                            resource_type: 'raw',
+                            public_id: `agreement-${normalizedLoginId}`,
+                            overwrite: true,
+                            use_filename: false
                         }
-                    ]
+                    );
+                    tenant.digitalCheckin.agreement = {
+                        ...(tenant.digitalCheckin.agreement || {}),
+                        pdfUrl: uploadResult.secure_url,
+                        pdfUploadedAt: new Date()
+                    };
+                    await tenant.save();
+                } catch (uploadErr) {
+                    console.error('[TENANT AGREEMENT COMPLETE] Cloudinary PDF upload error:', uploadErr.message);
                 }
-            );
-            console.log(`[TENANT AGREEMENT COMPLETE] Agreement PDF emailed to tenant ${tenant.email} for ${normalizedLoginId}.`);
-        } catch (tenantEmailErr) {
-            console.error(`[TENANT AGREEMENT COMPLETE] Tenant agreement email error:`, tenantEmailErr.message);
-        }
-    }
+            }
 
-    // Send signed agreement PDF copy to owner
-    try {
-        const ownerLoginId = tenant.ownerLoginId ? String(tenant.ownerLoginId).toUpperCase() : null;
-        if (ownerLoginId) {
-            const ownerDoc = await Owner.findOne({ loginId: ownerLoginId });
-            if (ownerDoc && ownerDoc.email) {
-                const ownerPdfBuffer = agreementPdfBuffer || await generateTenantAgreementPdfBuffer(tenant, record);
-                const ownerName = ownerDoc.name || ownerDoc.profile?.name || 'Owner';
-                await sendMail(
-                    ownerDoc.email,
-                    `Tenant Agreement Signed — ${tenant.propertyTitle || 'RoomHy Property'}`,
-                    `Your tenant ${tenant.name || normalizedLoginId} has signed their agreement. Please find the signed agreement PDF attached.`,
-                    buildOwnerTenantSignedEmail(ownerName, tenant),
-                    {
-                        attachments: [
+            if (tenant.email && agreementPdfBuffer) {
+                try {
+                    await sendMail(
+                        tenant.email,
+                        `Your Signed Agreement — ${tenant.propertyTitle || 'RoomHy Property'}`,
+                        `Hi ${tenant.name || 'Tenant'}, your signed agreement is attached. Please retain this for your records.`,
+                        buildOwnerTenantSignedEmail(tenant.name || 'Tenant', tenant),
+                        {
+                            attachments: [
+                                {
+                                    filename: `RoomHy-Tenant-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
+                                    content: agreementPdfBuffer,
+                                    contentType: 'application/pdf'
+                                }
+                            ]
+                        }
+                    );
+                    console.log(`[TENANT AGREEMENT COMPLETE] Agreement PDF emailed to tenant ${tenant.email} for ${normalizedLoginId}.`);
+                } catch (tenantEmailErr) {
+                    console.error(`[TENANT AGREEMENT COMPLETE] Tenant agreement email error:`, tenantEmailErr.message);
+                }
+            }
+
+            try {
+                const ownerLoginId = tenant.ownerLoginId ? String(tenant.ownerLoginId).toUpperCase() : null;
+                if (ownerLoginId) {
+                    const ownerDoc = await Owner.findOne({ loginId: ownerLoginId });
+                    if (ownerDoc && ownerDoc.email) {
+                        const ownerPdfBuffer = agreementPdfBuffer || await generateTenantAgreementPdfBuffer(tenant, record);
+                        const ownerName = ownerDoc.name || ownerDoc.profile?.name || 'Owner';
+                        await sendMail(
+                            ownerDoc.email,
+                            `Tenant Agreement Signed — ${tenant.propertyTitle || 'RoomHy Property'}`,
+                            `Your tenant ${tenant.name || normalizedLoginId} has signed their agreement. Please find the signed agreement PDF attached.`,
+                            buildOwnerTenantSignedEmail(ownerName, tenant),
                             {
-                                filename: `RoomHy-Tenant-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
-                                content: ownerPdfBuffer,
-                                contentType: 'application/pdf'
+                                attachments: [
+                                    {
+                                        filename: `RoomHy-Tenant-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
+                                        content: ownerPdfBuffer,
+                                        contentType: 'application/pdf'
+                                    }
+                                ]
                             }
-                        ]
+                        );
                     }
-                );
-            }
-        }
-    } catch (ownerEmailErr) {
-        console.error('[TENANT AGREEMENT COMPLETE] Owner email send error:', ownerEmailErr.message);
-    }
-
-    // WhatsApp: notify tenant of completion
-    const aadhaarPhone = tenant.kyc?.aadhaarLinkedPhone || tenant.digitalCheckin?.kyc?.aadhaarLinkedPhone || tenant.phone || '';
-    try {
-        await sendTemplateToResolvedUser({
-            phone: aadhaarPhone,
-            email: tenant.email || '',
-            userId: tenant.loginId || '',
-            templateName: 'roomhy_tenant_checkin_complete',
-            options: {
-                namedParams: {
-                    tenant_name: tenant.name || 'Tenant',
-                    login_id: tenant.loginId || '',
-                    login_url: tenantLoginUrl
                 }
+            } catch (ownerEmailErr) {
+                console.error('[TENANT AGREEMENT COMPLETE] Owner email send error:', ownerEmailErr.message);
             }
-        });
-    } catch (whatsAppErr) {
-        console.error('[TENANT AGREEMENT COMPLETE] WhatsApp send error:', whatsAppErr.message);
-    }
 
-    // WhatsApp: send agreement PDF document
-    try {
-        await sendDocumentToResolvedUser({
-            phone: aadhaarPhone,
-            email: tenant.email || '',
-            userId: tenant.loginId || '',
-            link: `${BACKEND_URL}/api/checkin/tenant/agreement/pdf/${encodeURIComponent(normalizedLoginId)}`,
-            filename: `RoomHy-Licence-Subscription-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
-            caption: [
-                'RoomHy Licence & Subscription Agreement',
-                `Tenant: ${tenant.name || normalizedLoginId}`,
-                tenant.propertyTitle ? `Property: ${tenant.propertyTitle}` : '',
-                tenant.roomNo ? `Room: ${tenant.roomNo}` : '',
-                `Login ID: ${tenant.loginId || normalizedLoginId}`,
-                'Please retain this document for your records.'
-            ].filter(Boolean).join('\n')
-        });
-    } catch (whatsAppDocErr) {
-        console.error('[TENANT AGREEMENT COMPLETE] WhatsApp PDF send error:', whatsAppDocErr.message);
-    }
+            const aadhaarPhone = tenant.kyc?.aadhaarLinkedPhone || tenant.digitalCheckin?.kyc?.aadhaarLinkedPhone || tenant.phone || '';
+            try {
+                await sendTemplateToResolvedUser({
+                    phone: aadhaarPhone,
+                    email: tenant.email || '',
+                    userId: tenant.loginId || '',
+                    templateName: 'roomhy_tenant_checkin_complete',
+                    options: {
+                        namedParams: {
+                            tenant_name: tenant.name || 'Tenant',
+                            login_id: tenant.loginId || '',
+                            login_url: tenantLoginUrl
+                        }
+                    }
+                });
+            } catch (whatsAppErr) {
+                console.error('[TENANT AGREEMENT COMPLETE] WhatsApp send error:', whatsAppErr.message);
+            }
+
+            try {
+                await sendDocumentToResolvedUser({
+                    phone: aadhaarPhone,
+                    email: tenant.email || '',
+                    userId: tenant.loginId || '',
+                    link: `${BACKEND_URL}/api/checkin/tenant/agreement/pdf/${encodeURIComponent(normalizedLoginId)}`,
+                    filename: `RoomHy-Licence-Subscription-Agreement-${tenant.loginId || normalizedLoginId}.pdf`,
+                    caption: [
+                        'RoomHy Licence & Subscription Agreement',
+                        `Tenant: ${tenant.name || normalizedLoginId}`,
+                        tenant.propertyTitle ? `Property: ${tenant.propertyTitle}` : '',
+                        tenant.roomNo ? `Room: ${tenant.roomNo}` : '',
+                        'Status: Signed ✓'
+                    ].filter(Boolean).join('\n')
+                });
+            } catch (whatsAppDocErr) {
+                console.warn('[TENANT AGREEMENT COMPLETE] WhatsApp document send error:', whatsAppDocErr.message);
+            }
+        } catch (bgErr) {
+            console.error('[TENANT AGREEMENT COMPLETE] Background task error:', bgErr.message);
+        }
+    })();
 
     return { record, tenant, dashboardUrl, tenantLoginUrl, loginEmailSent, paymentUrl: tenant._paymentUrl || null };
 };

@@ -2646,7 +2646,11 @@ exports.verifyPaymentPageIdentity = async (req, res) => {
       tenantName,
       rentAmount: rent.totalDue || rent.rentAmount,
       advanceAmount: rent.advanceChargeAmount || 0,
-      rentId: rent._id
+      rentId: rent._id,
+      bookingId: rent._id,
+      _id: rent._id,
+      loginId: decoded.loginId,
+      tenantId: rent.tenantId
     });
   } catch (err) {
     console.error('[verifyPaymentPageIdentity] Error:', err);

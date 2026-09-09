@@ -220,6 +220,7 @@ const DEADLINE_EXEMPT_PREFIXES = [
   // because the rest of that router is ordinary bounded reads and writes.
   '/api/checkin/owner/documents',
   '/api/checkin/tenant/documents',
+  '/api/checkin/tenant/agreement',
   '/api/cashfree',
   '/api/payment',
   '/api/payments',

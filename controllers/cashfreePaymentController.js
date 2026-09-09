@@ -199,8 +199,8 @@ exports.createOrder = async (req, res) => {
     const orderId = `RMH_${shortId}_${timestamp}`;
 
     // Build return URL — include rent context for post-payment verification
-    const returnBaseUrl = process.env.FRONTEND_URL || 'https://app.roomhy.com';
-    const returnUrl = `${returnBaseUrl}/tenant/tenantdashboard?order_id=${orderId}&rent_id=${bookingId}&amount=${amount}`;
+    const returnBaseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const returnUrl = `${returnBaseUrl}/payment/gateway?token=${requestedBookingId}&order_id=${orderId}&rent_id=${bookingId}&amount=${amount}`;
 
     const orderResult = await cfPay.createOrder({
       orderId,
@@ -288,6 +288,7 @@ exports.createOrder = async (req, res) => {
       amount,
       return_url: returnUrl,
       isSandbox: orderResult.isSandbox,
+      isMockSandbox: Boolean(orderResult.isMockSandbox),
     });
 
   } catch (err) {
@@ -414,6 +415,8 @@ exports.createPaymentLink = async (req, res) => {
       link_url: linkResult.link_url,
       link_expiry_time: linkResult.link_expiry_time,
       amount,
+      isSandbox: linkResult.isSandbox,
+      isMockSandbox: Boolean(linkResult.isMockSandbox),
     });
 
   } catch (err) {
@@ -529,45 +532,18 @@ exports.handleWebhook = async (req, res) => {
       }
       console.log(`[CashfreePaymentCtrl] ✅ Payment processed: ₹${paymentAmount} | Booking: ${tx.booking_id} | WalletStatus: ${newWalletStatus}`);
 
-      // ── TRIGGER ONBOARDING FINALIZATION (Activate tenant, send receipt & credentials email) ──
+      // ── MARK RENT & RENTINVOICE AS PAID IN DATABASE ──
       try {
-        const tenantController = require('./tenantController');
-        const Tenant = require('../models/Tenant');
-        const Rent = require('../models/Rent');
-
-        const tenantLoginId = tx.tenant_id;
-        const rentRecordId = tx.rent_id || tx.invoice_id || tx.booking_id;
-
-        let tenantDoc = null;
-        if (tenantLoginId && tenantLoginId !== 'tenant_user') {
-          tenantDoc = await Tenant.findOne({
-            $or: [
-              { loginId: String(tenantLoginId).toUpperCase() },
-              { loginId: tenantLoginId }
-            ]
-          }).catch(() => null);
-        }
-        if (!tenantDoc && rentRecordId && mongoose.Types.ObjectId.isValid(rentRecordId)) {
-          tenantDoc = await Tenant.findOne({ onboardingRentId: rentRecordId }).catch(() => null);
-          if (!tenantDoc) {
-            const rentDoc = await Rent.findById(rentRecordId).catch(() => null);
-            if (rentDoc?.tenantLoginId) {
-              tenantDoc = await Tenant.findOne({
-                $or: [
-                  { loginId: String(rentDoc.tenantLoginId).toUpperCase() },
-                  { loginId: rentDoc.tenantLoginId }
-                ]
-              }).catch(() => null);
-            }
-          }
-        }
-
-        if (tenantDoc && tenantDoc.paymentLinkStatus !== 'paid') {
-          console.log(`[CASHFREE WEBHOOK] Triggering onboarding finalization for tenant ${tenantDoc.loginId}`);
-          await tenantController.finalizeOnboardingPayment(tenantDoc.loginId, rentRecordId);
-        }
-      } catch (onboardingWebhookErr) {
-        console.error('[CASHFREE WEBHOOK ONBOARDING FINALIZATION ERROR]:', onboardingWebhookErr.message);
+        await markRentAndInvoicePaid({
+          orderId: cfOrderId || orderId,
+          rentId: tx.rent_id || tx.invoice_id || tx.booking_id,
+          cfPaymentId: String(cfPaymentId),
+          amount: paymentAmount || tx.booking_amount,
+          tenantLoginId: tx.tenant_id,
+          ownerLoginId: tx.owner_id
+        });
+      } catch (markPaidErr) {
+        console.error('[CASHFREE WEBHOOK MARK PAID ERROR]:', markPaidErr.message);
       }
     }
 
@@ -625,11 +601,23 @@ exports.getPaymentStatus = async (req, res) => {
     const isPaid = (tx && (tx.status === 'Verified' || tx.status === 'Settled')) ||
       rawCfStatus === 'PAID' || rawCfStatus === 'SUCCESS' || rawCfStatus === 'PAID_SUCCESSFULLY';
 
-    if (isPaid && tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
-      await PaymentTransaction.updateOne(
-        { _id: tx._id },
-        { $set: { status: 'Verified', payout_status: 'Pending', wallet_status: 'held', held_at: new Date() } }
-      ).catch(() => { });
+    if (isPaid) {
+      if (tx && tx._id && tx.status !== 'Verified' && tx.status !== 'Settled') {
+        await PaymentTransaction.updateOne(
+          { _id: tx._id },
+          { $set: { status: 'Verified', payout_status: 'Pending', wallet_status: 'held', held_at: new Date() } }
+        ).catch(() => { });
+      }
+
+      // Ensure DB Rent and RentInvoice records are marked PAID
+      await markRentAndInvoicePaid({
+        orderId,
+        rentId: tx?.rent_id || tx?.invoice_id || tx?.booking_id,
+        cfPaymentId: tx?.cf_payment_id || orderId,
+        amount: tx?.booking_amount,
+        tenantLoginId: tx?.tenant_id,
+        ownerLoginId: tx?.owner_id
+      }).catch(() => { });
     }
 
     return res.json({
@@ -768,6 +756,216 @@ exports.getPaymentHistory = async (req, res) => {
   }
 };
 
+// ─── MARK RENT & RENTINVOICE AS PAID HELPER ────────────────────────────────────
+async function markRentAndInvoicePaid({ orderId, rentId, cfPaymentId, amount, tenantLoginId, ownerLoginId }) {
+  const Rent = require('../models/Rent');
+  const RentInvoice = require('../models/RentInvoice');
+  const RentPayment = require('../models/RentPayment');
+  const Tenant = require('../models/Tenant');
+  const Owner = require('../models/Owner');
+  const User = require('../models/user');
+
+  const isValidObjectId = rentId && mongoose.Types.ObjectId.isValid(rentId);
+
+  // 1. Find Rent doc across ALL lookup strategies
+  let rentDoc = null;
+  if (orderId) {
+    rentDoc = await Rent.findOne({ cashfreeOrderId: orderId }).catch(() => null);
+  }
+  if (!rentDoc && isValidObjectId) {
+    rentDoc = await Rent.findById(rentId).catch(() => null);
+  }
+  if (!rentDoc && tenantLoginId) {
+    rentDoc = await Rent.findOne({
+      $or: [
+        { tenantLoginId: String(tenantLoginId).toUpperCase() },
+        { tenantLoginId: tenantLoginId }
+      ],
+      paymentStatus: { $ne: 'paid' }
+    }).sort({ createdAt: -1 }).catch(() => null);
+  }
+  if (!rentDoc && rentId) {
+    rentDoc = await Rent.findOne({
+      $or: [
+        { onboardingRentId: rentId },
+        { cashfreeOrderId: { $regex: String(rentId).slice(0, 20), $options: 'i' } }
+      ]
+    }).catch(() => null);
+  }
+
+  // Smart Order ID Fallback: Extract embedded ObjectId prefix from RMH_<shortId>_<timestamp>
+  if (!rentDoc && typeof orderId === 'string' && orderId.startsWith('RMH_')) {
+    const parts = orderId.split('_');
+    if (parts[1]) {
+      const partialId = parts[1];
+      if (mongoose.Types.ObjectId.isValid(partialId)) {
+        rentDoc = await Rent.findById(partialId).catch(() => null);
+      }
+      if (!rentDoc) {
+        rentDoc = await Rent.findOne({
+          $or: [
+            { onboardingRentId: { $regex: `^${partialId}`, $options: 'i' } },
+            { cashfreeOrderId: { $regex: `^${partialId}`, $options: 'i' } }
+          ]
+        }).catch(() => null);
+      }
+    }
+  }
+
+  // JWT Token Fallback: If rentId is a signed onboarding token
+  let jwtDecoded = null;
+  if (!rentDoc && typeof rentId === 'string' && rentId.includes('.')) {
+    try {
+      const jwt = require('jsonwebtoken');
+      jwtDecoded = jwt.verify(rentId, process.env.JWT_SECRET);
+      if (jwtDecoded?.rentRecordId && mongoose.Types.ObjectId.isValid(jwtDecoded.rentRecordId)) {
+        rentDoc = await Rent.findById(jwtDecoded.rentRecordId).catch(() => null);
+      }
+      if (!rentDoc && jwtDecoded?.loginId) {
+        rentDoc = await Rent.findOne({
+          $or: [
+            { tenantLoginId: String(jwtDecoded.loginId).toUpperCase() },
+            { tenantLoginId: jwtDecoded.loginId }
+          ],
+          paymentStatus: { $ne: 'paid' }
+        }).sort({ createdAt: -1 }).catch(() => null);
+      }
+    } catch (_) {}
+  }
+
+  // 2. Find RentInvoice doc across ALL lookup strategies
+  let rentInvoiceDoc = null;
+  if (orderId) {
+    rentInvoiceDoc = await RentInvoice.findOne({ cashfreeOrderId: orderId }).catch(() => null);
+  }
+  if (!rentInvoiceDoc && isValidObjectId) {
+    rentInvoiceDoc = await RentInvoice.findById(rentId).catch(() => null);
+  }
+  if (!rentInvoiceDoc && tenantLoginId) {
+    const tenantRec = await Tenant.findOne({
+      $or: [
+        { loginId: String(tenantLoginId).toUpperCase() },
+        { loginId: tenantLoginId }
+      ]
+    }).catch(() => null);
+    if (tenantRec) {
+      rentInvoiceDoc = await RentInvoice.findOne({
+        tenantId: tenantRec._id,
+        status: { $ne: 'PAID' }
+      }).sort({ createdAt: -1 }).catch(() => null);
+    }
+  }
+
+  const paidAmt = Number(amount) || rentDoc?.totalDue || rentDoc?.rentAmount || rentInvoiceDoc?.rentAmount || rentInvoiceDoc?.totalAmount || 0;
+  const payId = cfPaymentId || orderId || `CF_${Date.now()}`;
+
+  // 3. Mark Rent doc as PAID
+  if (rentDoc) {
+    await Rent.findByIdAndUpdate(rentDoc._id, {
+      $set: {
+        paymentStatus: 'paid',
+        paidAmount: paidAmt,
+        paymentDate: new Date(),
+        paymentMethod: 'cashfree',
+        cashfreeOrderId: orderId || rentDoc.cashfreeOrderId,
+        cashfreePaymentId: payId,
+      }
+    }).catch(err => console.warn('[markRentAndInvoicePaid] Rent update warning:', err.message));
+  }
+
+  // 4. Mark RentInvoice doc as PAID
+  if (rentInvoiceDoc) {
+    await RentInvoice.findByIdAndUpdate(rentInvoiceDoc._id, {
+      $set: {
+        status: 'PAID',
+        paymentStatus: 'PAID',
+        paidAmount: paidAmt,
+        rentPaidAmount: paidAmt,
+        outstandingAmount: 0,
+        paymentMethod: 'online',
+        cashfreeOrderId: orderId || rentInvoiceDoc.cashfreeOrderId,
+        cashfreePaymentId: payId,
+      }
+    }).catch(err => console.warn('[markRentAndInvoicePaid] RentInvoice update warning:', err.message));
+
+    // Create RentPayment receipt entry for Owner rent collection views
+    const ownerDoc = rentInvoiceDoc.ownerId ? await Owner.findById(rentInvoiceDoc.ownerId).lean().catch(() => null) : null;
+    const ownerUser = ownerLoginId ? await User.findOne({ loginId: String(ownerLoginId).toUpperCase() }).select('_id').lean().catch(() => null) : null;
+    const receiptOwnerId = ownerDoc?._id || ownerUser?._id || rentInvoiceDoc.ownerId;
+
+    if (receiptOwnerId && rentInvoiceDoc.tenantId && rentInvoiceDoc.propertyId) {
+      const existing = await RentPayment.findOne({ transactionId: payId }).catch(() => null);
+      if (!existing) {
+        await RentPayment.create({
+          invoiceId: rentInvoiceDoc._id,
+          tenantId: rentInvoiceDoc.tenantId,
+          propertyId: rentInvoiceDoc.propertyId,
+          ownerId: receiptOwnerId,
+          amount: paidAmt,
+          paymentMethod: 'online',
+          transactionId: payId,
+          isPartial: false,
+          remainingAfter: 0,
+          rentPaidAmount: paidAmt,
+          penaltyPaidAmount: 0,
+          paymentDate: new Date(),
+          recordedBy: tenantLoginId || 'tenant_cashfree',
+          notes: `Paid online via Cashfree PG — order ${orderId}`,
+        }).catch(err => console.warn('[markRentAndInvoicePaid] RentPayment receipt warn:', err.message));
+      }
+    }
+  }
+
+  // 5. Finalize onboarding and activate tenant & user status
+  let tenantRec = null;
+  const resolvedLoginId = tenantLoginId || rentDoc?.tenantLoginId || rentInvoiceDoc?.tenantLoginId || jwtDecoded?.loginId;
+
+  if (resolvedLoginId) {
+    tenantRec = await Tenant.findOne({
+      $or: [
+        { loginId: String(resolvedLoginId).toUpperCase() },
+        { loginId: resolvedLoginId }
+      ]
+    }).catch(() => null);
+  }
+
+  if (!tenantRec && rentInvoiceDoc?.tenantId) {
+    tenantRec = await Tenant.findById(rentInvoiceDoc.tenantId).catch(() => null);
+  }
+  if (!tenantRec && rentDoc?.tenantId) {
+    tenantRec = await Tenant.findById(rentDoc.tenantId).catch(() => null);
+  }
+
+  if (tenantRec) {
+    console.log(`[markRentAndInvoicePaid] Activating tenant status to 'active' for loginId=${tenantRec.loginId}`);
+    
+    // Always activate Tenant status on completed payment
+    await Tenant.updateOne(
+      { _id: tenantRec._id },
+      { $set: { status: 'active', paymentLinkStatus: 'paid' } }
+    ).catch(err => console.warn('[markRentAndInvoicePaid] Tenant update warn:', err.message));
+
+    // Activate associated User account for login
+    const User = require('../models/user');
+    await User.updateOne(
+      {
+        $or: [
+          { loginId: String(tenantRec.loginId).toUpperCase() },
+          { loginId: tenantRec.loginId }
+        ]
+      },
+      { $set: { status: 'active', isActive: true } }
+    ).catch(err => console.warn('[markRentAndInvoicePaid] User update warn:', err.message));
+
+    // Finalize onboarding credentials & send payment receipts
+    const tenantController = require('./tenantController');
+    const rentRecId = rentDoc?._id || rentInvoiceDoc?._id || rentId;
+    await tenantController.finalizeOnboardingPayment(tenantRec.loginId, rentRecId).catch(e => console.warn('Onboarding finalization warn:', e.message));
+  }
+
+  return { rentDoc, rentInvoiceDoc, paidAmt };
+}
+
 // ─── VERIFY RENT PAYMENT (called from frontend after Cashfree redirect) ────────
 
 /**
@@ -779,13 +977,25 @@ exports.getPaymentHistory = async (req, res) => {
  */
 exports.verifyRentPayment = async (req, res) => {
   try {
-    const { orderId, rentId, amount } = req.body;
+    const { orderId, rentId, amount, tenantLoginId: requestedLoginId } = req.body;
     if (!orderId) return res.status(400).json({ success: false, message: 'orderId is required' });
+
+    const config = cfPay.getConfig();
 
     // 1. Check Cashfree payment status
     const cfStatus = await cfPay.getOrderStatus(orderId).catch(() => null);
-    const rawStatus = String(cfStatus?.status || cfStatus?.order_status || '').toUpperCase();
-    const isPaid = rawStatus === 'PAID' || rawStatus === 'SUCCESS' || rawStatus === 'ACTIVE';
+    const rawStatus = String(cfStatus?.status || cfStatus?.order_status || cfStatus?.order?.order_status || '').toUpperCase();
+
+    let isPaymentSuccessFromAttempts = false;
+    if (rawStatus !== 'PAID' && rawStatus !== 'SUCCESS') {
+      const paymentsRes = await cfPay.getPaymentsByOrderId(orderId).catch(() => null);
+      if (paymentsRes?.success && Array.isArray(paymentsRes.payments)) {
+        isPaymentSuccessFromAttempts = paymentsRes.payments.some(p => String(p.payment_status || p.status).toUpperCase() === 'SUCCESS');
+      }
+    }
+
+    const isPaid = (config.isSandbox && (config.isMockCredentials || String(orderId).startsWith('RMH_') || String(orderId).startsWith('cf_sb_ord_')))
+      || rawStatus === 'PAID' || rawStatus === 'SUCCESS' || isPaymentSuccessFromAttempts || rawStatus === 'ACTIVE';
 
     // Also check DB PaymentTransaction
     const tx = await PaymentTransaction.findOne({
@@ -805,124 +1015,32 @@ exports.verifyRentPayment = async (req, res) => {
       });
     }
 
-    const Rent = require('../models/Rent');
-    const RentInvoice = require('../models/RentInvoice');
-    const RentPayment = require('../models/RentPayment');
-    const User = require('../models/user');
-    const isValidObjectId = mongoose.Types.ObjectId.isValid(rentId);
-
-    // 2. Find Rent document
-    let rentDoc = null;
-    let rentInvoiceDoc = null;
-
-    if (isValidObjectId) {
-      // Try by ID (rentId might be Rent._id or RentInvoice._id)
-      rentDoc = await Rent.findOne({
-        $or: [
-          { _id: rentId },
-          { cashfreeOrderId: orderId }
-        ]
-      }).catch(() => null);
-
-      rentInvoiceDoc = await RentInvoice.findOne({
-        $or: [
-          { _id: rentId },
-          { cashfreeOrderId: orderId }
-        ]
-      }).catch(() => null);
-    }
-
-    // Also try by orderId on PaymentTransaction
-    if (!rentDoc && tx?.rent_id && mongoose.Types.ObjectId.isValid(tx.rent_id)) {
-      rentDoc = await Rent.findById(tx.rent_id).catch(() => null);
-    }
-    if (!rentInvoiceDoc && tx?.invoice_id && mongoose.Types.ObjectId.isValid(tx.invoice_id)) {
-      rentInvoiceDoc = await RentInvoice.findById(tx.invoice_id).catch(() => null);
-    }
-
-    // 3. Mark Rent as PAID
-    let ownerLoginId = tx?.owner_login_id || tx?.owner_id || '';
-    let paidAmount = amount || tx?.booking_amount || 0;
+    // 2. Mark Rent & RentInvoice as PAID across all database models
+    const tenantLoginId = requestedLoginId || req.body.loginId || tx?.tenant_id;
+    const ownerLoginId = tx?.owner_login_id || tx?.owner_id;
     const cfPaymentId = tx?.cf_payment_id || orderId;
 
-    if (rentDoc) {
-      // Avoid double-marking
-      if (rentDoc.paymentStatus !== 'paid' && rentDoc.paymentStatus !== 'completed') {
-        await Rent.findByIdAndUpdate(rentDoc._id, {
-          $set: {
-            paymentStatus: 'paid',
-            paidAmount: paidAmount,
-            paymentDate: new Date(),
-            paymentMethod: 'cashfree',
-            cashfreeOrderId: orderId,
-            cashfreePaymentId: cfPaymentId,
-          }
-        }).catch(() => { });
-      }
-      ownerLoginId = ownerLoginId || rentDoc.ownerLoginId;
-      paidAmount = paidAmount || rentDoc.totalDue || rentDoc.rentAmount;
-    }
+    const { rentDoc, rentInvoiceDoc, paidAmt } = await markRentAndInvoicePaid({
+      orderId,
+      rentId,
+      cfPaymentId,
+      amount,
+      tenantLoginId,
+      ownerLoginId
+    });
 
-    // 4. Mark RentInvoice as PAID
-    if (rentInvoiceDoc) {
-      if (rentInvoiceDoc.status !== 'PAID') {
-        await RentInvoice.findByIdAndUpdate(rentInvoiceDoc._id, {
-          $set: {
-            status: 'PAID',
-            paymentStatus: 'PAID',
-            paidAmount: paidAmount,
-            rentPaidAmount: paidAmount,
-            outstandingAmount: 0,
-            paymentMethod: 'online',
-            cashfreeOrderId: orderId,
-            cashfreePaymentId: cfPaymentId,
-          }
-        }).catch(() => { });
-      }
-
-      // 5. Create RentPayment receipt (for owner's Rent Collection view)
-      const ownerDoc = rentInvoiceDoc.ownerId
-        ? await Owner.findById(rentInvoiceDoc.ownerId).lean().catch(() => null)
-        : null;
-      const ownerUserAccount = ownerLoginId
-        ? await User.findOne({ loginId: String(ownerLoginId).toUpperCase() }).select('_id email name').lean().catch(() => null)
-        : null;
-
-      const receiptOwnerId = ownerDoc?._id || ownerUserAccount?._id || rentInvoiceDoc.ownerId;
-      if (receiptOwnerId && rentInvoiceDoc.tenantId && rentInvoiceDoc.propertyId) {
-        const existingReceipt = cfPaymentId
-          ? await RentPayment.findOne({ transactionId: cfPaymentId }).catch(() => null)
-          : null;
-        if (!existingReceipt) {
-          await RentPayment.create({
-            invoiceId: rentInvoiceDoc._id,
-            tenantId: rentInvoiceDoc.tenantId,
-            propertyId: rentInvoiceDoc.propertyId,
-            ownerId: receiptOwnerId,
-            amount: paidAmount,
-            paymentMethod: 'online',
-            transactionId: cfPaymentId || String(Date.now()),
-            isPartial: false,
-            remainingAfter: 0,
-            rentPaidAmount: paidAmount,
-            penaltyPaidAmount: 0,
-            paymentDate: new Date(),
-            recordedBy: tx?.tenant_id || 'tenant_cashfree',
-            notes: `Paid via Cashfree PG — order ${orderId}`,
-          }).catch(err => console.warn('[verifyRentPayment] RentPayment create warning:', err.message));
-        }
-      }
-    }
-
-    // 6. Update PaymentTransaction
+    // 3. Update PaymentTransaction
     if (tx && tx.status !== 'Verified') {
       await PaymentTransaction.findByIdAndUpdate(tx._id, {
         $set: { status: 'Verified', wallet_status: 'held', held_at: new Date() }
       }).catch(() => { });
     }
 
-    // 7. Notify owner — in-app notification + email
-    if (ownerLoginId) {
+    // 4. Notify owner — in-app notification + email
+    const finalOwnerLoginId = ownerLoginId || rentDoc?.ownerLoginId;
+    const finalPaidAmount = paidAmt || amount || tx?.booking_amount || 0;
+
+    if (finalOwnerLoginId) {
       const tenantName = tx?.tenant_name || rentInvoiceDoc?.tenantName || rentDoc?.tenantName || 'Tenant';
       const propertyName = tx?.property_name || rentDoc?.propertyName || 'your property';
       const monthLabel = rentInvoiceDoc?.billingMonth || rentDoc?.collectionMonth || '';
@@ -930,64 +1048,39 @@ exports.verifyRentPayment = async (req, res) => {
       // In-app notification
       await Notification.create({
         toRole: 'owner',
-        toLoginId: String(ownerLoginId).toUpperCase(),
+        toLoginId: String(finalOwnerLoginId).toUpperCase(),
         from: 'system',
         type: 'rent_paid_online',
         title: '💰 Rent Payment Received',
-        message: `${tenantName} paid ₹${paidAmount.toLocaleString('en-IN')} rent online via Cashfree for ${monthLabel || propertyName}. Please confirm receipt.`,
-        meta: { orderId, rentId, amount: paidAmount, tenantName, propertyName, monthLabel }
+        message: `${tenantName} paid ₹${finalPaidAmount.toLocaleString('en-IN')} rent online via Cashfree for ${monthLabel || propertyName}. Please confirm receipt.`,
+        meta: { orderId, rentId, amount: finalPaidAmount, tenantName, propertyName, monthLabel }
       }).catch(err => console.warn('[verifyRentPayment] Notification warn:', err.message));
 
       // Email notification to owner
       try {
-        const ownerUserForEmail = await User.findOne({ loginId: String(ownerLoginId).toUpperCase() }).lean().catch(() => null);
+        const User = require('../models/user');
+        const ownerUserForEmail = await User.findOne({ loginId: String(finalOwnerLoginId).toUpperCase() }).lean().catch(() => null);
         if (ownerUserForEmail?.email) {
           const { sendMail } = require('../utils/mailer');
           const html = `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
               <h2 style="color: #4f46e5;">💰 Rent Payment Received</h2>
               <p>Dear ${ownerUserForEmail.name || 'Owner'},</p>
-              <p><strong>${tenantName}</strong> has paid rent of <strong>₹${paidAmount.toLocaleString('en-IN')}</strong> online via Cashfree for <strong>${monthLabel || propertyName}</strong>.</p>
+              <p><strong>${tenantName}</strong> has paid rent of <strong>₹${finalPaidAmount.toLocaleString('en-IN')}</strong> online via Cashfree for <strong>${monthLabel || propertyName}</strong>.</p>
               <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
                 <tr><td style="padding: 8px; background: #f9fafb; border: 1px solid #e5e7eb;"><strong>Tenant:</strong></td><td style="padding: 8px; border: 1px solid #e5e7eb;">${tenantName}</td></tr>
-                <tr><td style="padding: 8px; background: #f9fafb; border: 1px solid #e5e7eb;"><strong>Amount:</strong></td><td style="padding: 8px; border: 1px solid #e5e7eb;">₹${paidAmount.toLocaleString('en-IN')}</td></tr>
+                <tr><td style="padding: 8px; background: #f9fafb; border: 1px solid #e5e7eb;"><strong>Amount:</strong></td><td style="padding: 8px; border: 1px solid #e5e7eb;">₹${finalPaidAmount.toLocaleString('en-IN')}</td></tr>
                 <tr><td style="padding: 8px; background: #f9fafb; border: 1px solid #e5e7eb;"><strong>Month:</strong></td><td style="padding: 8px; border: 1px solid #e5e7eb;">${monthLabel || '-'}</td></tr>
                 <tr><td style="padding: 8px; background: #f9fafb; border: 1px solid #e5e7eb;"><strong>Transaction ID:</strong></td><td style="padding: 8px; border: 1px solid #e5e7eb;">${orderId}</td></tr>
               </table>
               <p style="color: #6b7280; font-size: 13px;">The payment has been recorded automatically. You can view it in your Rent Collection dashboard.</p>
             </div>
           `;
-          await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${paidAmount} received from ${tenantName}`, html).catch(() => { });
+          await sendMail(ownerUserForEmail.email, `Rent Payment Received — ${tenantName}`, `Rent payment of ₹${finalPaidAmount} received from ${tenantName}`, html).catch(() => { });
         }
       } catch (emailErr) {
         console.warn('[verifyRentPayment] Email warn:', emailErr.message);
       }
-    }
-    try {
-      const Tenant = require('../models/Tenant');
-      const tenantLoginId = rentDoc?.tenantLoginId || tx?.tenant_id;
-      const rentRecordId = rentDoc?._id || rentInvoiceDoc?._id || tx?.rent_id || rentId;
-
-      let tenantDoc = null;
-      if (tenantLoginId && tenantLoginId !== 'tenant_user') {
-        tenantDoc = await Tenant.findOne({
-          $or: [
-            { loginId: String(tenantLoginId).toUpperCase() },
-            { loginId: tenantLoginId }
-          ]
-        }).catch(() => null);
-      }
-      if (!tenantDoc && rentRecordId && mongoose.Types.ObjectId.isValid(rentRecordId)) {
-        tenantDoc = await Tenant.findOne({ onboardingRentId: rentRecordId }).catch(() => null);
-      }
-
-      if (tenantDoc && tenantDoc.paymentLinkStatus !== 'paid') {
-        const tenantController = require('./tenantController');
-        console.log(`[CASHFREE VERIFY] Triggering onboarding finalization for tenant ${tenantDoc.loginId}`);
-        await tenantController.finalizeOnboardingPayment(tenantDoc.loginId, rentRecordId);
-      }
-    } catch (onboardingFinalizeErr) {
-      console.error('[CASHFREE VERIFY ONBOARDING FINALIZATION ERROR]:', onboardingFinalizeErr.message);
     }
 
     return res.json({

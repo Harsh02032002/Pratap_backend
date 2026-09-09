@@ -141,20 +141,30 @@ function scopeBookingsToProperty(bookings, propertyIdentity) {
 }
 
 function dedupeBookingLeads(bookings = []) {
-    const latest = new Map();
-    for (const booking of bookings) {
-        const key = [
-            booking.request_type || 'request',
-            String(booking.owner_id || '').toLowerCase(),
-            String(booking.property_id || booking.property_name || '').toLowerCase(),
-            String(booking.user_id || booking.email || booking.phone || '').toLowerCase()
-        ].join('|');
-        const previous = latest.get(key);
-        if (!previous || new Date(booking.created_at || booking.createdAt || 0) > new Date(previous.created_at || previous.createdAt || 0)) {
-            latest.set(key, booking);
-        }
+    const seenKeys = new Set();
+    const result = [];
+    const sorted = [...bookings].sort((a, b) => new Date(b.created_at || b.createdAt || b.updatedAt || 0) - new Date(a.created_at || a.createdAt || a.updatedAt || 0));
+
+    for (const booking of sorted) {
+        const idKey = String(booking._id || '');
+        const phone = String(booking.phone || booking.studentPhone || '').replace(/\D/g, '');
+        const email = String(booking.email || booking.studentEmail || '').toLowerCase().trim();
+        const propKey = String(booking.property_id || booking.property_name || 'all').toLowerCase().trim();
+
+        const phoneKey = phone ? `phone_${phone}_${propKey}` : null;
+        const emailKey = email ? `email_${email}_${propKey}` : null;
+
+        if (idKey && seenKeys.has(`id_${idKey}`)) continue;
+        if (phoneKey && seenKeys.has(phoneKey)) continue;
+        if (emailKey && seenKeys.has(emailKey)) continue;
+
+        if (idKey) seenKeys.add(`id_${idKey}`);
+        if (phoneKey) seenKeys.add(phoneKey);
+        if (emailKey) seenKeys.add(emailKey);
+
+        result.push(booking);
     }
-    return Array.from(latest.values());
+    return result;
 }
 
 /** Phone/email of everyone who already moved in, so their lead reads "confirmed". */
@@ -180,7 +190,7 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
     const cleanEmail = String(b.email || '').toLowerCase().trim();
     const isMovedIn = (cleanPhone && movedIn.phones.has(cleanPhone)) || (cleanEmail && movedIn.emails.has(cleanEmail));
     const typeLabel = b.request_type ? (b.request_type.charAt(0).toUpperCase() + b.request_type.slice(1)) : 'Website';
-    const bidFallback = (b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || b.rent_amount || b.payment_amount || 0;
+    const bidAmount = (b.bid_amount && b.bid_amount > 0 ? b.bid_amount : b.bid_max) || 0;
 
     return {
         _id: b._id,
@@ -195,15 +205,15 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
         area: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         notes: b.message || (b.request_type === 'direct'
             ? 'Direct booking request from website'
-            : (bidFallback > 0
-                ? `Tenant Max Budget: ₹${bidFallback.toLocaleString('en-IN')}. If you can offer this property for ₹${bidFallback.toLocaleString('en-IN')}/month, please accept the bid.`
+            : (bidAmount > 0
+                ? `Tenant Max Budget: ₹${bidAmount.toLocaleString('en-IN')}. If you can offer this property for ₹${bidAmount.toLocaleString('en-IN')}/month, please accept the bid.`
                 : 'Tenant Bid: Open for Bid / Negotiable. Please accept to connect.')),
         preferredCity: b.city || b.filter_criteria?.city || '',
         preferredArea: b.area || b.filter_criteria?.area || b.filter_criteria?.location || '',
         location: b.area ? (b.city ? `${b.area}, ${b.city}` : b.area) : (b.city || ''),
         status: isMovedIn ? 'confirmed' : (b.booking_status || b.status || 'pending'),
         paidAmount: b.payment_amount || b.rent_amount || b.total_amount || 0,
-        ts: b.created_at || b.createdAt || new Date(),
+        ts: b.updatedAt || b.updated_at || b.created_at || b.createdAt || new Date(),
         source: typeLabel,
         type: typeLabel,
         interest: typeLabel,
@@ -221,8 +231,7 @@ function mapBookingToLead(b, movedIn = { phones: new Set(), emails: new Set() })
                 if (b.bid_amount && b.bid_amount > 0) return `₹${b.bid_amount.toLocaleString('en-IN')}`;
                 if (b.bid_max && b.bid_max > 0) return `₹${b.bid_max.toLocaleString('en-IN')}`;
                 if (b.filter_criteria?.max_price) return `₹${Number(b.filter_criteria.max_price).toLocaleString('en-IN')}`;
-                if (b.rent_amount && b.rent_amount > 0) return `₹${b.rent_amount.toLocaleString('en-IN')}`;
-                return 'Flexible';
+                return 'Flexible / Negotiable';
             }
             return b.rent_amount ? `₹${Number(b.rent_amount).toLocaleString('en-IN')}` : 'N/A';
         })(),

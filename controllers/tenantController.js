@@ -757,8 +757,9 @@ exports.assignTenant = async (req, res) => {
                 `;
                 const text = `Tenant account created.\nProperty: ${assignedPropertyTitle || property.title || '-'}\nRoom Number: ${roomNo || '-'}\nBed Number: ${bedNo || '-'}\nRent: INR ${parseInt(agreedRent || 0, 10)}\nSecurity Deposit Total: INR ${depositTotal}\nSecurity Deposit Paid: INR ${depositPaid}\nSecurity Deposit Balance: INR ${depositBalance}\nLogin ID: ${tenant.loginId}\nDigital Check-In: ${tenantCheckinLink}\n\nNote: Your password will be sent after completing payment.`;
 
-                await mailer.sendMail(tenant.email, subject, text, html);
-                console.log(`[MAIL] KYC link email sent successfully to ${tenant.email}`);
+                mailer.sendMail(tenant.email, subject, text, html)
+                    .then(() => console.log(`[MAIL] KYC link email sent successfully to ${tenant.email}`))
+                    .catch((mailErr) => console.error('[MAIL ERROR] Failed to send tenant credentials:', mailErr && mailErr.message));
             }
 
             // Send WhatsApp to tenant's phone (the number owner entered during room allotment)
@@ -815,6 +816,7 @@ exports.assignTenant = async (req, res) => {
         }
 
         // For testing we still return credentials in response
+        if (res.headersSent) return;
 
         res.status(201).json({
             success: true,
@@ -845,7 +847,9 @@ exports.assignTenant = async (req, res) => {
 
     } catch (error) {
         console.error('assignTenant error:', error);
-        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, message: 'Server error', error: error.message });
+        }
     }
 };
 
@@ -1002,7 +1006,16 @@ exports.getTenantsByOwner = async (req, res) => {
             if (t.ownerLoginId === normalizedId) direct.push(t);
             else legacyOnly.push(t);
         }
+
         const tenants = [...direct, ...legacyOnly];
+
+        // Auto-heal: If tenant has paymentLinkStatus='paid' or kycStatus='verified', ensure status='active'
+        for (const t of tenants) {
+            if (t.status === 'pending' && (t.paymentLinkStatus === 'paid' || t.kycStatus === 'verified' || t.kyc === 'verified')) {
+                t.status = 'active';
+                Tenant.updateOne({ _id: t._id }, { $set: { status: 'active' } }).catch(() => {});
+            }
+        }
 
         const tenantsWithDues = await enrichTenantsWithDues(tenants);
         res.json({ success: true, tenants: tenantsWithDues });
@@ -1122,34 +1135,77 @@ exports.generateTenantCredentials = async (tenantId, fallbackLocationCode = '', 
     const tenant = await Tenant.findById(tenantId).populate('property').session(session || null);
     if (!tenant) throw new Error('Tenant not found');
 
-    // Idempotency: abort if already credentialed
-    if (tenant.user && tenant.loginId) {
-        return { tenant, user: tenant.user, loginId: tenant.loginId, tempPassword: tenant.tempPassword };
-    }
-
     const loginId = tenant.loginId || await generateTenantId();
-    const tempPassword = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const tempPassword = tenant.tempPassword || crypto.randomBytes(4).toString('hex').toUpperCase();
 
     const propCode = tenant.property ? tenant.property.locationCode : '';
     const effectiveLocationCode = propCode
         || String(fallbackLocationCode || tenant.assignmentLocationCode || '').toUpperCase()
         || 'GEN';
 
-    const [user] = await User.create([{
-        name: tenant.name,
-        email: tenant.email,
-        phone: tenant.phone,
-        password: tempPassword,
-        role: 'tenant',
-        loginId,
-        locationCode: effectiveLocationCode,
-        status: 'active',
-        requirePasswordReset: true
-    }], session ? { session } : {});
+    // Check if User record already exists for this tenant (by loginId, email, or phone)
+    let user = await User.findOne({
+        $or: [
+            { loginId: String(loginId).toUpperCase() },
+            { loginId: loginId },
+            ...(tenant.email ? [{ email: tenant.email }] : []),
+            ...(tenant.phone ? [{ phone: tenant.phone }] : [])
+        ]
+    }).session(session || null);
+
+    if (user) {
+        user.status = 'active';
+        user.isActive = true;
+        user.role = 'tenant';
+        user.loginId = loginId;
+        user.password = tempPassword; // Update password to known tempPassword
+        await user.save(session ? { session } : {});
+    } else {
+        try {
+            const created = await User.create([{
+                name: tenant.name,
+                email: tenant.email,
+                phone: tenant.phone,
+                password: tempPassword,
+                role: 'tenant',
+                loginId,
+                locationCode: effectiveLocationCode,
+                status: 'active',
+                requirePasswordReset: true
+            }], session ? { session } : {});
+            user = created[0];
+        } catch (createErr) {
+            console.warn('[generateTenantCredentials] User creation warning, falling back to findOneAndUpdate:', createErr.message);
+            user = await User.findOneAndUpdate(
+                {
+                    $or: [
+                        { loginId: String(loginId).toUpperCase() },
+                        { loginId: loginId },
+                        ...(tenant.email ? [{ email: tenant.email }] : [])
+                    ]
+                },
+                {
+                    $set: {
+                        name: tenant.name,
+                        email: tenant.email,
+                        phone: tenant.phone,
+                        password: tempPassword,
+                        role: 'tenant',
+                        loginId,
+                        status: 'active',
+                        isActive: true
+                    }
+                },
+                { new: true, upsert: true, session: session || null }
+            );
+        }
+    }
 
     tenant.loginId = loginId;
     tenant.tempPassword = tempPassword;
     tenant.user = user._id;
+    tenant.status = 'active';
+    tenant.kycStatus = 'verified';
     await tenant.save(session ? { session } : {});
 
     return { tenant, user, loginId, tempPassword };
@@ -1177,46 +1233,87 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
 
     const mongoose = require('mongoose');
     const Rent = require('../models/Rent');
+    const User = require('../models/user');
+    const Tenant = require('../models/Tenant');
     const { sendCredentials, sendReceiptEmail } = require('../utils/mailer');
 
-    const session = await mongoose.startSession();
     let credentialResult = null;
     let updatedTenant = null;
 
-    // ── TRANSACTION BLOCK ──────────────────────────────────────────────
+    const normalizedLoginId = String(loginId).toUpperCase();
+
+    // Safely attempt session/transaction for replica set; fallback to standard operations on standalone Mongo
+    let session = null;
+    let useTransaction = false;
+
     try {
+        session = await mongoose.startSession();
         session.startTransaction();
+        useTransaction = true;
+    } catch (_) {
+        if (session) {
+            try { session.endSession(); } catch (_) { }
+        }
+        session = null;
+        useTransaction = false;
+    }
+
+    try {
+        const sessionOpt = useTransaction ? { session } : {};
 
         updatedTenant = await Tenant.findOneAndUpdate(
-            { loginId, paymentLinkStatus: { $ne: 'paid' } },
+            {
+                $or: [
+                    { loginId: normalizedLoginId },
+                    { loginId: loginId }
+                ]
+            },
             { $set: { paymentLinkStatus: 'paid', onboardingRentId: rentRecordId, status: 'active', kycStatus: 'verified' } },
-            { new: true, session }
+            { new: true, ...sessionOpt }
         );
 
         if (!updatedTenant) {
-            await session.abortTransaction();
-            session.endSession();
+            if (useTransaction && session) {
+                await session.abortTransaction();
+                session.endSession();
+            }
             return false;
         }
 
         // Activate User account so tenant can login after payment
         await User.updateOne(
-            { loginId: updatedTenant.loginId },
+            {
+                $or: [
+                    { loginId: updatedTenant.loginId },
+                    { loginId: normalizedLoginId }
+                ]
+            },
             { $set: { isActive: true, status: 'active' } },
-            session ? { session } : {}
+            sessionOpt
         );
 
         console.log(`[ONBOARDING FINALIZATION] Triggering credentials & activating account for ${updatedTenant.loginId}`);
-        credentialResult = await exports.generateTenantCredentials(updatedTenant._id, updatedTenant.assignmentLocationCode, { session });
+        credentialResult = await exports.generateTenantCredentials(
+            updatedTenant._id,
+            updatedTenant.assignmentLocationCode,
+            sessionOpt
+        );
 
-        await session.commitTransaction();
+        if (useTransaction && session) {
+            await session.commitTransaction();
+            session.endSession();
+        }
     } catch (txError) {
-        console.error('[ONBOARDING FINALIZATION] Transaction failed, rolling back:', txError.message);
-        try { await session.abortTransaction(); } catch (_) { }
-        session.endSession();
-        throw txError;
+        console.error('[ONBOARDING FINALIZATION] Transaction error:', txError.message);
+        if (useTransaction && session) {
+            try { await session.abortTransaction(); } catch (_) { }
+            try { session.endSession(); } catch (_) { }
+        }
+        // Fallback without transaction for standalone MongoDB
+        if (useTransaction) {
+            return exports.finalizeOnboardingPayment(loginId, rentRecordId);
+        }
     }
-    session.endSession();
 
     // ── POST-COMMIT EMAIL DISPATCH ─────────────────────────────────────
     const { loginId: credLoginId, tempPassword } = credentialResult;

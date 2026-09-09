@@ -133,12 +133,36 @@ exports.listEnquiries = async (req, res) => {
     });
 
     // 6. Merge, filter out rejected/deleted leads, and sort by timestamp
-    const allLeads = [...mappedEnquiries, ...mappedBookings]
+    const rawLeads = [...mappedEnquiries, ...mappedBookings]
       .filter(item => {
         const st = String(item.status || '').toLowerCase();
         return st !== 'rejected' && st !== 'deleted' && st !== 'cancelled' && !item.isDeleted;
       });
-    allLeads.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    rawLeads.sort((a, b) => new Date(b.ts || b.created_at || b.createdAt || 0) - new Date(a.ts || a.created_at || a.createdAt || 0));
+
+    // Deduplicate leads by phone+property, email+property, or ID so no duplicate entries appear in All Leads
+    const seenKeys = new Set();
+    const allLeads = [];
+
+    for (const lead of rawLeads) {
+      const idKey = String(lead._id || lead.id || '');
+      const phone = String(lead.studentPhone || lead.student_phone || lead.phone || '').replace(/\D/g, '');
+      const email = String(lead.studentEmail || lead.student_email || lead.email || '').toLowerCase().trim();
+      const propKey = String(lead.propertyId || lead.property_id || lead.propertyName || lead.property_name || 'all').toLowerCase().trim();
+
+      const phoneKey = phone ? `phone_${phone}_${propKey}` : null;
+      const emailKey = email ? `email_${email}_${propKey}` : null;
+
+      if (idKey && seenKeys.has(`id_${idKey}`)) continue;
+      if (phoneKey && seenKeys.has(phoneKey)) continue;
+      if (emailKey && seenKeys.has(emailKey)) continue;
+
+      if (idKey) seenKeys.add(`id_${idKey}`);
+      if (phoneKey) seenKeys.add(phoneKey);
+      if (emailKey) seenKeys.add(emailKey);
+
+      allLeads.push(lead);
+    }
 
     res.json(allLeads);
   } catch (err) {

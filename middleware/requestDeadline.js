@@ -212,6 +212,7 @@ function dbTimeoutResponseNormalizer(req, res, next) {
   const sendJson = res.json.bind(res);
 
   res.json = function normalizedJson(body) {
+    if (res.headersSent || res.writableEnded) return res;
     try {
       if (
         !req[CLASSIFIED] &&

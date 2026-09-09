@@ -898,6 +898,63 @@ async function getTenantInvoiceSummary(req, res) {
 
     console.log(`[getTenantInvoiceSummary] Found tenant: ${tenant._id} for loginId: ${tenantLoginId}`);
 
+    // Auto-sync: If tenant has any verified/settled PaymentTransactions, sync Rent & RentInvoice to PAID
+    try {
+      const PaymentTransaction = require('../models/PaymentTransaction');
+      const Rent = require('../models/Rent');
+      const verifiedTxs = await PaymentTransaction.find({
+        $or: [
+          { tenant_id: tenantLoginId },
+          { tenant_id: String(tenant._id) }
+        ],
+        status: { $in: ['Verified', 'Settled', 'COMPLETED', 'completed'] }
+      }).lean();
+
+      if (verifiedTxs.length > 0) {
+        for (const vtx of verifiedTxs) {
+          const vAmt = vtx.booking_amount || 0;
+          await Rent.updateMany(
+            {
+              $or: [
+                { cashfreeOrderId: vtx.cf_order_id },
+                { tenantLoginId: tenantLoginId, paymentStatus: { $ne: 'paid' } }
+              ]
+            },
+            {
+              $set: {
+                paymentStatus: 'paid',
+                paidAmount: vAmt,
+                paymentDate: vtx.payment_date || new Date(),
+                paymentMethod: 'cashfree'
+              }
+            }
+          ).catch(() => {});
+
+          await RentInvoice.updateMany(
+            {
+              $or: [
+                { cashfreeOrderId: vtx.cf_order_id },
+                { tenantId: tenant._id, status: { $ne: 'PAID' } },
+                { tenantLoginId: tenantLoginId, status: { $ne: 'PAID' } }
+              ]
+            },
+            {
+              $set: {
+                status: 'PAID',
+                paymentStatus: 'PAID',
+                paidAmount: vAmt,
+                rentPaidAmount: vAmt,
+                outstandingAmount: 0,
+                paymentMethod: 'online'
+              }
+            }
+          ).catch(() => {});
+        }
+      }
+    } catch (syncErr) {
+      console.warn('[getTenantInvoiceSummary] Sync error:', syncErr.message);
+    }
+
     // Find all invoices for this tenant - try both tenantId and tenantLoginId
     let invoices = await RentInvoice.find({ tenantId: tenant._id })
       .sort({ billingMonth: -1, dueDate: -1, createdAt: -1 })

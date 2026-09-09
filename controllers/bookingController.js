@@ -334,7 +334,12 @@ exports.createBookingRequest = async (req, res) => {
         const phone = req.body.phone || req.body.userPhone || req.body.mobile || '9999999999';
         const rawEmail = req.body.email || req.body.userEmail || req.body.gmail || '';
         const email = rawEmail.trim() || (user_id && user_id.includes('@') ? user_id : `${name.toLowerCase().replace(/[^a-z0-9]/g, '') || 'student'}@roomhy.com`);
-        const bid_amount = req.body.bid_amount || req.body.bidAmount || req.body.offeredAmount || req.body.proposedPrice || rent_amount;
+        const parseBidAmount = (val) => {
+            if (val === undefined || val === null || val === '') return null;
+            const n = Number(val);
+            return !isNaN(n) && n > 0 ? n : null;
+        };
+        const bid_amount = parseBidAmount(req.body.bid_amount) ?? parseBidAmount(req.body.bidAmount) ?? parseBidAmount(req.body.offeredAmount) ?? parseBidAmount(req.body.proposedPrice) ?? 0;
         const bid_min = req.body.bid_min || req.body.bidMin || null;
         const bid_max = req.body.bid_max || req.body.bidMax || null;
         const filter_criteria = req.body.filter_criteria || req.body.filterCriteria || {};
@@ -462,26 +467,7 @@ exports.createBookingRequest = async (req, res) => {
         const ownerPhone = owner?.phone || owner?.mobile || owner?.checkinPhone || ownerProfile?.phone || ownerProfile?.mobile || ownerProfile?.profile?.phone || ownerProfile?.checkinPhone || propertyOwnerPhone || '';
         console.log(`📍 Owner found: ${ownerName} (${ownerLoginId}) | Email: ${ownerEmail || 'N/A'} | Phone: ${ownerPhone || 'N/A'}`);
 
-        if (request_type === 'bid') {
-            const duplicate = await BookingRequest.findOne({
-                property_id: String(property_id),
-                owner_id: new RegExp(`^${String(resolvedOwnerId || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-                $or: [
-                    { user_id: String(user_id) },
-                    { email: email }
-                ],
-                request_type: 'bid',
-                status: { $nin: ['rejected', 'cancelled'] }
-            }).sort({ created_at: -1, createdAt: -1 });
-            if (duplicate) {
-                duplicate.bid_amount = Number(bid_amount || duplicate.bid_amount || 0);
-                duplicate.bid_max = bid_max || duplicate.bid_max || null;
-                duplicate.message = message || duplicate.message || '';
-                duplicate.updatedAt = new Date();
-                await duplicate.save();
-                return res.status(200).json({ success: true, duplicate: true, message: 'Existing bid updated', data: duplicate });
-            }
-        }
+
         
         // Generate unique chat room ID
         const chatRoomId = `chat_${property_id}_${Date.now()}`;
@@ -501,7 +487,7 @@ exports.createBookingRequest = async (req, res) => {
             owner_id: resolvedOwnerId,     // ✅ SET OWNER ID (resolved from request or property)
             owner_name: ownerName,          // ✅ SET OWNER NAME FROM USER DB
             request_type,
-            bid_amount: request_type === 'bid' ? (bid_amount || bid_max || bid_min || (filter_criteria && (filter_criteria.max_price || filter_criteria.min_price)) || rent_amount || 0) : 0,
+            bid_amount: request_type === 'bid' ? (bid_amount !== undefined && bid_amount !== null ? Number(bid_amount) : (bid_max || bid_min || (filter_criteria && (filter_criteria.max_price || filter_criteria.min_price)) || 0)) : 0,
             bid_min: request_type === 'bid' ? (bid_min || null) : null,
             bid_max: request_type === 'bid' ? (bid_max || null) : null,
             filter_criteria: filter_criteria || {},
@@ -528,7 +514,9 @@ exports.createBookingRequest = async (req, res) => {
                     sender_login_id: tenantChatId,
                     sender_name: name || 'Website Tenant',
                     sender_role: 'website_user',
-                    message: `New bid received for ${property_name}: ₹${Number(bid_amount || 0).toLocaleString('en-IN')}/month`,
+                    message: bid_amount > 0
+                        ? `New bid received for ${property_name}: ₹${Number(bid_amount).toLocaleString('en-IN')}/month`
+                        : `New bid received for ${property_name}: Open Bid / Negotiable`,
                     message_type: 'text',
                     is_read: false,
                     created_at: new Date(),
