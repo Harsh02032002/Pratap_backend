@@ -131,10 +131,12 @@ router.post('/seed-tenant-6120', protect, authorize('superadmin'), async (req, r
         type: 'Single Sharing',
         beds: 1,
         price: 8500,
-        status: 'occupied'
+        status: 'available',
+        isAvailable: false
       });
     } else {
-      room.status = 'occupied';
+      room.status = 'available';
+      room.isAvailable = false;
       await room.save();
     }
 

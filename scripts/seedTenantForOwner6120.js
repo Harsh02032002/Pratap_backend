@@ -99,10 +99,12 @@ async function seedTenantForOwner6120() {
         type: 'Single Sharing',
         beds: 1,
         price: 8500,
-        status: 'occupied'
+        status: 'available',
+        isAvailable: false
       });
     } else {
-      room.status = 'occupied';
+      room.status = 'available';
+      room.isAvailable = false;
       await room.save();
     }
     console.log(`Room Found/Created: Room #${roomNumber} (ID: ${room._id})`);
