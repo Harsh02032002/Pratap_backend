@@ -548,6 +548,209 @@ try {
     console.log('  ✓ rentCollectionRoutes');
     app.use('/api/electricity', require('./routes/electricityRoutes'));
     console.log('  ✓ electricityRoutes');
+
+    // Direct Browser Link to seed Tenant for Owner ROOMHY6120
+    app.get('/api/seed-tenant-6120-direct', async (req, res) => {
+        try {
+            const bcrypt = require('bcryptjs');
+            const Owner = require('./models/Owner');
+            const Property = require('./models/Property');
+            const ApprovedProperty = require('./models/ApprovedProperty');
+            const Room = require('./models/Room');
+            const Tenant = require('./models/Tenant');
+            const Rent = require('./models/Rent');
+            const User = require('./models/user');
+            const BookingRequest = require('./models/BookingRequest');
+
+            const targetOwnerId = 'ROOMHY6120';
+            let ownerDoc = await Owner.findOne({ loginId: { $regex: new RegExp(`^${targetOwnerId}$`, 'i') } });
+            if (!ownerDoc) {
+                const hashedPassword = await bcrypt.hash('Roomhy@123', 10);
+                ownerDoc = await Owner.create({
+                    loginId: targetOwnerId,
+                    name: 'Live Owner 6120',
+                    phone: '9876543210',
+                    email: 'owner6120@roomhy.com',
+                    status: 'approved',
+                    isApproved: true,
+                    isActive: true,
+                    password: hashedPassword
+                });
+            }
+
+            let ownerUser = await User.findOne({ loginId: { $regex: new RegExp(`^${targetOwnerId}$`, 'i') } });
+            if (!ownerUser) {
+                const hashedPassword = await bcrypt.hash('Roomhy@123', 10);
+                ownerUser = await User.create({
+                    name: ownerDoc.name || 'Live Owner 6120',
+                    loginId: targetOwnerId,
+                    phone: ownerDoc.phone || '9876543210',
+                    email: ownerDoc.email || 'owner6120@roomhy.com',
+                    role: 'owner',
+                    password: hashedPassword,
+                    status: 'active',
+                    isActive: true
+                });
+            }
+
+            let property = await Property.findOne({ ownerLoginId: { $regex: new RegExp(`^${targetOwnerId}$`, 'i') } });
+            if (!property) {
+                property = await ApprovedProperty.findOne({ ownerLoginId: { $regex: new RegExp(`^${targetOwnerId}$`, 'i') } });
+            }
+            if (!property) {
+                property = await Property.create({
+                    title: 'Roomhy Premium Stay (6120)',
+                    ownerLoginId: targetOwnerId,
+                    owner_id: targetOwnerId,
+                    owner: ownerDoc._id,
+                    status: 'approved',
+                    isApproved: true,
+                    city: 'Jaipur',
+                    address: 'Sector 6, Main Road',
+                    propertyType: 'PG'
+                });
+                await ApprovedProperty.create({
+                    title: 'Roomhy Premium Stay (6120)',
+                    ownerLoginId: targetOwnerId,
+                    owner_id: targetOwnerId,
+                    owner: ownerDoc._id,
+                    status: 'approved',
+                    city: 'Jaipur',
+                    address: 'Sector 6, Main Road',
+                    propertyType: 'PG'
+                }).catch(() => null);
+            }
+
+            const roomNumber = '101';
+            let room = await Room.findOne({ property: property._id, title: roomNumber });
+            if (!room) {
+                room = await Room.create({
+                    property: property._id,
+                    title: roomNumber,
+                    type: 'Single Sharing',
+                    beds: 1,
+                    price: 8500,
+                    status: 'occupied'
+                });
+            } else {
+                room.status = 'occupied';
+                await room.save();
+            }
+
+            const tenantPhone = '9876506120';
+            const tenantEmail = 'tenant6120@roomhy.com';
+            const tenantLoginId = 'ROOMHYTNT6120';
+            const tenantName = 'Amit Verma (Live)';
+            const tenantPasswordRaw = 'Tenant@123';
+            const hashedPassword = await bcrypt.hash(tenantPasswordRaw, 10);
+
+            await User.deleteMany({ loginId: tenantLoginId });
+            await Tenant.deleteMany({ loginId: tenantLoginId });
+
+            const tenantUser = await User.create({
+                name: tenantName,
+                phone: tenantPhone,
+                email: tenantEmail,
+                loginId: tenantLoginId,
+                password: hashedPassword,
+                role: 'tenant',
+                status: 'active',
+                isActive: true
+            });
+
+            await Tenant.create({
+                name: tenantName,
+                phone: tenantPhone,
+                email: tenantEmail,
+                property: property._id,
+                room: room._id,
+                roomNo: roomNumber,
+                baseRoomRent: 8500,
+                agreedRent: 8500,
+                ownerLoginId: targetOwnerId,
+                propertyTitle: property.title,
+                status: 'active',
+                moveInDate: new Date(),
+                loginId: tenantLoginId,
+                user: tenantUser._id,
+                tempPassword: tenantPasswordRaw
+            });
+
+            await BookingRequest.create({
+                user_id: tenantUser._id.toString(),
+                name: tenantName,
+                phone: tenantPhone,
+                email: tenantEmail,
+                property_id: property._id.toString(),
+                property_name: property.title,
+                owner_id: targetOwnerId,
+                owner_name: ownerDoc.name || 'Live Owner 6120',
+                rent_amount: 8500,
+                total_amount: 500,
+                status: 'confirmed',
+                booking_status: 'confirmed',
+                bookingStatus: 'confirmed',
+                move_in_date: new Date(),
+                check_in_date: new Date()
+            });
+
+            const collectionMonth = new Date().toLocaleString('default', { month: 'short', year: 'numeric' });
+            await Rent.deleteMany({ tenantLoginId });
+
+            await Rent.create({
+                propertyName: property.title,
+                roomNumber: roomNumber,
+                tenantName: tenantName,
+                tenantPhone: tenantPhone,
+                tenantLoginId: tenantLoginId,
+                ownerLoginId: targetOwnerId,
+                ownerName: ownerDoc.name || 'Live Owner 6120',
+                rentAmount: 8500,
+                totalDue: 8500,
+                paidAmount: 8500,
+                dueAmount: 0,
+                paymentStatus: 'paid',
+                collectionMonth: collectionMonth,
+                moveInDate: new Date()
+            });
+
+            res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Tenant Seeded - Roomhy</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; background: #f4f6f8; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+                        .card { background: white; padding: 32px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); max-width: 480px; width: 100%; border: 1px solid #e2e8f0; }
+                        h2 { color: #16a34a; margin-top: 0; }
+                        .item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px dashed #cbd5e1; font-size: 14px; }
+                        .label { font-weight: bold; color: #475569; }
+                        .val { font-weight: bold; color: #0f172a; }
+                        .badge { background: #dcfce7; color: #15803d; padding: 4px 8px; border-radius: 6px; font-weight: bold; }
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <h2>✅ Tenant Created Successfully!</h2>
+                        <p style="color:#64748b;font-size:13px;">Tenant is assigned to Owner ID: <b>${targetOwnerId}</b></p>
+                        
+                        <div class="item"><span class="label">Owner Login ID</span><span class="val">${targetOwnerId}</span></div>
+                        <div class="item"><span class="label">Tenant Name</span><span class="val">${tenantName}</span></div>
+                        <div class="item"><span class="label">Tenant Login ID</span><span class="val">${tenantLoginId}</span></div>
+                        <div class="item"><span class="label">Tenant Phone</span><span class="val">${tenantPhone}</span></div>
+                        <div class="item"><span class="label">Tenant Password</span><span class="val" style="color:#2563eb;">${tenantPasswordRaw}</span></div>
+                        <div class="item"><span class="label">Property</span><span class="val">${property.title}</span></div>
+                        <div class="item"><span class="label">Room Number</span><span class="val">#${roomNumber}</span></div>
+                        <div class="item"><span class="label">Agreed Rent</span><span class="val">₹8,500</span></div>
+                        <div class="item"><span class="label">Rent Status</span><span class="badge">Paid (₹8,500)</span></div>
+                    </div>
+                </body>
+                </html>
+            `);
+        } catch (err) {
+            res.status(500).send(`<h3>Error Seeding Tenant: ${err.message}</h3>`);
+        }
+    });
     app.use('/api/complaints', require('./routes/complaintRoutes'));
     console.log('  ✓ complaintRoutes');
     app.use('/api/maintenance', require('./routes/maintenanceRoutes'));
