@@ -155,6 +155,8 @@ function detectViolation(text, settings = {}) {
     text.includes('app.roomhy.com') ||
     text.includes('/website/pay') ||
     text.includes('bookingId=') ||
+    text.includes('PayU') ||
+    text.includes('payu') ||
     text.includes('CashFree') ||
     text.includes('Cashfree') ||
     text.startsWith('Dear ')
