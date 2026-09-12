@@ -153,7 +153,7 @@ router.get('/subscription-status', async (req, res) => {
         if (!owner) {
             // Fallback: check User collection for owner role
             const userDoc = await User.findOne({
-                $or: [{ loginId: rx }, { email: loginId.toLowerCase() }, { phone: loginId }],
+                $or: [{ loginId: normalizeLoginId(loginId) }, { email: loginId.toLowerCase() }, { phone: loginId }],
                 role: 'owner'
             }).select('loginId name createdAt subscription').lean();
 
