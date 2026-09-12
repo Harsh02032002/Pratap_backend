@@ -162,6 +162,7 @@ async function seedTenantForOwner6120() {
       property_name: property.title,
       owner_id: targetOwnerId,
       owner_name: ownerDoc.name || 'Live Owner 6120',
+      request_type: 'direct',
       rent_amount: 8500,
       total_amount: 500, // Dynamic booking token
       status: 'confirmed',
