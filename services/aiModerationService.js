@@ -20,14 +20,14 @@ const axios = require('axios');
 async function moderateMessage(text, senderRole, receiverRole, contextHistory, combinedSenderText) {
     const textLower = String(text || '').toLowerCase();
     if (
-      textLower.includes('cashfree.com') ||
-      textLower.includes('cashfree') ||
+      textLower.includes('payu.in') ||
+      textLower.includes('payu') ||
       textLower.includes('roomhy.com') ||
       textLower.includes('/website/pay') ||
       textLower.includes('bookingid=') ||
       textLower.includes('token payment')
     ) {
-      console.log('ℹ️ Skipping AI moderation for official Roomhy / Cashfree payment message.');
+      console.log('ℹ️ Skipping AI moderation for official Roomhy / PayU payment message.');
       return { violation: false, type: 'none', confidence: 0, reason: 'Official Roomhy payment message' };
     }
 

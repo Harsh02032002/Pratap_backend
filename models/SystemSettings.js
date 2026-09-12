@@ -6,6 +6,7 @@ const systemSettingsSchema = new mongoose.Schema({
   revenueBalance: { type: Number, default: 0 },
   fixedFee: { type: Number, default: 500 },
   perBedFee: { type: Number, default: 50 },
+  defaultBookingAmount: { type: Number, default: 500 },
   invoicePrefix: { type: String, default: 'RHY-' },
   invoiceCounter: { type: Number, default: 1000 },
   dueReminderDays: { type: Number, default: 3 },

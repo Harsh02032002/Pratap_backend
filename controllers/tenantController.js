@@ -1143,63 +1143,37 @@ exports.generateTenantCredentials = async (tenantId, fallbackLocationCode = '', 
         || String(fallbackLocationCode || tenant.assignmentLocationCode || '').toUpperCase()
         || 'GEN';
 
-    // Check if User record already exists for this tenant (by loginId, email, or phone)
-    let user = await User.findOne({
-        $or: [
-            { loginId: String(loginId).toUpperCase() },
-            { loginId: loginId },
-            ...(tenant.email ? [{ email: tenant.email }] : []),
-            ...(tenant.phone ? [{ phone: tenant.phone }] : [])
-        ]
-    }).session(session || null);
-
-    if (user) {
-        user.status = 'active';
-        user.isActive = true;
-        user.role = 'tenant';
-        user.loginId = loginId;
-        user.password = tempPassword; // Update password to known tempPassword
-        await user.save(session ? { session } : {});
-    } else {
-        try {
-            const created = await User.create([{
+    // Use findOneAndUpdate with upsert=true as the ONLY operation.
+    // This is fully idempotent — no E11000 duplicate key errors possible,
+    // even if multiple concurrent requests race to create the same user.
+    const user = await User.findOneAndUpdate(
+        {
+            $or: [
+                { loginId: String(loginId).toUpperCase() },
+                { loginId: loginId },
+                ...(tenant.email ? [{ email: tenant.email }] : []),
+                ...(tenant.phone ? [{ phone: tenant.phone }] : [])
+            ]
+        },
+        {
+            $set: {
                 name: tenant.name,
                 email: tenant.email,
                 phone: tenant.phone,
                 password: tempPassword,
                 role: 'tenant',
-                loginId,
+                loginId: String(loginId).toUpperCase(),
                 locationCode: effectiveLocationCode,
                 status: 'active',
+                isActive: true,
                 requirePasswordReset: true
-            }], session ? { session } : {});
-            user = created[0];
-        } catch (createErr) {
-            console.warn('[generateTenantCredentials] User creation warning, falling back to findOneAndUpdate:', createErr.message);
-            user = await User.findOneAndUpdate(
-                {
-                    $or: [
-                        { loginId: String(loginId).toUpperCase() },
-                        { loginId: loginId },
-                        ...(tenant.email ? [{ email: tenant.email }] : [])
-                    ]
-                },
-                {
-                    $set: {
-                        name: tenant.name,
-                        email: tenant.email,
-                        phone: tenant.phone,
-                        password: tempPassword,
-                        role: 'tenant',
-                        loginId,
-                        status: 'active',
-                        isActive: true
-                    }
-                },
-                { new: true, upsert: true, session: session || null }
-            );
-        }
-    }
+            },
+            $setOnInsert: { createdAt: new Date() }
+        },
+        { new: true, upsert: true, session: session || null }
+    );
+
+    if (!user) throw new Error('Failed to create or update user account for tenant');
 
     tenant.loginId = loginId;
     tenant.tempPassword = tempPassword;
@@ -1309,9 +1283,40 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
             try { await session.abortTransaction(); } catch (_) { }
             try { session.endSession(); } catch (_) { }
         }
-        // Fallback without transaction for standalone MongoDB
-        if (useTransaction) {
+        // Retry WITHOUT transaction only for non-duplicate-key errors.
+        // E11000 (duplicate key) means the user already exists — retrying would
+        // cause an infinite loop. Instead fall through to email dispatch with
+        // whatever credentialResult we have (may be null → guard below handles it).
+        const isDuplicateKey = txError.code === 11000 || (txError.message || '').includes('E11000');
+        if (useTransaction && !isDuplicateKey) {
             return exports.finalizeOnboardingPayment(loginId, rentRecordId);
+        }
+        // For duplicate key: user already exists — load existing credentials so
+        // we can still send the welcome email.
+        if (isDuplicateKey && !credentialResult) {
+            try {
+                const existingTenant = await Tenant.findOne({
+                    $or: [{ loginId: String(loginId).toUpperCase() }, { loginId: loginId }]
+                }).lean();
+                const existingUser = await User.findOne({
+                    $or: [{ loginId: String(loginId).toUpperCase() }, { loginId: loginId }]
+                }).lean();
+                if (existingTenant && existingUser) {
+                    credentialResult = { loginId: existingUser.loginId, tempPassword: existingTenant.tempPassword || existingUser.password };
+                    updatedTenant = updatedTenant || existingTenant;
+                    // Ensure tenant is marked active
+                    await Tenant.updateOne(
+                        { _id: existingTenant._id },
+                        { $set: { status: 'active', paymentLinkStatus: 'paid' } }
+                    ).catch(() => {});
+                    await User.updateOne(
+                        { _id: existingUser._id },
+                        { $set: { status: 'active', isActive: true } }
+                    ).catch(() => {});
+                }
+            } catch (recoverErr) {
+                console.error('[ONBOARDING FINALIZATION] Recovery attempt failed:', recoverErr.message);
+            }
         }
     }
 

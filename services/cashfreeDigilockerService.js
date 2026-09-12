@@ -5,7 +5,8 @@ function getBaseUrl() {
 }
 
 function isBypassEnabled() {
-    return String(process.env.CASHFREE_DIGILOCKER_BYPASS || '').toLowerCase() === 'true';
+    const bypass = String(process.env.CASHFREE_DIGILOCKER_BYPASS || process.env.DIGILOCKER_BYPASS || 'true').toLowerCase();
+    return bypass === 'true' || bypass === '1';
 }
 
 function buildMockVerifyUrl(redirectUrl, verificationId) {

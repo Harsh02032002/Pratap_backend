@@ -245,7 +245,7 @@ function detectViolation(text, settings = {}) {
     if (linkRegex.test(msgText)) {
       const lower = msgText.toLowerCase();
       const isOfficial = lower.includes('localhost') || lower.includes('127.0.0.1') || lower.includes('roomhy.com') || lower.includes('roohmy');
-      const isPayment = lower.includes('/website/pay') || lower.includes('pay?bookingid=') || lower.includes('cashfree') || lower.includes('razorpay') || lower.includes('rzp.io');
+      const isPayment = lower.includes('/website/pay') || lower.includes('pay?bookingid=') || lower.includes('payu') || lower.includes('payu.in') || lower.includes('razorpay') || lower.includes('rzp.io');
       if (!isOfficial && !isPayment) {
         if (!violationType) violationType = 'contact_sharing';
         msgText = msgText.replace(linkRegex, '[MASKED LINK]');
@@ -306,8 +306,9 @@ function detectViolation(text, settings = {}) {
   let cleanBypassText = msgText;
   const officialUrls = [
     /https?:\/\/(www\.)?roomhy\.com\/website\/pay[^\s]*/gi,
-    /https?:\/\/(www\.)?payments\.cashfree\.com[^\s]*/gi,
-    /https?:\/\/(www\.)?payments-test\.cashfree\.com[^\s]*/gi,
+    /https?:\/\/(www\.)?payu\.in[^\s]*/gi,
+    /https?:\/\/(www\.)?test\.payu\.in[^\s]*/gi,
+    /https?:\/\/(www\.)?secure\.payu\.in[^\s]*/gi,
     /https?:\/\/localhost(:\d+)?\/website\/pay[^\s]*/gi,
     /https?:\/\/127\.0\.0\.1(:\d+)?\/website\/pay[^\s]*/gi
   ];
@@ -584,8 +585,8 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
       messageDoc.message_type === 'image' ||
       messageDoc.message_type === 'file' ||
       messageDoc.message_type === 'video' ||
-      textLower.includes('cashfree.com') ||
-      textLower.includes('cashfree') ||
+      textLower.includes('payu.in') ||
+      textLower.includes('payu') ||
       textLower.includes('roomhy.com') ||
       textLower.includes('/website/pay') ||
       textLower.includes('bookingid=') ||

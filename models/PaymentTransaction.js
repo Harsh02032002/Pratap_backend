@@ -15,18 +15,22 @@ const mongoose = require('mongoose');
  *   skipped   → cash / already_paid bookings (no wallet entry)
  */
 const paymentTransactionSchema = new mongoose.Schema({
-  // ─── CASHFREE PAYMENT GATEWAY ─────────────────────────────────────────────
+  // ─── PAYU PAYMENT GATEWAY ─────────────────────────────────────────────
+  order_id:           { type: String, index: true },
+  payment_gateway:    { type: String, default: 'payu', index: true },
+  payu_txnid:         { type: String, index: true },
+  payu_mihpayid:      { type: String, index: true },
   cf_order_id:        { type: String, index: true },
   cf_payment_id:      { type: String, index: true },
   cf_payment_link_id: { type: String, default: null },
-  cf_payment_link:    { type: String, default: null },   // The actual URL sent to tenant
-  cf_order_token:     { type: String, default: null },   // Short-lived token for JS SDK
+  cf_payment_link:    { type: String, default: null },
+  cf_order_token:     { type: String, default: null },
 
   // ─── STATE MACHINE ────────────────────────────────────────────────────────
   status: {
     type: String,
-    enum: ['Created', 'Verified', 'Settled', 'Refunded', 'Failed'],
-    default: 'Created',
+    enum: ['Created', 'PENDING', 'PAID', 'Verified', 'Settled', 'Refunded', 'Failed', 'FAILED', 'CANCELLED'],
+    default: 'PENDING',
     index: true
   },
 
@@ -66,9 +70,9 @@ const paymentTransactionSchema = new mongoose.Schema({
     default: 'Pending',
     index: true
   },
-  payout_reference:    { type: String, default: null },  // Cashfree transfer ID
+  payout_reference:    { type: String, default: null },
   payout_date:         { type: Date, default: null },
-  payout_initiated_by: { type: String, default: null },  // Admin loginId who clicked Withdraw
+  payout_initiated_by: { type: String, default: null },
 
   // ─── OWNER BANK DETAILS (captured at time of payout) ─────────────────────
   payout_account_holder: { type: String, default: null },
@@ -83,7 +87,7 @@ const paymentTransactionSchema = new mongoose.Schema({
   refund_date:   { type: Date, default: null },
 
   // ─── METADATA ─────────────────────────────────────────────────────────────
-  payment_method: { type: String, default: 'cashfree' },  // 'cashfree' | 'cash' | 'already_paid'
+  payment_method: { type: String, default: 'payu' },  // 'payu' | 'cash' | 'already_paid'
   payment_date:   { type: Date, default: Date.now, index: true },
   notes:          { type: String, default: '' },
   raw_webhook:    { type: mongoose.Schema.Types.Mixed, default: null }, // Full webhook payload

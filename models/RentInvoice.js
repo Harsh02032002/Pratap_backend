@@ -83,6 +83,8 @@ const rentInvoiceSchema = new Schema({
   lastEvaluatedAt: Date,
 
   notes: String,
+  payuTxnid: { type: String, index: true, sparse: true },
+  payuPaymentId: { type: String },
   cashfreeOrderId: { type: String, index: true, sparse: true },
   cashfreePaymentId: { type: String },
 }, {

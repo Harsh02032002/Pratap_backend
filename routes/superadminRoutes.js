@@ -1238,9 +1238,13 @@ router.get('/settings', protect, authorize('superadmin'), async (req, res) => {
   try {
     let settings = await SystemSettings.findOne();
     if (!settings) {
-      settings = await SystemSettings.create({ commission_percentage: 10 });
+      settings = await SystemSettings.create({ commission_percentage: 10, defaultBookingAmount: 500 });
     }
-    res.json({ success: true, settings });
+    const settingsObj = settings.toObject ? settings.toObject() : settings;
+    if (settingsObj.defaultBookingAmount === undefined || settingsObj.defaultBookingAmount === null) {
+      settingsObj.defaultBookingAmount = 500;
+    }
+    res.json({ success: true, settings: settingsObj });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -1249,7 +1253,7 @@ router.get('/settings', protect, authorize('superadmin'), async (req, res) => {
 // Update System Settings
 router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
   try {
-    const { commission_percentage, gst_percentage, updated_by } = req.body;
+    const { commission_percentage, gst_percentage, defaultBookingAmount, bookingAmount, default_booking_amount, updated_by } = req.body;
     
     if (commission_percentage === undefined || isNaN(Number(commission_percentage))) {
       return res.status(400).json({ success: false, message: 'Invalid commission percentage value' });
@@ -1266,6 +1270,12 @@ router.post('/settings', protect, authorize('superadmin'), async (req, res) => {
     if (gst_percentage !== undefined && !isNaN(Number(gst_percentage))) {
       settings.gst_percentage = Number(gst_percentage);
     }
+    
+    const targetBookingAmount = defaultBookingAmount !== undefined ? defaultBookingAmount : (bookingAmount !== undefined ? bookingAmount : default_booking_amount);
+    if (targetBookingAmount !== undefined && !isNaN(Number(targetBookingAmount)) && Number(targetBookingAmount) >= 0) {
+      settings.defaultBookingAmount = Number(targetBookingAmount);
+    }
+
     settings.updated_by = updated_by || 'superadmin';
     await settings.save();
 

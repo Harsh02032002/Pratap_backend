@@ -472,7 +472,30 @@ exports.createBookingRequest = async (req, res) => {
         // Generate unique chat room ID
         const chatRoomId = `chat_${property_id}_${Date.now()}`;
 
-        // ✅ UPDATED: Create booking with owner_id and owner_name properly set
+        // ─── DUPLICATE BID GUARD ──────────────────────────────────────────────────
+        // A tenant cannot bid on the same property again unless the owner has
+        // rejected their previous request. Block if any active (pending/confirmed/
+        // booked) BookingRequest exists for this user_id + property_id combination.
+        const existingActiveBid = await BookingRequest.findOne({
+            property_id,
+            user_id,
+            status: { $in: ['pending', 'confirmed', 'booked'] }
+        }).select('_id status created_at').lean();
+
+        if (existingActiveBid) {
+            const statusLabel = existingActiveBid.status === 'pending'
+                ? 'pending owner review'
+                : existingActiveBid.status;
+            console.warn(`⛔ Duplicate bid blocked: user=${user_id} already has a ${existingActiveBid.status} bid on property=${property_id}`);
+            return res.status(409).json({
+                success: false,
+                isDuplicate: true,
+                message: `You already have a booking request for this property that is ${statusLabel}. You can submit a new request only after the owner rejects your current one.`,
+                existingBidId: existingActiveBid._id
+            });
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
         const newRequest = new BookingRequest({
             property_id,
             property_name,

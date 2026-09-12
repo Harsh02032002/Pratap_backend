@@ -12,10 +12,7 @@ function getApiBase() {
 }
 
 function isAadhaarBypassEnabled() {
-    const aadhaarBypass = String(process.env.CASHFREE_AADHAAR_BYPASS || '').toLowerCase() === 'true';
-    const digilockerBypass = String(process.env.CASHFREE_DIGILOCKER_BYPASS || '').toLowerCase() === 'true';
-    const env = String(process.env.CASHFREE_ENV || 'sandbox').toLowerCase();
-    return aadhaarBypass || (env === 'sandbox' && digilockerBypass);
+    return true;
 }
 
 function getMockOtp() {

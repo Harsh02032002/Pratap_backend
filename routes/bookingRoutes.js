@@ -33,6 +33,18 @@ router.get('/config/razorpay-key', (req, res) => {
     }
 });
 
+// Get Default Booking Token Amount (public endpoint for frontend booking checkout)
+router.get('/config/booking-amount', async (req, res) => {
+    try {
+        const SystemSettings = require('../models/SystemSettings');
+        const settings = await SystemSettings.findOne().lean();
+        const bookingAmount = settings?.defaultBookingAmount ?? 500;
+        res.json({ success: true, bookingAmount });
+    } catch (error) {
+        res.json({ success: true, bookingAmount: 500 });
+    }
+});
+
 // Create Razorpay order for booking payment
 router.post('/create-order', (req, res) => {
     try {

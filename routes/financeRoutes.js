@@ -64,7 +64,7 @@ router.get('/alerts/rent-due-reminders', financeController.getRentDueRemindersAl
 router.get('/alerts/payments', financeController.getPaymentAlerts);
 router.get('/alerts/payouts', financeController.getPayoutAlerts);
 
-// ─── Manual Payment + Wallet (Cashfree-free) ────────────────────────────────
+// ─── Manual Payment + Wallet ────────────────────────────────
 router.post('/manual-payment',  financeController.recordManualPayment);
 router.get('/admin-wallet',     financeController.getAdminWallet);
 router.post('/manual-transfer', financeController.manualTransferToOwner);

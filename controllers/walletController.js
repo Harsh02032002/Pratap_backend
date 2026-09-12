@@ -2,7 +2,6 @@ const Owner = require('../models/Owner');
 const BookingRequest = require('../models/BookingRequest');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const PayoutRequest = require('../models/PayoutRequest');
-const { directBankTransfer } = require('../services/cashfreePayoutService');
 const { sumRentPayments, sumField, getAdminTransactionTotals } = require('../services/paymentTotalsService');
 
 /**

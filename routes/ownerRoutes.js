@@ -926,7 +926,7 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail
 
 
 
-// POST /api/owners/create-subscription-order — Create Cashfree order for owner subscription
+// POST /api/owners/create-subscription-order — Create PayU order for owner subscription
 router.post('/create-subscription-order', async (req, res) => {
     try {
         const { loginId } = req.body;
@@ -934,7 +934,7 @@ router.post('/create-subscription-order', async (req, res) => {
         if (!cleanId) return res.status(400).json({ success: false, message: 'loginId required' });
 
         const SystemSettings = require('../models/SystemSettings');
-        const cfPay = require('../services/cashfreePaymentService');
+        const payuService = require('../services/payuPaymentService');
 
         const [owner, settings] = await Promise.all([
             Owner.findOne({ loginId: normalizeLoginId(cleanId) }),
@@ -944,32 +944,25 @@ router.post('/create-subscription-order', async (req, res) => {
         if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
         const price = Number(settings?.ownerSubscriptionPrice || 999);
-        const orderId = `SUB_OWNER_${owner.loginId}_${Date.now()}`;
+        const txnid = `SUB_OWNER_${owner.loginId}_${Date.now()}`;
 
-        const orderResult = await cfPay.createOrder({
-            orderId,
+        const payuOrder = payuService.preparePaymentOrder({
+            txnid,
             amount: price,
-            currency: 'INR',
-            customerInfo: {
-                id: owner.loginId,
-                name: owner.name || 'Owner',
-                email: owner.email || 'owner@roomhy.com',
-                phone: owner.phone || '9999999999'
-            },
-            meta: {
-                note: `Roomhy Owner Subscription (${owner.loginId})`
-            }
+            productinfo: `Roomhy Owner Subscription (${owner.loginId})`,
+            firstname: owner.name || 'Owner',
+            email: owner.email || 'owner@roomhy.com',
+            phone: owner.phone || '9999999999',
+            udf1: owner.loginId,
+            udf2: 'owner_subscription'
         });
-
-        if (!orderResult.success) {
-            return res.status(502).json({ success: false, message: orderResult.error || 'Failed to create payment order' });
-        }
 
         return res.json({
             success: true,
-            order_id: orderResult.order_id || orderId,
-            cf_order_id: orderResult.cf_order_id,
-            payment_session_id: orderResult.payment_session_id,
+            order_id: txnid,
+            txnid,
+            actionUrl: payuOrder.actionUrl,
+            params: payuOrder.params,
             amount: price,
             currency: 'INR'
         });
@@ -979,22 +972,21 @@ router.post('/create-subscription-order', async (req, res) => {
     }
 });
 
-// POST /api/owners/verify-subscription-payment — Verify Cashfree payment & extend subscription
+// POST /api/owners/verify-subscription-payment — Verify PayU payment & extend subscription
 router.post('/verify-subscription-payment', async (req, res) => {
     try {
-        const { loginId, order_id } = req.body;
+        const { loginId, order_id, txnid: reqTxnid } = req.body;
         const cleanId = String(loginId || '').trim();
-        const orderId = String(order_id || '').trim();
+        const orderId = String(order_id || reqTxnid || '').trim();
 
         if (!cleanId || !orderId) {
             return res.status(400).json({ success: false, message: 'loginId and order_id required' });
         }
 
-        const cfPay = require('../services/cashfreePaymentService');
-        const statusRes = await cfPay.getOrderStatus(orderId);
+        const payuService = require('../services/payuPaymentService');
+        const remoteVerify = await payuService.verifyPaymentWithPayU(orderId);
 
-        const isPaid = statusRes.success && (statusRes.status === 'PAID' || statusRes.order?.order_status === 'PAID');
-        if (!isPaid) {
+        if (!remoteVerify.success) {
             return res.status(400).json({ success: false, message: 'Payment not verified or pending' });
         }
 

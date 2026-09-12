@@ -159,8 +159,8 @@ test('HTTP backstops bound the server without truncating uploads', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('payment, upload, webhook, report and chat routes are exempt from the deadline', () => {
-  for (const p of ['/api/upload', '/api/cashfree/order', '/api/payment/verify',
-    '/api/webhook/cashfree', '/api/reports/owner', '/api/chat/messages']) {
+  for (const p of ['/api/upload', '/api/payments/payu/create-order', '/api/payments/payu/response',
+    '/api/payments/payu/webhook', '/api/reports/owner', '/api/chat/messages']) {
     assert.ok(isExempt(p), `${p} must be exempt — cutting it off at 10s would be worse than waiting`);
   }
 });
