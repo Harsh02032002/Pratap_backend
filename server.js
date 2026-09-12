@@ -548,6 +548,9 @@ try {
     console.log('  ✓ rentCollectionRoutes');
     app.use('/api/electricity', require('./routes/electricityRoutes'));
     console.log('  ✓ electricityRoutes');
+    app.use('/api/payments/payu', require('./routes/payuPaymentRoutes'));
+    app.use('/api/payments', require('./routes/payuPaymentRoutes'));
+    console.log('  ✓ payuPaymentRoutes (mounted at /api/payments/payu and /api/payments)');
 
     // Direct Browser Link to seed Tenant for Owner ROOMHY6120
     app.get('/api/seed-tenant-6120-direct', async (req, res) => {
