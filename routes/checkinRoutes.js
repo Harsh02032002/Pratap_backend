@@ -467,21 +467,19 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
             { new: true }
         );
 
-        // Sync User model if exists
+        // Do not auto-activate owner account upon KYC submission; activation happens upon SuperAdmin approval.
         try {
             const User = require('../models/user');
             await User.updateOne(
                 { $or: [{ loginId: normalizedLoginId }, { email: ownerEmail }] },
-                { $set: { isActive: true, status: 'active' } }
+                { $set: { status: 'pending_approval' } }
             );
         } catch (uErr) {
-            console.warn('Sync User on owner KYC verify warning:', uErr.message);
+            console.warn('Sync User status on owner KYC verify warning:', uErr.message);
         }
 
-        // Send login credentials email now that KYC is verified!
+        // Notify owner that KYC verification was received and is pending SuperAdmin review (No credentials sent yet).
         if (ownerEmail) {
-            // APP_URL is already defined at module scope (line ~25).
-            const fullLoginUrl = `${APP_URL}/propertyowner/ownerlogin`;
             const emailHtml = `
                 <!DOCTYPE html>
                 <html>
@@ -491,36 +489,33 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
                         body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; }
                         .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
                         .header { background: linear-gradient(135deg, #16a34a 0%, #15803d 100%); color: white; padding: 30px; text-align: center; border-radius: 12px 12px 0 0; }
-                        .header h1 { margin: 0; font-size: 26px; }
+                        .header h1 { margin: 0; font-size: 24px; }
                         .content { padding: 30px; background: #ffffff; }
-                        .credentials { background: #f0fdf4; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0; border-radius: 8px; }
-                        .credentials p { margin: 8px 0; font-size: 15px; }
-                        .label { font-weight: bold; color: #333; }
-                        .value { font-family: monospace; color: #16a34a; font-weight: bold; font-size: 16px; }
-                        .button { display: inline-block; background: #16a34a; color: white !important; padding: 14px 32px; text-decoration: none; border-radius: 8px; margin-top: 15px; font-weight: bold; }
+                        .notice { background: #f0fdf4; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0; border-radius: 8px; }
+                        .notice p { margin: 8px 0; font-size: 14px; color: #166534; }
                         .success { color: #16a34a; font-weight: bold; font-size: 18px; margin-bottom: 15px; }
+                        .footer { font-size: 12px; color: #888; text-align: center; margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
                     </style>
                 </head>
                 <body>
                     <div class="container">
                         <div class="header">
-                            <h1>✓ KYC Verification Completed!</h1>
+                            <h1>✓ KYC Verification Received</h1>
                         </div>
                         <div class="content">
                             <p>Dear <strong>${ownerDoc?.name || updatedOwner?.name || 'Property Owner'}</strong>,</p>
                             
-                            <div class="success">🎉 Your Digital KYC Verification is Successful!</div>
+                            <div class="success">🎉 Your Digital KYC Verification has been Received!</div>
                             
-                            <p>Your RoomHy Property Owner account is now active. Below are your login credentials to access the Owner Portal:</p>
+                            <p>Thank you for submitting your digital KYC details for RoomHy property onboarding.</p>
                             
-                            <div class="credentials">
-                                <p><span class="label">Login ID / Username:</span> <span class="value">${updatedOwner.loginId}</span></p>
-                                <p><span class="label">Password:</span> <span class="value">${ownerPassword}</span></p>
+                            <div class="notice">
+                                <p><strong>Next Step:</strong> Your visit report and property details are currently under review by RoomHy SuperAdmin.</p>
+                                <p>Once approved by SuperAdmin, your property will be published live and your Owner Portal login credentials will be delivered to your email.</p>
                             </div>
-
-                            <div style="text-align: center; margin-top: 25px;">
-                                <a href="${fullLoginUrl}" class="button">Log In to Owner Portal</a>
-                            </div>
+                        </div>
+                        <div class="footer">
+                            © 2026 RoomHy Platform. All rights reserved.
                         </div>
                     </div>
                 </body>
@@ -528,8 +523,8 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
             `;
 
             try {
-                await sendMail(ownerEmail, '✓ KYC Verified — Your RoomHy Owner Login Credentials', '', emailHtml);
-                console.log('[CHECKIN KYC] Sent login credentials email to:', ownerEmail);
+                await sendMail(ownerEmail, '✓ RoomHy Digital KYC Verification Received', '', emailHtml);
+                console.log('[CHECKIN KYC] Sent KYC completion confirmation email (holding credentials for SuperAdmin approval) to:', ownerEmail);
             } catch (emailErr) {
                 console.error('[CHECKIN KYC] Email error:', emailErr.message);
             }

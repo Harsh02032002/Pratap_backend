@@ -169,6 +169,12 @@ async function syncVisitKycStatus(visits = []) {
                     { kycStatus: 'completed', kycCompletedAt: new Date() }
                 );
                 v.kycStatus = 'completed';
+            } else if (v.kycStatus !== 'sent') {
+                await VisitData.updateOne(
+                    { visitId: v.visitId },
+                    { kycStatus: 'sent', kycSentAt: v.kycSentAt || new Date() }
+                );
+                v.kycStatus = 'sent';
             }
         } catch (err) {
             console.warn('[syncVisitKycStatus] failed for visit', v.visitId, err.message);
@@ -181,9 +187,16 @@ async function syncVisitKycStatus(visits = []) {
 // Issue owner credentials + email the digital-KYC link for a visit.
 // Shared by the automatic send on visit submission and the manual resend endpoint.
 async function sendOwnerKycLink(visit) {
-    const ownerEmail = visit.ownerEmail || '';
+    const ownerEmail = String(
+        visit.ownerEmail ||
+        (visit.propertyInfo && (visit.propertyInfo.ownerEmail || visit.propertyInfo.ownerGmail)) ||
+        visit.ownerGmail ||
+        visit.visitorEmail ||
+        ''
+    ).trim();
+
     if (!ownerEmail) {
-        const err = new Error('No owner email found on this visit');
+        const err = new Error('No owner email found on this visit report');
         err.statusCode = 400;
         throw err;
     }
@@ -326,12 +339,11 @@ function respondOnce(res, status, payload) {
 async function dispatchVisitSubmissionNotices(visit, ctx = {}) {
     const { propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area } = ctx;
 
+    // Send Digital KYC link to owner so owner can complete KYC verification
     try {
         await sendOwnerKycLink(visit);
     } catch (kycErr) {
         console.warn('[visits/submit] KYC link auto-send failed:', kycErr.message);
-        // sendOwnerKycLink sets kycStatus 'sent' only on success, so the status
-        // stays 'not_sent' here; record why, for the Resend KYC affordance.
         try {
             await VisitData.updateOne(
                 { visitId: visit.visitId },
@@ -607,11 +619,29 @@ router.post('/', protect, authorize('superadmin', 'employee', 'manager', 'areama
             console.warn('visit create notification failed:', notifyErr.message);
         }
 
-        console.log('? [visits/POST] Visit saved to MongoDB:', newVisit._id, 'visitId:', visitId);
+        console.log('✅ [visits/POST] Visit saved to MongoDB:', newVisit._id, 'visitId:', visitId);
+
+        runOutsideRequestBudget(() => {
+            const propName = newVisit.propertyName || (newVisit.propertyInfo && newVisit.propertyInfo.name) || 'Property';
+            const oName = newVisit.ownerName || (newVisit.propertyInfo && newVisit.propertyInfo.ownerName) || '';
+            const oEmail = newVisit.ownerEmail || (newVisit.propertyInfo && (newVisit.propertyInfo.ownerEmail || newVisit.propertyInfo.ownerGmail)) || newVisit.visitorEmail || '';
+
+            dispatchVisitSubmissionNotices(newVisit, {
+                propertyName: propName,
+                ownerName: oName,
+                ownerEmail: oEmail,
+                visitorName: newVisit.visitorName || newVisit.staffName,
+                visitorEmail: newVisit.visitorEmail,
+                city: newVisit.city,
+                area: newVisit.area
+            }).catch((err) => {
+                console.error('[visits/POST] dispatchVisitSubmissionNotices failed:', err.message);
+            });
+        });
 
         res.status(201).json({
             success: true,
-            message: 'Visit saved successfully',
+            message: 'Visit saved successfully. Digital KYC link sent to owner.',
             visit: newVisit
         });
 
@@ -1423,8 +1453,9 @@ router.post('/submit', protect, authorize(
             // Only re-run the fan-out if the first attempt never got the link out.
             if (existing && existing.kycStatus !== 'sent') {
                 runOutsideRequestBudget(() => {
+                    const submitterRole = String(req.user?.role || '').toLowerCase();
                     dispatchVisitSubmissionNotices(existing, {
-                        propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area
+                        propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area, submitterRole
                     }).catch((err) => {
                         console.error('[visits/submit] retry dispatch failed:', err);
                     });
@@ -1447,25 +1478,55 @@ router.post('/submit', protect, authorize(
         // none of it belongs inside the request. Delivery outcome is written
         // back onto the VisitData doc instead of being reported inline — the
         // list reads kycStatus, and "Resend KYC" covers a failure.
+        const requester = await resolveRequestUser(req);
+        const submitterRole = String(requester?.role || (req.user && req.user.role) || '').toLowerCase();
+        const isSuperAdminSubmitter = ['superadmin', 'admin'].includes(submitterRole);
+
+        // Send owner KYC link synchronously so VisitData.kycStatus is updated to 'sent'
+        // before returning 201 to the frontend, preventing 'KYC NOT SENT' race condition.
+        let kycLinkSuccess = false;
+        let kycErrorMsg = null;
+        try {
+            await sendOwnerKycLink(visit);
+            kycLinkSuccess = true;
+        } catch (kycErr) {
+            console.warn('[visits/submit] KYC link auto-send failed:', kycErr.message);
+            kycErrorMsg = kycErr.message;
+            await VisitData.updateOne(
+                { visitId: visit.visitId },
+                { $set: { kycLinkError: kycErr.message } }
+            );
+        }
+
+        const freshVisit = await VisitData.findOne({ visitId: visit.visitId }).lean();
+
         invalidateVisitsList();
         respondOnce(res, 201, {
             success: true,
-            message: 'Visit submitted successfully. The digital KYC link is being emailed to the owner.',
+            message: isSuperAdminSubmitter
+                ? 'Visit submitted successfully by SuperAdmin.'
+                : 'Visit submitted successfully and queued for SuperAdmin approval.',
             visitId: visitId,
-            kycLinkPending: true,
-            data: visit
+            kycLinkSent: kycLinkSuccess,
+            kycLinkError: kycErrorMsg,
+            data: freshVisit || visit
         });
 
-        // Fire-and-forget, and detached from the request budget: this work
-        // outlives the response, so left inside it every query it runs after
-        // the first slow SMTP call would be clamped to MIN_OPERATION_MS and
-        // fail on arithmetic rather than on being slow.
         runOutsideRequestBudget(() => {
-            dispatchVisitSubmissionNotices(visit, {
-                propertyName, ownerName, visitorName, staffName, ownerEmail, visitorEmail, city, area
-            }).catch((err) => {
-                console.error('[visits/submit] post-response dispatch failed:', err);
-            });
+            notifySuperadmin({
+                type: 'new_enquiry',
+                from: 'area_manager',
+                subject: `New Visit Submission - ${propertyName || 'Property'}`,
+                message: 'A new visit submission is waiting for superadmin approval.',
+                meta: {
+                    enquiryId: visit.visitId,
+                    userName: ownerName || visitorName || staffName || '',
+                    userEmail: ownerEmail || visitorEmail || '',
+                    propertyName: propertyName || '',
+                    city: city || '',
+                    area: area || ''
+                }
+            }).catch(err => console.warn('visit submit notification failed:', err.message));
         });
 
     } catch (error) {

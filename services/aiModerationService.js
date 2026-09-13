@@ -1,5 +1,50 @@
 const axios = require('axios');
 
+const fallbackModels = [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'llama-3.2-3b-preview',
+    'llama-3.2-1b-preview',
+    'llama-3.2-11b-vision-preview',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
+    'qwen-2.5-coder-32b'
+];
+
+let discoveredModels = [];
+
+async function discoverAvailableModels() {
+    try {
+        const provider = (process.env.AI_MODERATION_PROVIDER || 'groq').toLowerCase().trim();
+        const apiKey = process.env.AI_MODERATION_API_KEY || (provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.GROQ_API_KEY);
+        if (!apiKey) return;
+
+        let baseURL = (process.env.AI_MODERATION_BASE_URL || (provider === 'openai' ? 'https://api.openai.com/v1' : 'https://api.groq.com/openai/v1')).replace(/\/+$/, '');
+
+        const res = await axios.get(`${baseURL}/models`, {
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            timeout: 6000
+        });
+
+        if (res.data?.data && Array.isArray(res.data.data)) {
+            const allModels = res.data.data.map(m => m.id);
+            // Filter out whisper/audio-only models
+            const textModels = allModels.filter(id => !id.includes('whisper') && !id.includes('distill') && !id.includes('audio'));
+            if (textModels.length > 0) {
+                discoveredModels = textModels;
+                console.log(`🤖 [AI MODERATION] Groq API Key verified! Discovered ${textModels.length} active models: ${textModels.join(', ')}`);
+            }
+        }
+    } catch (err) {
+        console.warn(`⚠️ [AI MODERATION Discovery] Failed to fetch models list: ${err.response?.data?.error?.message || err.message}`);
+    }
+}
+
+// Auto-run model discovery on initialization
+discoverAvailableModels();
+
 /**
  * Provider-agnostic AI Moderation Service.
  * Resolves configuration from environment variables to moderate chat messages.
@@ -9,12 +54,13 @@ const axios = require('axios');
  * - AI_MODERATION_PROVIDER: 'groq' or 'openai' (default: 'groq')
  * - AI_MODERATION_API_KEY: API key for completions (fallback to GROQ_API_KEY / OPENAI_API_KEY)
  * - AI_MODERATION_BASE_URL: Base URL endpoint (fallback to groq/openai official endpoints)
- * - AI_MODERATION_MODEL: Model to request (fallback to llama-3.3-70b-versatile / gpt-4o-mini)
+ * - AI_MODERATION_MODEL: Model to request (fallback to llama-3.1-8b-instant / gpt-4o-mini)
  * 
  * @param {string} text - Message text.
  * @param {string} senderRole - Sender's role ('property_owner', 'tenant', 'website_user', etc.)
  * @param {string} receiverRole - Receiver's role.
  * @param {string} [contextHistory] - Formatted recent conversation history for context.
+ * @param {string} [combinedSenderText] - Aggregated recent messages from sender.
  * @returns {Promise<object>} Returns { violation: boolean, type: string, confidence: number, reason: string }
  */
 async function moderateMessage(text, senderRole, receiverRole, contextHistory, combinedSenderText) {
@@ -57,46 +103,22 @@ async function moderateMessage(text, senderRole, receiverRole, contextHistory, c
         } else if (provider === 'openai') {
             baseURL = 'https://api.openai.com/v1';
         } else {
-            // Default fallback
             baseURL = 'https://api.groq.com/openai/v1';
         }
     }
 
-    // Ensure URL doesn't end with a slash for clean concatenation
     baseURL = baseURL.replace(/\/+$/, '');
     const completionsUrl = `${baseURL}/chat/completions`;
 
-    // 4. Resolve Model
-    //
-    // Groq's default was 'llama-3.3-70b-versatile' until that model was
-    // DECOMMISSIONED by the provider. Every call then returned 404, and because
-    // this service fails open (see the catch at the bottom) the entire AI layer
-    // went silently dead: only the local regex in moderationHelper was still
-    // screening anything, so contextual Hinglish attempts — "dede paise mujhe",
-    // a phone number split across two messages — passed straight through.
-    //
-    // Measured against those exact messages plus a clean control set:
-    //   openai/gpt-oss-120b          5/5 caught, 0 false alarms  (~845ms)
-    //   openai/gpt-oss-20b           5/5 caught, 0 false alarms  (~631ms)
-    //   openai/gpt-oss-safeguard-20b 4/5 caught, 0 false alarms  (~475ms)
-    //
-    // 120b is chosen over the faster 20b because this runs in the background,
-    // off the request path, so latency costs the user nothing — and the threat
-    // here is deliberate evasion, where the stronger model generalises better
-    // than a ten-case sample can show.
-    //
-    // Override with AI_MODERATION_MODEL when the provider retires this one.
-    // `npm run check:moderation` reports whether the configured model still
-    // answers, so the next decommission surfaces as a failed check rather than
-    // as months of unscreened chat.
-    let model = process.env.AI_MODERATION_MODEL;
-    if (!model) {
-        if (provider === 'openai') {
-            model = 'gpt-4o-mini';
-        } else {
-            model = 'openai/gpt-oss-120b';
-        }
+    // 4. Resolve Model & Candidate List
+    let configuredModel = process.env.AI_MODERATION_MODEL;
+    if (!configuredModel) {
+        configuredModel = provider === 'openai' ? 'gpt-4o-mini' : 'llama-3.1-8b-instant';
     }
+
+    const modelsToTry = provider === 'groq'
+        ? Array.from(new Set([configuredModel, ...discoveredModels, ...fallbackModels]))
+        : [configuredModel];
 
     // Map roles to user-friendly titles
     const mapRole = (role) => {
@@ -163,37 +185,35 @@ Message: "${sanitizedText}"
 Sender Role: ${sender}
 Receiver Role: ${receiver}`;
 
-    // Moderation runs in the background, so a slightly longer budget costs
-    // nothing and a timeout here means the message goes UNMODERATED (see the
-    // fail-open catch below). 5s was tight enough to trip regularly.
     const timeoutMs = parseInt(process.env.AI_MODERATION_TIMEOUT_MS, 10) || 12000;
     const maxAttempts = parseInt(process.env.AI_MODERATION_MAX_RETRIES, 10) || 2;
+    
     let response = null;
-
-    const modelsToTry = process.env.AI_MODERATION_MODEL
-        ? [process.env.AI_MODERATION_MODEL]
-        : (provider === 'groq' ? [model, ...fallbackModels.filter(m => m !== model)] : [model]);
-
     let lastError = null;
+    let activeModel = configuredModel;
 
-    for (const currentModel of modelsToTry) {
-        model = currentModel;
-        try {
+    try {
+        for (const currentCandidate of modelsToTry) {
+            activeModel = currentCandidate;
+            let currentModelSuccess = false;
+
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
+                    const payload = {
+                        model: activeModel,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userMessageContent }
+                        ],
+                        temperature: 0.1,
+                        max_tokens: 300
+                    };
+                    if (provider === 'openai') {
+                        payload.response_format = { type: 'json_object' };
+                    }
                     response = await axios.post(
                         completionsUrl,
-                        {
-                            model: model,
-                            messages: [
-                                { role: 'system', content: systemPrompt },
-                                { role: 'user', content: userMessageContent }
-                            ],
-                            response_format: {
-                                type: 'json_object'
-                            },
-                            temperature: 0.1
-                        },
+                        payload,
                         {
                             headers: {
                                 'Authorization': `Bearer ${apiKey}`,
@@ -202,36 +222,46 @@ Receiver Role: ${receiver}`;
                             timeout: timeoutMs
                         }
                     );
+                    currentModelSuccess = true;
                     break;
                 } catch (attemptErr) {
+                    lastError = attemptErr;
                     const status = attemptErr.response?.status;
-                    if (attempt === maxAttempts || (status && status < 500)) throw attemptErr;
-                    console.warn(`⚠️ AI moderation attempt ${attempt} failed (${attemptErr.message}); retrying...`);
+                    const errorMsg = attemptErr.response?.data?.error?.message || attemptErr.message;
+
+                    if (status === 400 || status === 404) {
+                        console.warn(`⚠️ Model "${activeModel}" returned HTTP ${status} on ${provider} (${errorMsg}). Trying next fallback model...`);
+                        break;
+                    }
+                    if (attempt < maxAttempts) {
+                        console.warn(`⚠️ AI moderation attempt ${attempt} for model "${activeModel}" failed (${errorMsg}); retrying...`);
+                    }
                 }
             }
-            if (response) break;
-        } catch (modelErr) {
-            lastError = modelErr;
-            const status = modelErr.response?.status;
-            if (status === 404 && modelsToTry.indexOf(currentModel) < modelsToTry.length - 1) {
-                console.warn(`⚠️ Model "${currentModel}" returned 404 on ${provider}, trying fallback model...`);
-                continue;
+
+            if (currentModelSuccess && response) {
+                break;
             }
-            throw modelErr;
         }
-    }
 
-    try {
+        if (!response) {
+            throw lastError || new Error(`All candidate models failed for provider ${provider}`);
+        }
+
         const choice = response.data?.choices?.[0]?.message?.content;
-        console.log(`--- RESPONSE --- \n${choice}\n----------------`);
+        console.log(`--- AI MODERATION RESPONSE (${activeModel}) --- \n${choice}\n----------------`);
         if (!choice) {
-            throw new Error(`Empty response content from ${provider} API`);
+            throw new Error(`Empty response content from ${provider} API using model ${activeModel}`);
         }
 
-        const moderationResult = JSON.parse(choice);
+        let jsonString = String(choice || '').trim();
+        jsonString = jsonString.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        const moderationResult = JSON.parse(jsonString);
+
         health.consecutiveFailures = 0;
         health.lastSuccessAt = new Date();
-        health.model = model;
+        health.model = activeModel;
+
         return {
             violation: !!moderationResult.violation,
             type: moderationResult.type || 'none',
@@ -243,38 +273,29 @@ Receiver Role: ${receiver}`;
         health.consecutiveFailures += 1;
         health.lastFailureAt = new Date();
         health.lastFailureReason = `${status || 'network'}: ${err.message}`;
-        health.model = model;
+        health.model = activeModel;
 
-        // A 404/400 is a CONFIGURATION failure, not a blip: the model is gone or
-        // the request shape is wrong, and it will fail identically forever. That
-        // is exactly how this layer died unnoticed, so it is logged distinctly
-        // from a transient outage and repeated on every message rather than
-        // being lost in the noise once.
         if (status === 404 || status === 400) {
             console.error(
-                `🚨 AI MODERATION IS DOWN — provider ${provider} rejected model "${model}" (HTTP ${status}). ` +
-                `Chat is running on regex screening ONLY. Set AI_MODERATION_MODEL to a model this key can reach ` +
-                `and restart. Run "npm run check:moderation" to list working models.`
+                `🚨 AI MODERATION — provider ${provider} rejected model "${activeModel}" (HTTP ${status}). ` +
+                `Chat is running on regex screening fallback.`
             );
         } else if (status === 401 || status === 403) {
             console.error(
-                `🚨 AI MODERATION IS DOWN — provider ${provider} rejected the API key (HTTP ${status}). ` +
-                `Chat is running on regex screening ONLY.`
+                `🚨 AI MODERATION — provider ${provider} rejected API key (HTTP ${status}). ` +
+                `Chat is running on regex screening fallback.`
             );
         } else {
-            console.error(`❌ AI Chat Moderation API error (${provider}) after ${maxAttempts} attempt(s):`, err.message);
-            if (health.consecutiveFailures === FAILURE_ALERT_THRESHOLD) {
-                console.error(
-                    `🚨 AI MODERATION has failed ${FAILURE_ALERT_THRESHOLD} times in a row (${health.lastFailureReason}). ` +
-                    `Chat is running on regex screening ONLY.`
-                );
-            }
+            console.error(`❌ AI Chat Moderation API error (${provider}) for model "${activeModel}":`, err.message);
         }
 
-        // Fail-safe: Allow the message to proceed in case of API failure to avoid
-        // user disruption. `failed` records that this message was NOT actually
-        // screened, so an unscreened message is distinguishable from a clean one.
-        return { violation: false, type: 'none', confidence: 0, failed: true, reason: `API call failed: ${err.message}` };
+        return {
+            violation: false,
+            type: 'none',
+            confidence: 0,
+            failed: true,
+            reason: `API call failed: ${err.message}`
+        };
     }
 }
 
