@@ -449,7 +449,11 @@ mongoose.connection.on('connected', () => {
     }
 });
 mongoose.connection.on('error', (err) => console.error('❌ Mongoose error', err && err.message));
-mongoose.connection.on('disconnected', () => console.warn('⚠️ Mongoose disconnected'));
+mongoose.connection.on('disconnected', () => {
+    if (mongoose.connection.readyState === 0) {
+        console.warn('⚠️ Mongoose connection lost (all sockets closed)');
+    }
+});
 mongoose.connection.on('reconnected', () => console.log('✅ Mongoose reconnected'));
 
 // Routes (API Endpoints)
