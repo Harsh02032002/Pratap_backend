@@ -127,6 +127,60 @@ const syncToApprovedProperty = async (property) => {
       { upsert: true, new: true }
     );
     console.log(`✅ Synced property ${property._id} to website`);
+
+    // Auto-complete any pending Property Edit / Room Photo Edit tickets for this property/owner
+    try {
+      const SupportTicket = require('../models/SupportTicket');
+      const mailer = require('../utils/mailer');
+      const fcmService = require('../services/fcmService');
+      
+      const openEditTickets = await SupportTicket.find({
+        $or: [
+          { property_id: String(property._id) },
+          { property_id: property.visitId },
+          { owner_id: property.ownerLoginId || property.owner }
+        ],
+        ticket_type: { $in: ['Property Edit Request', 'Room Photo Edit Request'] },
+        status: { $in: ['Open', 'In Progress', 'Assigned', 'Waiting For Response'] }
+      });
+
+      for (const t of openEditTickets) {
+        t.status = 'Completed';
+        t.resolution_notes = 'Property & Room edit request completed and synced live to Roomhy.';
+        t.resolved_at = new Date();
+        t.activity_log.push({
+          action: 'Auto-Completed on Property Edit',
+          performed_by: 'system',
+          performed_by_name: 'System Sync Engine',
+          from_status: t.status,
+          to_status: 'Completed',
+          note: 'Property edit was approved/updated and synced live.',
+          at: new Date()
+        });
+        await t.save();
+        console.log(`🎉 Support ticket ${t.ticket_id} auto-completed on property sync!`);
+
+        // Notify Owner via Email & Push
+        if (t.user_email) {
+          await mailer.sendMail(
+            t.user_email,
+            `✅ Ticket Completed: [${t.ticket_id}] ${t.subject}`,
+            `Your property edit request ${t.ticket_id} has been completed!`,
+            `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;"><div style="background: #10b981; color: #fff; padding: 20px; text-align: center;"><h2>Ticket Completed ✅</h2><p>Ref ID: <strong>${t.ticket_id}</strong></p></div><div style="padding: 20px;"><p>Hi <strong>${t.raised_by_name}</strong>,</p><p>Your property edit request <strong>"${t.subject}"</strong> has been completed and synced live to Roomhy.</p></div></div>`
+          ).catch(() => {});
+        }
+        if (t.raised_by) {
+          await fcmService.sendToUser(t.raised_by, {
+            title: `✅ Ticket Completed: ${t.ticket_id}`,
+            body: `Your property edit request "${t.subject}" has been updated live!`,
+            icon: '/pwa-192x192.png',
+            clickAction: '/propertyowner/support'
+          }).catch(() => {});
+        }
+      }
+    } catch (ticketErr) {
+      console.warn('Auto-ticket completion warning:', ticketErr.message);
+    }
   } catch (err) {
     console.error('❌ Sync to ApprovedProperty failed:', err);
   }

@@ -551,6 +551,8 @@ try {
     app.use('/api/payments/payu', require('./routes/payuPaymentRoutes'));
     app.use('/api/payments', require('./routes/payuPaymentRoutes'));
     console.log('  ✓ payuPaymentRoutes (mounted at /api/payments/payu and /api/payments)');
+    app.use('/api/tickets', require('./routes/ticketRoutes'));
+    console.log('  ✓ ticketRoutes');
 
     // Direct Browser Link to seed Tenant for Owner ROOMHY6120
     app.get('/api/seed-tenant-6120-direct', async (req, res) => {

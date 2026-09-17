@@ -195,6 +195,13 @@ const TenantSchema = new mongoose.Schema({
     verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     verifiedAt: { type: Date },
     
+    // Push notification tokens
+    fcmTokens: [{
+        token: { type: String },
+        deviceType: { type: String, default: 'web' },
+        updatedAt: { type: Date, default: Date.now }
+    }],
+
     // Timestamps
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }

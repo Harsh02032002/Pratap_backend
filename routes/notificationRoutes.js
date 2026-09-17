@@ -46,8 +46,8 @@ router.post('/owner/new-bidding', notificationController.sendOwnerNewBiddingNoti
 router.get('/unread-count', notificationController.getUnreadCount);
 // Mark all as read
 router.put('/mark-all-read', notificationController.markAllRead);
-// Delete read notifications
-router.delete('/delete-read', notificationController.deleteReadNotifications);
-
+// ==================== FCM PUSH NOTIFICATIONS ====================
+router.post('/register-fcm-token', notificationController.registerFcmToken);
+router.post('/send-fcm-push', notificationController.sendFcmPush);
 
 module.exports = router;

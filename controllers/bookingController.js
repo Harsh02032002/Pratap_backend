@@ -573,6 +573,44 @@ exports.createBookingRequest = async (req, res) => {
                 },
                 read: false
             });
+
+            // 📱 Send instant FCM Push Notification to owner's devices (Laptop & Phone)
+            try {
+                const fcmService = require('../services/fcmService');
+                const pushTitle = request_type === 'bid'
+                    ? `💰 New Bid: ₹${Number(bid_amount || 0).toLocaleString('en-IN')}`
+                    : `🔔 New Booking Request`;
+                const pushBody = `${name || 'Student'} placed a ${request_type === 'bid' ? 'bid' : 'booking request'} for ${property_name}`;
+
+                await fcmService.sendToUser(ownerLoginId, {
+                    title: pushTitle,
+                    body: pushBody,
+                    icon: '/pwa-192x192.png',
+                    clickAction: '/propertyowner/booking_request',
+                    data: {
+                        bookingId: String(newRequest._id || ''),
+                        type: request_type === 'bid' ? 'owner_new_bidding' : 'owner_new_booking_request'
+                    }
+                });
+                console.log(`📱 Push notification dispatched to owner: ${ownerLoginId}`);
+
+                // ⚡ Real-time Socket.io broadcast to active owner sessions on Laptop & Phone
+                if (global.io) {
+                    const socketPayload = {
+                        title: pushTitle,
+                        body: pushBody,
+                        bookingId: String(newRequest._id || ''),
+                        propertyName: property_name || '',
+                        bidAmount: bid_amount || rent_amount || 0
+                    };
+                    global.io.to(ownerLoginId).emit('new_bidding_alert', socketPayload);
+                    global.io.to(String(ownerLoginId).toUpperCase()).emit('new_bidding_alert', socketPayload);
+                    global.io.to(String(ownerLoginId).toLowerCase()).emit('new_bidding_alert', socketPayload);
+                    console.log(`⚡ Socket.io bidding alert emitted to owner room: ${ownerLoginId}`);
+                }
+            } catch (fcmErr) {
+                console.warn('FCM push notification warning:', fcmErr.message);
+            }
         } catch (notifyErr) {
             console.warn('Failed to create owner booking notification:', notifyErr.message);
         }

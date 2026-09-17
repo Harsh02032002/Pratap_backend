@@ -65,6 +65,13 @@ const userSchema = new mongoose.Schema({
     bookings: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Booking' }],
     reviews: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Review' }],
 
+    // FCM Push Notification tokens for devices (laptops, phones)
+    fcmTokens: [{
+        token: { type: String, required: true },
+        deviceType: { type: String, default: 'web' },
+        updatedAt: { type: Date, default: Date.now }
+    }],
+
     createdAt: { type: Date, default: Date.now }
 });
 

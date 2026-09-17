@@ -164,6 +164,11 @@ const ownerSchema = new mongoose.Schema({
     isActive: { type: Boolean, default: true },
     isDeleted: { type: Boolean, default: false },
     chatRestrictedUntil: { type: Date, default: null },
+    fcmTokens: [{
+        token: { type: String },
+        deviceType: { type: String, default: 'web' },
+        updatedAt: { type: Date, default: Date.now }
+    }],
     settings: {
         checkoutTime: { type: String, default: "10:00 AM" },
         checkinTime: { type: String, default: "11:00 AM" },

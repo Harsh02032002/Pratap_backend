@@ -6,6 +6,7 @@ const AreaManager = require('../models/AreaManager');
 const Tenant = require('../models/Tenant');
 const mailer = require('../utils/mailer');
 const staffNotificationService = require('../services/staffNotificationService');
+const fcmService = require('../services/fcmService');
 
 /**
  * GET /api/notifications/me
@@ -734,6 +735,21 @@ exports.sendOwnerNewBiddingNotification = async (req, res) => {
             await mailer.sendMail(resolvedOwnerEmail, subject, '', html);
         }
         
+        // Send FCM Push Notification
+        try {
+            const fcmService = require('../services/fcmService');
+            await fcmService.sendToUser(normalizedOwnerLoginId || ownerLoginId, {
+                title: `💰 New Bid: ₹${Number(bidAmount || 0).toLocaleString('en-IN')}`,
+                body: `${bidderName || 'A user'} placed a bid for ${propertyName}`,
+                icon: '/pwa-192x192.png',
+                clickAction: '/propertyowner/booking_request',
+                data: { bidId: String(bidId || ''), type: 'owner_new_bidding' }
+            });
+            console.log(`📱 Push notification dispatched for owner bidding: ${ownerLoginId}`);
+        } catch (fcmErr) {
+            console.warn('FCM push notification warning:', fcmErr.message);
+        }
+
         console.log(`📢 New bidding notification sent to owner: ${ownerLoginId}`);
         
         res.status(201).json({ 
@@ -808,6 +824,64 @@ exports.deleteReadNotifications = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+/**
+ * Register FCM Token for logged in or guest device
+ * POST /api/notifications/register-fcm-token
+ */
+exports.registerFcmToken = async (req, res) => {
+    try {
+        const { token, deviceType = 'web', loginId } = req.body;
+        const targetUser = (req.user && (req.user._id || req.user.loginId)) || loginId;
+
+        if (!token) {
+            return res.status(400).json({ success: false, message: 'FCM Token is required' });
+        }
+
+        if (!targetUser) {
+            return res.status(400).json({ success: false, message: 'User ID or loginId is required to register token' });
+        }
+
+        const result = await fcmService.registerToken(targetUser, token, deviceType);
+        return res.json(result);
+    } catch (error) {
+        console.error('Error registering FCM token:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
+ * Send FCM Push Notification (by User, Role, or Direct Token)
+ * POST /api/notifications/send-fcm-push
+ */
+exports.sendFcmPush = async (req, res) => {
+    try {
+        const { targetLoginId, targetRole, token, title, body, icon, data, clickAction } = req.body;
+
+        if (!title || !body) {
+            return res.status(400).json({ success: false, message: 'Title and body are required' });
+        }
+
+        const payload = { title, body, icon, data, clickAction };
+        let result;
+
+        if (token) {
+            result = await fcmService.sendToToken(token, payload);
+        } else if (targetLoginId) {
+            result = await fcmService.sendToUser(targetLoginId, payload);
+        } else if (targetRole) {
+            result = await fcmService.sendToRole(targetRole, payload);
+        } else {
+            return res.status(400).json({ success: false, message: 'Specify targetLoginId, targetRole, or token' });
+        }
+
+        return res.json(result);
+    } catch (error) {
+        console.error('Error sending FCM push notification:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 
 
 

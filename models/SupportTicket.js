@@ -22,7 +22,7 @@ const supportTicketSchema = new mongoose.Schema({
     type: String,
     unique: true,
     index: true,
-    default: () => 'TK-' + Date.now().toString(36).toUpperCase()
+    default: () => 'TKT-' + Math.floor(100000 + Math.random() * 900000)
   },
 
   // ─── TICKET SOURCE / TYPE ─────────────────────────────────────────────────
@@ -30,7 +30,9 @@ const supportTicketSchema = new mongoose.Schema({
     type: String,
     enum: [
       'Tenant Complaint', 'Owner Complaint', 'Booking Dispute',
-      'Payment Issue', 'Property Issue', 'Move-in Issue',
+      'Payment Issue', 'Payment / PayU Issue', 'Razorpay Issue',
+      'Property Edit Request', 'Room Photo Edit Request',
+      'Property Issue', 'Move-in Issue',
       'Refund Request', 'Technical Issue', 'Other'
     ],
     required: true,
@@ -74,7 +76,7 @@ const supportTicketSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Open', 'Assigned', 'In Progress', 'Waiting For Response', 'Resolved', 'Closed'],
+    enum: ['Open', 'Assigned', 'In Progress', 'Waiting For Response', 'Resolved', 'Completed', 'Closed'],
     default: 'Open',
     index: true
   },
