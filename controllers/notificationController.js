@@ -120,7 +120,7 @@ exports.getNotifications = async (req, res) => {
     const onlyUnread = req.query.unread === '1' || req.query.unread === 'true';
     const filter = {};
     if (onlyUnread) filter.read = false;
-    // If user provided toLoginId query, support both specific and general superadmin targets
+    // If user provided toLoginId query, support both specific and general superadmin/employee targets
     if (req.query.toLoginId) {
       const loginIdLower = req.query.toLoginId.toLowerCase();
       if (loginIdLower === 'superadmin' || loginIdLower === 'admin') {
@@ -129,8 +129,19 @@ exports.getNotifications = async (req, res) => {
           { toLoginId: 'superadmin' },
           { toRole: 'superadmin' }
         ];
+      } else if (loginIdLower.includes('emp') || loginIdLower.includes('employee') || req.query.role === 'employee') {
+        filter.$or = [
+          { toLoginId: req.query.toLoginId },
+          { toLoginId: 'employee' },
+          { toRole: 'employee' }
+        ];
       } else {
-        filter.toLoginId = req.query.toLoginId;
+        filter.$or = [
+          { toLoginId: req.query.toLoginId },
+          { toRole: 'tenant' },
+          { toRole: 'property_owner' },
+          { toRole: 'owner' }
+        ];
       }
     }
     const notifs = await Notification.find(filter).sort({ createdAt: -1 }).limit(50);

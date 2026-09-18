@@ -1060,6 +1060,10 @@ router.post('/approve', protect, authorize('superadmin', 'employee', 'manager', 
             );
             console.log('? [visits/approve] Saved to ApprovedProperty collection:', approvedProp._id);
 
+            // Trigger auto-matching notifications for existing tenant bids
+            const { notifyMatchingBidsForNewProperty } = require('../services/autoMatchBidService');
+            notifyMatchingBidsForNewProperty(approvedProp).catch(mErr => console.warn('Auto-match trigger error:', mErr.message));
+
             // Clear cached listings so the new property shows up immediately
             clearCache('/api/approved-properties');
             clearCache('/api/properties');

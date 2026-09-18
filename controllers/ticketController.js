@@ -2,6 +2,7 @@ const SupportTicket = require('../models/SupportTicket');
 const User = require('../models/user');
 const Owner = require('../models/Owner');
 const Tenant = require('../models/Tenant');
+const Notification = require('../models/Notification');
 const mailer = require('../utils/mailer');
 const fcmService = require('../services/fcmService');
 const { sendTemplateToResolvedUser, resolvePhoneByEmailOrUserId } = require('../utils/whatsappBot');
@@ -144,23 +145,82 @@ exports.createTicket = async (req, res) => {
             }
         }
 
-        // 3. FCM Push Notification to Raiser Device (Laptop & Mobile)
+        // 3. FCM Push Notification to Raiser Device & SuperAdmin / Employee Devices (Phone, Laptop, Tablet)
         try {
+            // Push to Ticket Raiser
             await fcmService.sendToUser(raised_by, {
                 title: `🎫 Ticket Registered: ${ticket.ticket_id}`,
                 body: `Your ticket for "${subject}" has been created. Ref ID: ${ticket.ticket_id}`,
                 icon: '/pwa-192x192.png',
                 clickAction: raised_by_role === 'property_owner' ? '/propertyowner/support' : '/tenant/support',
-                data: {
-                    ticketId: ticket.ticket_id,
-                    type: 'ticket_created'
-                }
+                data: { ticketId: ticket.ticket_id, type: 'ticket_created' }
+            });
+
+            // Push to SuperAdmin Devices (Phone, Laptop, Tablet)
+            await fcmService.sendToRole('superadmin', {
+                title: `🚨 New Support Ticket: ${ticket.ticket_id}`,
+                body: `${ticket.raised_by_name} (${ticket.raised_by_role}) raised: "${subject}"`,
+                icon: '/pwa-192x192.png',
+                clickAction: '/superadmin/tickets',
+                data: { ticketId: ticket.ticket_id, type: 'new_support_ticket' }
+            });
+
+            // Push to Employee Devices
+            await fcmService.sendToRole('employee', {
+                title: `🚨 New Ticket Alert: ${ticket.ticket_id}`,
+                body: `${ticket.raised_by_name} raised: "${subject}"`,
+                icon: '/pwa-192x192.png',
+                clickAction: '/employee/tickets',
+                data: { ticketId: ticket.ticket_id, type: 'new_support_ticket' }
             });
         } catch (fcmErr) {
             console.warn('Ticket FCM push warning:', fcmErr.message);
         }
 
-        // 4. Real-time Socket.io Alert to Admin & Staff
+        // 4. In-App Notifications for Admin, Employee, and Raiser
+        try {
+            const notifMsg = `New Ticket [${ticket.ticket_id}] raised by ${ticket.raised_by_name} (${ticket.raised_by_role}): ${subject}`;
+            
+            // SuperAdmin Ledger Notification
+            await Notification.create({
+                toRole: 'superadmin',
+                toLoginId: 'superadmin',
+                from: String(raised_by),
+                type: 'support_ticket_created',
+                title: `🎫 New Support Ticket: ${ticket.ticket_id}`,
+                message: notifMsg,
+                meta: { ticket_id: ticket.ticket_id, ticket_type: ticket.ticket_type, subject, raised_by: ticket.raised_by_name, raised_by_role },
+                read: false
+            });
+
+            // Employee Ledger Notification
+            await Notification.create({
+                toRole: 'employee',
+                toLoginId: 'employee',
+                from: String(raised_by),
+                type: 'support_ticket_created',
+                title: `🎫 Ticket Alert: ${ticket.ticket_id}`,
+                message: notifMsg,
+                meta: { ticket_id: ticket.ticket_id, ticket_type: ticket.ticket_type, subject },
+                read: false
+            });
+
+            // Raiser Notification
+            await Notification.create({
+                toRole: raised_by_role,
+                toLoginId: String(raised_by),
+                from: 'system',
+                type: 'support_ticket_created',
+                title: `🎫 Ticket Registered: ${ticket.ticket_id}`,
+                message: `Your ticket for "${subject}" has been created. Ref ID: ${ticket.ticket_id}`,
+                meta: { ticket_id: ticket.ticket_id, ticket_type: ticket.ticket_type },
+                read: false
+            });
+        } catch (notifErr) {
+            console.warn('In-app notification creation error:', notifErr.message);
+        }
+
+        // 5. Real-time Socket.io Alert to Admin & Staff
         if (global.io) {
             global.io.to('SUPER_ADMIN').emit('new_support_ticket', {
                 ticket_id: ticket.ticket_id,
@@ -393,6 +453,49 @@ exports.resolveTicket = async (req, res) => {
             });
         } catch (fcmErr) {
             console.warn('Resolution FCM push warning:', fcmErr.message);
+        }
+
+        // 4. In-App Notifications for Raiser, SuperAdmin and Employee Ledgers
+        try {
+            const resNotifMessage = `Support Ticket [${ticket.ticket_id}] was marked as ${status} by ${performed_by_name}.`;
+
+            // Raiser Notification
+            await Notification.create({
+                toRole: ticket.raised_by_role || 'tenant',
+                toLoginId: String(recipientLoginId),
+                from: 'system',
+                type: 'support_ticket_resolved',
+                title: `🟢 Ticket ${status}: ${ticket.ticket_id}`,
+                message: `Your ticket "${ticket.subject}" has been marked as ${status}. Note: ${resolution_notes || 'Resolved'}`,
+                meta: { ticket_id: ticket.ticket_id, status, resolution_notes },
+                read: false
+            });
+
+            // SuperAdmin Ledger Notification
+            await Notification.create({
+                toRole: 'superadmin',
+                toLoginId: 'superadmin',
+                from: String(performed_by),
+                type: 'support_ticket_resolved',
+                title: `🟢 Ticket ${status}: ${ticket.ticket_id}`,
+                message: resNotifMessage,
+                meta: { ticket_id: ticket.ticket_id, status },
+                read: false
+            });
+
+            // Employee Ledger Notification
+            await Notification.create({
+                toRole: 'employee',
+                toLoginId: 'employee',
+                from: String(performed_by),
+                type: 'support_ticket_resolved',
+                title: `🟢 Ticket ${status}: ${ticket.ticket_id}`,
+                message: resNotifMessage,
+                meta: { ticket_id: ticket.ticket_id, status },
+                read: false
+            });
+        } catch (resNotifErr) {
+            console.warn('Resolution in-app notification error:', resNotifErr.message);
         }
 
         return res.json({

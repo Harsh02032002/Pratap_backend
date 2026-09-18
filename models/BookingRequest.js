@@ -122,6 +122,11 @@ const bookingRequestSchema = new mongoose.Schema({
     // Chat room linking
     chat_room_id: { type: String, default: null },
 
+    // Bidding match status & expiry tracking
+    match_category: { type: String, enum: ['exact_match', 'slight_gap', 'no_match_active', null], default: null },
+    is_expired: { type: Boolean, default: false },
+    expired_at: { type: Date, default: null },
+
     created_at: { type: Date, default: Date.now },
     updated_at: { type: Date, default: Date.now }
 });
