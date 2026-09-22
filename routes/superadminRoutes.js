@@ -506,15 +506,27 @@ router.get('/properties/overview', protect, authorize('superadmin', 'areamanager
     startOfMonth.setHours(0, 0, 0, 0);
 
     const propFilter = applyPropertyScope(req, { isDeleted: { $ne: true } });
-    const scopedPropIds = isScopedEmployee(req)
-      ? (await Property.find(propFilter).select('_id').lean()).map(p => p._id)
+
+    // "Approved/live" has to be counted from ApprovedProperty, not Property — that's
+    // what GET /api/approved-properties/public/approved (the actual public listing)
+    // reads from, and its isLiveOnWebsite/status values are the source of truth for
+    // what's really live, independent of the source Property doc's own (often stale)
+    // isLiveOnWebsite flag. The join key is `visitId`: ApprovedProperty.propertyId is
+    // only set on some records (inconsistent across creation paths), but visitId is
+    // required+unique on ApprovedProperty and is copied straight from Property.visitId
+    // when a property is approved, so it's the reliable link back to a scoped Property.
+    const LIVE_STATUSES = ['approved', 'live', 'active', 'Approved', 'Live', 'Active'];
+    const scopedProps = isScopedEmployee(req)
+      ? await Property.find(propFilter).select('visitId').lean()
       : null;
+    const scopedVisitIds = scopedProps ? scopedProps.map(p => p.visitId).filter(Boolean) : null;
+    const liveFilter = scopedVisitIds
+      ? { visitId: { $in: scopedVisitIds }, isLiveOnWebsite: { $ne: false }, status: { $in: LIVE_STATUSES } }
+      : { isLiveOnWebsite: { $ne: false }, status: { $in: LIVE_STATUSES } };
 
     const [total, approved, pending, rejected, newThisMonth] = await Promise.all([
       Property.countDocuments(propFilter),
-      scopedPropIds
-        ? ApprovedProperty.countDocuments({ _id: { $in: scopedPropIds } })
-        : ApprovedProperty.countDocuments(),
+      ApprovedProperty.countDocuments(liveFilter),
       Property.countDocuments({ ...propFilter, status: 'pending' }),
       Property.countDocuments({ ...propFilter, status: 'rejected' }),
       Property.countDocuments({ ...propFilter, createdAt: { $gte: startOfMonth } })
