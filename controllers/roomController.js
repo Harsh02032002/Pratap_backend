@@ -923,3 +923,31 @@ exports.getAllRooms = async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 };
+
+exports.bulkDeleteRooms = async (req, res) => {
+  try {
+    const { roomIds } = req.body;
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'roomIds array is required' });
+    }
+    await Room.deleteMany({ _id: { $in: roomIds } });
+    return res.json({ success: true, message: `${roomIds.length} rooms deleted successfully` });
+  } catch (err) {
+    console.error('bulkDeleteRooms error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.bulkToggleRoomStatus = async (req, res) => {
+  try {
+    const { roomIds, status } = req.body;
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'roomIds array is required' });
+    }
+    await Room.updateMany({ _id: { $in: roomIds } }, { $set: { status: status || 'inactive' } });
+    return res.json({ success: true, message: `${roomIds.length} rooms updated to status '${status || 'inactive'}'` });
+  } catch (err) {
+    console.error('bulkToggleRoomStatus error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};

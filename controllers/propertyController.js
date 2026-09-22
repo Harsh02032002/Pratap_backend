@@ -227,30 +227,69 @@ exports.addProperty = async (req, res) => {
     }
 
     // Auto-assign to area employee for pending properties
+    // 🤖 Auto-assign property verification to employee (with fallbacks)
     let autoAssignedTo = null;
     let autoAssignedToName = null;
-    if (propertyData.status === 'pending_approval' && (propertyData.city || propertyData.area || propertyData.locationCode)) {
+    if (propertyData.status === 'pending_approval') {
       try {
         const Employee = require('../models/Employee');
-        const areaEmployee = await Employee.findOne({
-          $or: [
-            { city: propertyData.city, area: propertyData.area },
-            { city: propertyData.city, areaCode: propertyData.area },
-            { locationCode: propertyData.locationCode || propertyData.area }
-          ],
-          role: { $in: ['employee', 'manager', 'areamanager'] }
-        }).select('name loginId role').lean();
-        if (areaEmployee) {
-          autoAssignedTo = areaEmployee.loginId;
-          autoAssignedToName = areaEmployee.name;
+        const User = require('../models/user');
+        const pCity = propertyData.city || propertyData.locationCode || '';
+        const pArea = propertyData.locality || propertyData.area || '';
+
+        let areaEmployee = null;
+        if (pCity || pArea) {
+          areaEmployee = await Employee.findOne({
+            isActive: { $ne: false },
+            isDeleted: { $ne: true },
+            $or: [
+              { city: new RegExp(pCity, 'i'), area: new RegExp(pArea, 'i') },
+              { city: new RegExp(pCity, 'i') },
+              { locationCode: new RegExp(pCity, 'i') },
+              { area: new RegExp(pArea, 'i') }
+            ]
+          }).select('name loginId role').lean();
         }
-      } catch (_) { }
+
+        if (!areaEmployee) {
+          areaEmployee = await Employee.findOne({
+            isActive: { $ne: false },
+            isDeleted: { $ne: true }
+          }).select('name loginId role').lean();
+        }
+
+        if (!areaEmployee) {
+          areaEmployee = await User.findOne({
+            role: 'employee',
+            isActive: { $ne: false }
+          }).select('name loginId role').lean();
+        }
+
+        if (areaEmployee) {
+          autoAssignedTo = areaEmployee.loginId || String(areaEmployee._id);
+          autoAssignedToName = areaEmployee.name || areaEmployee.loginId;
+        }
+      } catch (autoErr) {
+        console.warn('Auto-assign property verification warning:', autoErr.message);
+      }
     }
 
     const property = new Property(propertyData);
     if (autoAssignedTo) {
       property.assignedTo = autoAssignedTo;
       property.assignedToName = autoAssignedToName;
+      console.log(`🤖 Property "${property.title}" auto-assigned for verification to employee ${autoAssignedToName} (${autoAssignedTo})`);
+
+      try {
+        const fcmService = require('../services/fcmService');
+        fcmService.sendToUser(autoAssignedTo, {
+          title: `🏢 Property Verification Assigned`,
+          body: `New property "${property.title}" in ${property.city || property.address} assigned for verification.`,
+          icon: '/pwa-192x192.png',
+          clickAction: '/employee/properties',
+          data: { propertyId: String(property._id), type: 'property_assigned' }
+        }).catch(() => {});
+      } catch (_) {}
     }
     await property.save();
 

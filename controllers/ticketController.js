@@ -91,6 +91,71 @@ exports.createTicket = async (req, res) => {
         await ticket.save();
         console.log(`🎫 Ticket Created: ${ticket.ticket_id} (${ticket.ticket_type}) by ${ticket.raised_by}`);
 
+        // 🤖 Auto-Assign Ticket to Employee if unassigned
+        if (!ticket.assigned_admin) {
+            try {
+                const Employee = require('../models/Employee');
+                const cityFilter = ticket.city || ticket.area || '';
+                let assignedEmp = null;
+                
+                if (cityFilter) {
+                    assignedEmp = await Employee.findOne({
+                        isActive: { $ne: false },
+                        isDeleted: { $ne: true },
+                        $or: [
+                            { city: new RegExp(cityFilter, 'i') },
+                            { area: new RegExp(cityFilter, 'i') },
+                            { locationCode: new RegExp(cityFilter, 'i') }
+                        ]
+                    }).select('loginId name email phone').lean();
+                }
+
+                if (!assignedEmp) {
+                    assignedEmp = await Employee.findOne({
+                        isActive: { $ne: false },
+                        isDeleted: { $ne: true }
+                    }).select('loginId name email phone').lean();
+                }
+
+                if (!assignedEmp) {
+                    assignedEmp = await User.findOne({
+                        role: 'employee',
+                        isActive: { $ne: false }
+                    }).select('loginId name email phone').lean();
+                }
+
+                if (assignedEmp) {
+                    ticket.assigned_admin = assignedEmp.loginId || String(assignedEmp._id);
+                    ticket.assigned_admin_name = assignedEmp.name || assignedEmp.loginId;
+                    ticket.status = 'Assigned';
+                    ticket.assigned_at = new Date();
+
+                    ticket.activity_log.push({
+                        action: 'Auto-Assigned to Employee',
+                        performed_by: 'system',
+                        performed_by_name: 'System Auto-Assign Engine',
+                        from_status: 'Open',
+                        to_status: 'Assigned',
+                        note: `Auto-assigned to Employee ${assignedEmp.name || assignedEmp.loginId} (${assignedEmp.loginId})`,
+                        at: new Date()
+                    });
+
+                    await ticket.save();
+                    console.log(`🤖 Ticket ${ticket.ticket_id} auto-assigned to employee ${assignedEmp.name} (${assignedEmp.loginId})`);
+
+                    fcmService.sendToUser(assignedEmp.loginId || String(assignedEmp._id), {
+                        title: `🚨 Ticket Assigned: ${ticket.ticket_id}`,
+                        body: `Ticket for "${ticket.subject}" in ${ticket.city || 'your area'} assigned to you.`,
+                        icon: '/pwa-192x192.png',
+                        clickAction: '/employee/tickets',
+                        data: { ticketId: ticket.ticket_id, type: 'ticket_assigned' }
+                    }).catch(() => {});
+                }
+            } catch (autoErr) {
+                console.warn('Auto-assign ticket warning:', autoErr.message);
+            }
+        }
+
         // 1. Email Notification to Ticket Raiser
         if (user_email) {
             try {
@@ -317,18 +382,33 @@ exports.getAllTickets = async (req, res) => {
         if (city) query.city = new RegExp(city, 'i');
         if (area) query.area = new RegExp(area, 'i');
 
-        if (search) {
-            const cleanSearch = String(search).trim();
-            const regex = new RegExp(cleanSearch, 'i');
-            query.$or = [
-                { ticket_id: regex },
-                { subject: regex },
-                { raised_by: regex },
-                { raised_by_name: regex },
-                { property_name: regex },
-                { user_email: regex },
-                { user_phone: regex }
+        // 🔒 Employee Data Isolation Filter
+        const isSuperAdmin = req.user && ['superadmin', 'admin'].includes(String(req.user.role).toLowerCase());
+        const isEmp = req.employeeScope?.isEmployee || (req.user && ['employee', 'manager', 'areamanager', 'staff'].includes(String(req.user.role).toLowerCase()));
+
+        if (isEmp && !isSuperAdmin) {
+            const empLoginId = req.employeeScope?.loginId || req.user?.loginId || '';
+            const empIdStr = String(req.user?._id || '');
+            const empCity = req.employeeScope?.city || req.user?.city || '';
+
+            const scopeConditions = [
+                { assigned_admin: empLoginId },
+                { assigned_admin: empLoginId.toUpperCase() },
+                { assigned_admin: empIdStr }
             ];
+            if (empCity) {
+                scopeConditions.push({ city: new RegExp(empCity, 'i') });
+            }
+
+            if (query.$or) {
+                query.$and = [
+                    { $or: query.$or },
+                    { $or: scopeConditions }
+                ];
+                delete query.$or;
+            } else {
+                query.$or = scopeConditions;
+            }
         }
 
         const tickets = await SupportTicket.find(query).sort({ created_at: -1 }).lean();
@@ -506,5 +586,147 @@ exports.resolveTicket = async (req, res) => {
     } catch (error) {
         console.error('Error resolving ticket:', error);
         return res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
+ * Bulk Resolve Tickets
+ * POST /api/tickets/bulk-resolve
+ */
+exports.bulkResolveTickets = async (req, res) => {
+    try {
+        const { ticketIds, status = 'Resolved', resolution_notes } = req.body;
+        if (!Array.isArray(ticketIds) || ticketIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'ticketIds array is required.' });
+        }
+        await SupportTicket.updateMany(
+            { _id: { $in: ticketIds } },
+            {
+                $set: {
+                    status,
+                    resolved_at: new Date(),
+                    updated_at: new Date()
+                },
+                $push: {
+                    activity_log: {
+                        action: `Bulk Ticket ${status}`,
+                        performed_by: 'admin',
+                        performed_by_name: 'Admin User',
+                        note: resolution_notes || `Bulk marked as ${status}`,
+                        at: new Date()
+                    }
+                }
+            }
+        );
+        return res.json({ success: true, message: `${ticketIds.length} tickets marked as ${status}.` });
+    } catch (err) {
+        console.error('Error in bulkResolveTickets:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+};
+
+/**
+ * Bulk Delete Tickets
+ * POST /api/tickets/bulk-delete
+ */
+exports.bulkDeleteTickets = async (req, res) => {
+    try {
+        const { ticketIds } = req.body;
+        if (!Array.isArray(ticketIds) || ticketIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'ticketIds array is required.' });
+        }
+        await SupportTicket.deleteMany({ _id: { $in: ticketIds } });
+        return res.json({ success: true, message: `${ticketIds.length} tickets deleted successfully.` });
+    } catch (err) {
+        console.error('Error in bulkDeleteTickets:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+};
+
+/**
+ * Auto-assign unassigned tickets to employees by city match
+ * POST /api/tickets/auto-assign
+ */
+exports.autoAssignTickets = async (req, res) => {
+    try {
+        const unassigned = await SupportTicket.find({ status: 'Open', assigned_to: { $in: [null, '', undefined] } });
+        if (unassigned.length === 0) {
+            return res.json({ success: true, message: 'No unassigned tickets found', assigned: 0 });
+        }
+
+        const Employee = require('../models/Employee');
+        const employees = await Employee.find({ isActive: true }).select('_id name loginId cities city area');
+        if (employees.length === 0) {
+            return res.json({ success: true, message: 'No active employees found', assigned: 0 });
+        }
+
+        let assigned = 0;
+        for (const ticket of unassigned) {
+            const ticketCity = (ticket.city || '').toLowerCase().trim();
+            const ticketArea = (ticket.area || '').toLowerCase().trim();
+
+            // Try city match first
+            let matched = employees.find(e => {
+                const empCities = (e.cities || [e.city]).filter(Boolean).map(c => c.toLowerCase().trim());
+                return empCities.some(c => ticketCity && c.includes(ticketCity));
+            });
+
+            // Fall back: area match
+            if (!matched && ticketArea) {
+                matched = employees.find(e => {
+                    const empArea = (e.area || '').toLowerCase().trim();
+                    return empArea && empArea.includes(ticketArea);
+                });
+            }
+
+            // Fall back: round-robin
+            if (!matched) {
+                matched = employees[assigned % employees.length];
+            }
+
+            if (matched) {
+                await SupportTicket.findByIdAndUpdate(ticket._id, {
+                    $set: {
+                        assigned_to: matched.loginId,
+                        assigned_to_name: matched.name,
+                        updated_at: new Date()
+                    },
+                    $push: {
+                        activity_log: {
+                            action: 'Auto-Assigned',
+                            performed_by: 'system',
+                            performed_by_name: 'System',
+                            note: `Auto-assigned to ${matched.name} (city match: ${ticketCity || 'round-robin'})`,
+                            at: new Date()
+                        }
+                    }
+                });
+                assigned++;
+            }
+        }
+
+        return res.json({ success: true, message: `${assigned} ticket(s) auto-assigned`, assigned });
+    } catch (err) {
+        console.error('Error in autoAssignTickets:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+};
+
+/**
+ * Bulk delete closed/resolved tickets
+ * POST /api/tickets/bulk-delete-closed
+ */
+exports.bulkDeleteClosedTickets = async (req, res) => {
+    try {
+        const { ticketIds } = req.body;
+        if (!Array.isArray(ticketIds) || ticketIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'ticketIds array is required.' });
+        }
+        // Only delete closed/resolved
+        const result = await SupportTicket.deleteMany({ _id: { $in: ticketIds }, status: { $in: ['Resolved', 'Closed'] } });
+        return res.json({ success: true, deleted: result.deletedCount, message: `${result.deletedCount} closed ticket(s) deleted.` });
+    } catch (err) {
+        console.error('Error in bulkDeleteClosedTickets:', err);
+        return res.status(500).json({ success: false, message: err.message });
     }
 };

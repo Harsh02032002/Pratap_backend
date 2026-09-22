@@ -67,6 +67,18 @@ router.post(
     hrController.markAttendance
 );
 
+// Bulk mark attendance for multiple staff in one request
+router.post(
+    '/attendance/bulk',
+    protect,
+    authorize('owner', 'areamanager', 'superadmin'),
+    (req, res, next) => {
+        if (req.user.role === 'owner') req.body.ownerLoginId = req.user.loginId;
+        next();
+    },
+    hrController.bulkMarkAttendance
+);
+
 // Today's attendance summary for owner
 router.get(
     '/attendance-today/:ownerLoginId',

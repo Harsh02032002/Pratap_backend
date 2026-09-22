@@ -719,6 +719,116 @@ exports.createBookingRequest = async (req, res) => {
         } catch (emailError) {
             console.error('Failed to send booking request notification to superadmin:', emailError);
         }
+
+        // ─── TENANT CONFIRMATION NOTIFICATIONS (in-app + email + WhatsApp) ───
+        try {
+            // Decide message based on match category
+            const bidAmt = computedBidAmount;
+            let tenantTitle, tenantMsg;
+            if (matchCategory === 'exact_match') {
+                tenantTitle = '✅ Bid Submitted — Matching Properties Found!';
+                tenantMsg = `Your bid of ₹${bidAmt.toLocaleString('en-IN')}/month for ${property_name} has been submitted. Matching properties are available in your budget! Property owners have been notified and will contact you via Chat if interested. Valid for 24 hours.`;
+            } else if (matchCategory === 'slight_gap') {
+                tenantTitle = '⚡ Bid Submitted — Negotiation Available!';
+                tenantMsg = `Your bid of ₹${bidAmt.toLocaleString('en-IN')}/month for ${property_name} has been submitted. Properties within ₹2,500 of your budget are available. Interested owners can negotiate rent and will contact you via Chat. Valid for 24 hours.`;
+            } else {
+                tenantTitle = '📌 Requirement Registered — Auto-Matching Active!';
+                tenantMsg = `Your budget requirement of ₹${bidAmt.toLocaleString('en-IN')}/month has been registered as ACTIVE in our system. No exact match currently, but you will be automatically notified via Push, Email & WhatsApp as soon as a suitable property is added!`;
+            }
+
+            // 1. In-App Notification for Tenant
+            await Notification.create({
+                toRole: 'website_user',
+                toLoginId: user_id,
+                from: 'Roomhy Bidding System',
+                type: 'bid_submitted_confirmation',
+                meta: {
+                    title: tenantTitle,
+                    message: tenantMsg,
+                    bookingId: String(newRequest._id || ''),
+                    propertyName: property_name || '',
+                    bidAmount: bidAmt,
+                    matchCategory: matchCategory || 'no_match_active',
+                    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+                },
+                read: false
+            }).catch(nErr => console.warn('Tenant bid confirmation notify warn:', nErr.message));
+
+            // 2. Email Confirmation to Tenant
+            if (email && !email.includes('roomhy.com')) {
+                const emailSubject = `🔔 Bid Submitted: ${property_name} | Roomhy`;
+                const matchColorMap = { exact_match: '#10b981', slight_gap: '#f59e0b', no_match_active: '#0FA596' };
+                const matchColor = matchColorMap[matchCategory] || '#0FA596';
+                const emailHtml = `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                        <div style="background: ${matchColor}; color: #ffffff; padding: 20px; text-align: center;">
+                            <h2 style="margin: 0; font-size: 20px;">${tenantTitle}</h2>
+                        </div>
+                        <div style="padding: 24px; color: #1e293b; line-height: 1.6;">
+                            <p>Hi <strong>${name || 'Student'}</strong>,</p>
+                            <p>${tenantMsg}</p>
+                            <div style="background: #f8fafc; padding: 16px; border-radius: 8px; border-left: 4px solid ${matchColor}; margin: 16px 0;">
+                                <p style="margin: 4px 0;"><strong>Property:</strong> ${property_name}</p>
+                                <p style="margin: 4px 0;"><strong>Your Bid:</strong> ₹${bidAmt.toLocaleString('en-IN')}/month</p>
+                                <p style="margin: 4px 0;"><strong>Match Status:</strong> ${(matchCategory || 'no_match_active').replace(/_/g, ' ').toUpperCase()}</p>
+                                <p style="margin: 4px 0;"><strong>Bid Valid Until:</strong> ${new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleString('en-IN')}</p>
+                            </div>
+                            <p>Keep an eye on your Roomhy app — you'll get notified instantly when an owner responds!</p>
+                        </div>
+                    </div>
+                `;
+                mailer.sendMail(email, emailSubject, tenantMsg, emailHtml).catch(eErr => console.warn('Tenant bid email warn:', eErr.message));
+            }
+
+            // 3. WhatsApp Confirmation to Tenant (if phone available)
+            if (phone && phone !== '9999999999') {
+                try {
+                    const { sendWhatsAppMessage: mailerWaMsg, getMailerConfig, isWhatsAppConfigured } = require('../utils/mailer');
+                    const cfg = getMailerConfig ? getMailerConfig() : {};
+                    if (isWhatsAppConfigured && isWhatsAppConfigured(cfg)) {
+                        const waText = `🔔 *Roomhy: Bid Submitted Successfully!*\n\nHi ${name || 'Student'},\n\n${tenantMsg}\n\nOpen Roomhy to track your bid status and receive owner responses instantly.`;
+                        mailerWaMsg(phone, waText, cfg).catch(wErr => console.warn('Tenant bid WA warn:', wErr.message));
+                    }
+                } catch (_) {}
+            }
+
+            // 4. FCM Push to Tenant
+            try {
+                const fcmService = require('../services/fcmService');
+                await fcmService.sendToUser(user_id, {
+                    title: tenantTitle,
+                    body: tenantMsg.substring(0, 150),
+                    icon: '/pwa-192x192.png',
+                    clickAction: '/tenant/tenantchat',
+                    data: {
+                        bookingId: String(newRequest._id || ''),
+                        type: 'bid_submitted_confirmation',
+                        matchCategory: matchCategory || 'no_match_active'
+                    }
+                });
+            } catch (_) {}
+
+            // 5. Socket.io real-time popup for tenant (website ka live notification)
+            if (global.io && user_id) {
+                const socketPayload = {
+                    title: tenantTitle,
+                    body: tenantMsg,
+                    bookingId: String(newRequest._id || ''),
+                    propertyName: property_name || '',
+                    bidAmount: computedBidAmount,
+                    matchCategory: matchCategory || 'no_match_active',
+                    type: 'bid_submitted_confirmation'
+                };
+                global.io.to(String(user_id)).emit('bid_submitted_confirmation', socketPayload);
+                global.io.to(String(user_id).toLowerCase()).emit('bid_submitted_confirmation', socketPayload);
+                console.log(`📡 Socket.io bid_submitted_confirmation emitted to tenant: ${user_id} | category: ${matchCategory}`);
+            }
+
+        } catch (tenantNotifyErr) {
+            console.warn('Tenant bid confirmation notification warn:', tenantNotifyErr.message);
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         res.status(201).json({
             success: true,
             message: `${request_type.charAt(0).toUpperCase() + request_type.slice(1)} submitted successfully`,
@@ -1313,6 +1423,65 @@ exports.approveBooking = async (req, res) => {
                 variables: [tenantName, propertyName]
             }).catch(whatsAppErr => console.warn('booking approved whatsapp failed:', whatsAppErr.message));
 
+            // ─── TENANT: Owner Responded → In-App + FCM + Socket Notification ───
+            const isBidApproval = String(request.request_type || '').toLowerCase() === 'bid';
+            try {
+                const tenantNotifTitle = isBidApproval
+                    ? '💬 Owner Responded to Your Bid!'
+                    : '🎉 Booking Accepted!';
+                const tenantNotifMsg = isBidApproval
+                    ? `The owner of "${propertyName}" has responded to your bid and enabled chat! Open the Chat panel to discuss the rent and finalize your move-in details.`
+                    : `Your booking request for "${propertyName}" has been accepted by ${ownerName}. Chat is now enabled to discuss move-in details.`;
+
+                // 1. In-App Notification
+                await Notification.create({
+                    toRole: 'website_user',
+                    toLoginId: request.user_id,
+                    from: ownerName || 'Property Owner',
+                    type: isBidApproval ? 'bid_owner_responded' : 'booking_accepted',
+                    meta: {
+                        title: tenantNotifTitle,
+                        message: tenantNotifMsg,
+                        bookingId: String(request._id || ''),
+                        propertyName,
+                        ownerName,
+                        chatEnabled: true,
+                        actionUrl: '/tenant/tenantchat'
+                    },
+                    read: false
+                }).catch(nErr => console.warn('Tenant bid-approval notify warn:', nErr.message));
+
+                // 2. FCM Push to Tenant
+                const fcmService = require('../services/fcmService');
+                fcmService.sendToUser(request.user_id, {
+                    title: tenantNotifTitle,
+                    body: tenantNotifMsg.substring(0, 150),
+                    icon: '/pwa-192x192.png',
+                    clickAction: '/tenant/tenantchat',
+                    data: {
+                        bookingId: String(request._id || ''),
+                        type: isBidApproval ? 'bid_owner_responded' : 'booking_accepted'
+                    }
+                }).catch(fcmErr => console.warn('Tenant bid FCM push warn:', fcmErr.message));
+
+                // 3. Socket.io broadcast to tenant's active session
+                if (global.io && request.user_id) {
+                    const socketPayload = {
+                        title: tenantNotifTitle,
+                        body: tenantNotifMsg,
+                        bookingId: String(request._id || ''),
+                        propertyName,
+                        type: isBidApproval ? 'bid_owner_responded' : 'booking_accepted'
+                    };
+                    global.io.to(String(request.user_id)).emit('bid_owner_responded', socketPayload);
+                    global.io.to(String(request.user_id).toLowerCase()).emit('bid_owner_responded', socketPayload);
+                }
+                console.log(`✅ Tenant bid-approval notification dispatched to: ${request.user_id}`);
+            } catch (tenantNotifErr) {
+                console.warn('Tenant bid-approval notification error:', tenantNotifErr.message);
+            }
+            // ─────────────────────────────────────────────────────────────────────
+
             // Agreement sending disabled
             // try {
             //     ownerAgreementResult = await createAndEmailOwnerAgreementForBooking(request, ownerDoc, approvalDetails);
@@ -1379,6 +1548,48 @@ exports.rejectBooking = async (req, res) => {
         } catch (whatsAppErr) {
             console.warn('booking rejected whatsapp failed:', whatsAppErr.message);
         }
+
+        // Tenant in-app + FCM notification on rejection
+        try {
+            const propName = request.property_name || 'Property';
+            const isBid = String(request.request_type || '').toLowerCase() === 'bid';
+            const rejTitle = isBid ? '⌛ Bid Not Accepted' : '❌ Booking Request Rejected';
+            const rejMsg = isBid
+                ? `The owner of "${propName}" has declined your bid. Your requirement remains ACTIVE — you'll be notified if another property matches your budget!`
+                : `Your booking request for "${propName}" has been rejected. You can browse other available properties or resubmit your request.`;
+
+            await Notification.create({
+                toRole: 'website_user',
+                toLoginId: request.user_id,
+                from: 'Roomhy',
+                type: 'bid_rejected',
+                meta: { title: rejTitle, message: rejMsg, bookingId: String(request._id || ''), propertyName: propName },
+                read: false
+            }).catch(() => {});
+
+            const fcmService = require('../services/fcmService');
+            fcmService.sendToUser(request.user_id, {
+                title: rejTitle,
+                body: rejMsg.substring(0, 150),
+                icon: '/pwa-192x192.png',
+                clickAction: '/fast-bidding',
+                data: { bookingId: String(request._id || ''), type: 'bid_rejected' }
+            }).catch(() => {});
+
+            // 3. Socket.io real-time broadcast to tenant's active session
+            if (global.io && request.user_id) {
+                const socketPayload = {
+                    title: rejTitle,
+                    body: rejMsg,
+                    bookingId: String(request._id || ''),
+                    propertyName: propName,
+                    type: 'bid_rejected'
+                };
+                global.io.to(String(request.user_id)).emit('bid_rejected', socketPayload);
+                global.io.to(String(request.user_id).toLowerCase()).emit('bid_rejected', socketPayload);
+                console.log(`📡 Socket.io bid_rejected emitted to tenant: ${request.user_id}`);
+            }
+        } catch (_) {}
 
         res.status(200).json({ 
             success: true, 

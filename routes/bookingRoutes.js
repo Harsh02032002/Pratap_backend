@@ -242,4 +242,131 @@ router.delete('/requests/:id', bookingController.deleteBooking);
 // Update chat decision (like/reject)
 router.put('/requests/:id/decision', bookingController.updateChatDecision);
 
+// Bulk approve booking requests
+router.put('/requests/bulk-approve', async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ success: false, message: 'ids[] required' });
+        const Booking = require('../models/Booking');
+        const result = await Booking.updateMany({ _id: { $in: ids }, status: 'pending' }, { $set: { status: 'approved', updatedAt: new Date() } });
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} bookings approved` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Bulk reject booking requests
+router.put('/requests/bulk-reject', async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ success: false, message: 'ids[] required' });
+        const Booking = require('../models/Booking');
+        const result = await Booking.updateMany({ _id: { $in: ids }, status: 'pending' }, { $set: { status: 'rejected', updatedAt: new Date() } });
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} bookings rejected` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Register bid requirement for no-match scenario (saves requirement for future auto-matching)
+router.post('/register-requirement', async (req, res) => {
+    try {
+        const {
+            user_id, name, email, phone,
+            city, area, gender, budget_min, budget_max,
+            bid_amount, message
+        } = req.body;
+
+        if (!user_id || !name) {
+            return res.status(400).json({ success: false, message: 'user_id and name are required' });
+        }
+
+        const BookingRequest = require('../models/BookingRequest');
+        const Notification = require('../models/Notification');
+        const mailer = require('../utils/mailer');
+
+        // Use a system-level property placeholder so the bid is stored
+        const requirement = new BookingRequest({
+            property_id: `req_${city || 'any'}_${area || 'any'}_${Date.now()}`,
+            property_name: `Requirement — ${area || city || 'Any Area'}`,
+            area: area || city || 'Any',
+            city: city || null,
+            property_type: 'PG/Hostel',
+            rent_amount: budget_max || bid_amount || 0,
+            user_id,
+            name,
+            email: email || '',
+            phone: phone || null,
+            owner_id: 'SYSTEM',
+            request_type: 'bid',
+            bid_amount: Number(budget_max || bid_amount || 0),
+            bid_min: Number(budget_min || 0) || null,
+            bid_max: Number(budget_max || 0) || null,
+            match_category: 'no_match_active',
+            filter_criteria: { city, area, gender, min_price: budget_min, max_price: budget_max },
+            message: message || `Budget: ₹${budget_min || 0}–₹${budget_max || 0}/month | Gender: ${gender || 'Any'} | Area: ${area || city || 'Any'}`,
+            status: 'pending',
+            is_expired: false
+        });
+
+        await requirement.save();
+
+        // In-app notification confirming requirement registered
+        const bidAmt = Number(budget_max || bid_amount || 0);
+        const notifTitle = '📌 Requirement Registered — Auto-Matching Active!';
+        const notifMsg = `Your budget requirement of ₹${bidAmt.toLocaleString('en-IN')}/month for ${area || city || 'any area'} has been registered as ACTIVE. You will be automatically notified via Push, Email & WhatsApp when a suitable property is listed!`;
+
+        await Notification.create({
+            toRole: 'website_user',
+            toLoginId: user_id,
+            from: 'Roomhy Auto-Match',
+            type: 'requirement_registered',
+            meta: {
+                title: notifTitle,
+                message: notifMsg,
+                requirementId: String(requirement._id || ''),
+                bidAmount: bidAmt,
+                city, area,
+                matchCategory: 'no_match_active',
+                expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+            },
+            read: false
+        }).catch(() => {});
+
+        // Email confirmation
+        if (email && !email.includes('roomhy.com')) {
+            const html = `
+                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+                    <div style="background:#0FA596;color:#fff;padding:20px;text-align:center;">
+                        <h2 style="margin:0;font-size:20px;">📌 ${notifTitle}</h2>
+                    </div>
+                    <div style="padding:24px;color:#1e293b;line-height:1.6;">
+                        <p>Hi <strong>${name}</strong>,</p>
+                        <p>${notifMsg}</p>
+                        <div style="background:#f8fafc;padding:16px;border-radius:8px;border-left:4px solid #0FA596;margin:16px 0;">
+                            <p style="margin:4px 0;"><strong>Budget:</strong> ₹${Number(budget_min||0).toLocaleString('en-IN')} – ₹${bidAmt.toLocaleString('en-IN')}/month</p>
+                            <p style="margin:4px 0;"><strong>Area:</strong> ${area || 'Any'}, ${city || 'Any City'}</p>
+                            <p style="margin:4px 0;"><strong>Gender:</strong> ${gender || 'Any'}</p>
+                            <p style="margin:4px 0;"><strong>Status:</strong> ACTIVE (Auto-Matching ON)</p>
+                        </div>
+                        <p>We'll notify you the moment a matching property is listed on Roomhy!</p>
+                    </div>
+                </div>
+            `;
+            mailer.sendMail(email, `📌 Requirement Registered | Roomhy`, notifMsg, html).catch(() => {});
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Requirement registered. You will be notified when a matching property is available.',
+            matchCategory: 'no_match_active',
+            requirementId: String(requirement._id || ''),
+            data: requirement
+        });
+    } catch (err) {
+        console.error('Error registering requirement:', err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = router;

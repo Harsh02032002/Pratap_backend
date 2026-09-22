@@ -1232,4 +1232,160 @@ router.post('/:id/reactivate', protect, authorize('superadmin', 'areamanager', '
     }
 });
 
+// ══ BULK: SEND RENT REMINDERS ════════════════════════════════════════════════
+router.post('/bulk-rent-reminder', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds, ownerLoginId } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        const tenants = await Tenant.find({ _id: { $in: tenantIds }, status: 'active' }).select('name email phone loginId ownerLoginId');
+        const Notification = require('../models/Notification');
+        let sent = 0;
+        for (const t of tenants) {
+            try {
+                await Notification.create({
+                    userId: t._id,
+                    title: 'Rent Reminder',
+                    message: `Dear ${t.name || 'Tenant'}, your rent is due. Please pay on time to avoid late fees.`,
+                    type: 'rent_reminder',
+                });
+                sent++;
+            } catch (_) {}
+        }
+        res.json({ success: true, message: `Rent reminder sent to ${sent} tenant(s)`, sent });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ BULK: DELETE INACTIVE TENANTS ════════════════════════════════════════════
+router.delete('/bulk-delete-inactive', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        // Only allow deleting inactive/ex tenants
+        const result = await Tenant.deleteMany({ _id: { $in: tenantIds }, status: { $in: ['inactive', 'ex-tenant'] } });
+        res.json({ success: true, deleted: result.deletedCount, message: `${result.deletedCount} inactive tenant(s) deleted` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ BULK: APPROVE MOVE-OUT REQUESTS ════════════════════════════════════════════
+router.put('/moveout/bulk-approve', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        const { calcNoticeEndDate } = require('../services/moveoutService');
+        const approvedAt = new Date();
+        const noticeEndDate = calcNoticeEndDate(approvedAt);
+        const result = await Tenant.updateMany(
+            { _id: { $in: tenantIds }, 'moveoutRequest.status': 'pending' },
+            { $set: { 'moveoutRequest.status': 'approved', 'moveoutRequest.approvedAt': approvedAt, 'moveoutRequest.noticeEndDate': noticeEndDate } }
+        );
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} move-out request(s) approved` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ KYC: BULK APPROVE ════════════════════════════════════════════════════════
+router.post('/kyc/bulk-approve', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        const result = await Tenant.updateMany(
+            { _id: { $in: tenantIds } },
+            { $set: { kycStatus: 'verified', 'kyc.verified': true, 'kyc.verifiedAt': new Date() } }
+        );
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} KYC(s) approved` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ KYC: BULK REJECT ═════════════════════════════════════════════════════════
+router.post('/kyc/bulk-reject', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds, reason } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        const result = await Tenant.updateMany(
+            { _id: { $in: tenantIds } },
+            { $set: { kycStatus: 'rejected', 'kyc.rejectedAt': new Date(), 'kyc.rejectionReason': reason || 'Bulk rejected by admin' } }
+        );
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} KYC(s) rejected` });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ KYC: POLICE VERIFICATION CSV EXPORT ══════════════════════════════════════
+router.get('/kyc/police-verification-export', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { ownerLoginId } = req.query;
+        const filter = { kycStatus: { $in: ['verified', 'submitted'] } };
+        if (ownerLoginId) filter.ownerLoginId = ownerLoginId.toUpperCase();
+
+        const tenants = await Tenant.find(filter).select('name phone email dateOfBirth kyc roomNo propertyTitle ownerLoginId moveInDate');
+
+        const rows = tenants.map(t => [
+            t.name || '',
+            t.phone || '',
+            t.email || '',
+            t.dateOfBirth ? new Date(t.dateOfBirth).toLocaleDateString('en-IN') : '',
+            t.kyc?.idProofType || '',
+            t.kyc?.idProofNumber || '',
+            t.kyc?.address || '',
+            t.roomNo || '',
+            t.propertyTitle || '',
+            t.moveInDate ? new Date(t.moveInDate).toLocaleDateString('en-IN') : '',
+        ]);
+
+        const headers = ['Name', 'Phone', 'Email', 'Date of Birth', 'ID Proof Type', 'ID Proof Number', 'Address', 'Room No', 'Property', 'Move-In Date'];
+        const csvRows = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="police_verification.csv"');
+        res.send(csvRows);
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ AGREEMENTS: BULK SEND ════════════════════════════════════════════════════
+router.post('/agreements/bulk-send', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+    try {
+        const { tenantIds } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
+        }
+        const tenants = await Tenant.find({ _id: { $in: tenantIds } }).select('name email phone loginId');
+        const Notification = require('../models/Notification');
+        let sent = 0;
+        for (const t of tenants) {
+            try {
+                await Notification.create({
+                    userId: t._id,
+                    title: 'Rental Agreement',
+                    message: `Dear ${t.name || 'Tenant'}, please sign your rental agreement. Login to your Roomhy account to complete the process.`,
+                    type: 'agreement_request',
+                });
+                sent++;
+            } catch (_) {}
+        }
+        res.json({ success: true, message: `Agreement send request sent to ${sent} tenant(s)`, sent });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = router;

@@ -179,3 +179,66 @@ exports.deleteMeterReading = async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
+
+/**
+ * Bulk update meter readings (Warden one-shot table entry)
+ * POST /api/electricity/bulk-update
+ * Body: { readings: [{propertyId, roomNo, billingMonth, currentReading, previousReading?}] }
+ */
+exports.bulkUpdateReadings = async (req, res) => {
+    try {
+        const { readings } = req.body;
+        if (!Array.isArray(readings) || readings.length === 0) {
+            return res.status(400).json({ success: false, message: 'readings array is required' });
+        }
+
+        const { findTenantByRoom, syncElectricityToInvoice } = require('../services/tenantDuesService');
+        const Room = require('../models/Room');
+        const results = [];
+
+        for (const entry of readings) {
+            const { propertyId, roomNo, billingMonth, currentReading, previousReading: reqPreviousReading } = entry;
+            if (!propertyId || !roomNo || !billingMonth || currentReading === undefined) {
+                results.push({ roomNo, success: false, message: 'Missing fields' });
+                continue;
+            }
+
+            try {
+                let currentRecord = await ElectricityMeter.findOne({ property: propertyId, roomNo, billingMonth });
+                if (!currentRecord) {
+                    const lastRecord = await ElectricityMeter.findOne({ property: propertyId, roomNo }).sort({ billingMonth: -1 });
+                    const room = await Room.findOne({ property: propertyId, title: roomNo });
+                    currentRecord = new ElectricityMeter({
+                        property: propertyId,
+                        roomNo,
+                        billingMonth,
+                        previousReading: lastRecord ? lastRecord.currentReading : 0,
+                        unitCost: room?.electricity?.unitCost || (lastRecord ? lastRecord.unitCost : 0),
+                        status: 'unbilled'
+                    });
+                }
+                currentRecord.currentReading = Number(currentReading);
+                if (reqPreviousReading !== undefined && reqPreviousReading !== null && reqPreviousReading !== '') {
+                    currentRecord.previousReading = Number(reqPreviousReading);
+                }
+                currentRecord.unitsConsumed = Math.max(0, currentRecord.currentReading - currentRecord.previousReading);
+                if (!currentRecord.unitCost) {
+                    const room = await Room.findOne({ property: propertyId, title: roomNo });
+                    currentRecord.unitCost = room?.electricity?.unitCost || 0;
+                }
+                currentRecord.totalBill = currentRecord.unitsConsumed * currentRecord.unitCost;
+                await currentRecord.save();
+                try { await syncElectricityToInvoice(propertyId, roomNo, billingMonth, currentRecord); } catch (_) {}
+                results.push({ roomNo, success: true, reading: currentRecord });
+            } catch (e) {
+                results.push({ roomNo, success: false, message: e.message });
+            }
+        }
+
+        const saved = results.filter(r => r.success).length;
+        res.json({ success: true, message: `${saved}/${readings.length} readings saved`, results });
+    } catch (error) {
+        console.error('bulkUpdateReadings error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};

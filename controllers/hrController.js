@@ -163,3 +163,62 @@ exports.saveShift = async (req, res) => {
         res.status(500).json({ success: false, error: err.message });
     }
 };
+
+/**
+ * Bulk mark attendance for multiple staff in one request
+ * POST /api/hr/attendance/bulk
+ * Body: { ownerLoginId, date, records: [{employeeId?, employeeLoginId?, status, notes?}] }
+ */
+exports.bulkMarkAttendance = async (req, res) => {
+    try {
+        const { ownerLoginId, date, records } = req.body;
+        if (!ownerLoginId || !date || !Array.isArray(records) || records.length === 0) {
+            return res.status(400).json({ success: false, error: 'ownerLoginId, date, and records[] are required' });
+        }
+
+        const Employee = require('../models/Employee');
+        const parsedDate = new Date(date);
+        parsedDate.setHours(0, 0, 0, 0);
+
+        const saved = [];
+        const failed = [];
+
+        for (const rec of records) {
+            try {
+                let resolvedEmployeeId = rec.employeeId;
+                let resolvedLoginId = rec.employeeLoginId || '';
+                if (!resolvedEmployeeId && resolvedLoginId) {
+                    const emp = await Employee.findOne({ loginId: resolvedLoginId });
+                    if (emp) resolvedEmployeeId = emp._id;
+                }
+                if (!resolvedEmployeeId) { failed.push({ ...rec, reason: 'Employee not found' }); continue; }
+
+                const existing = await StaffAttendance.findOne({ employeeId: resolvedEmployeeId, date: parsedDate });
+                if (existing) {
+                    if (rec.status) existing.status = rec.status;
+                    if (rec.notes !== undefined) existing.notes = rec.notes;
+                    existing.updatedAt = new Date();
+                    await existing.save();
+                    saved.push(existing);
+                } else {
+                    const record = new StaffAttendance({
+                        employeeId: resolvedEmployeeId,
+                        employeeLoginId: resolvedLoginId,
+                        ownerLoginId,
+                        date: parsedDate,
+                        status: rec.status || 'Present',
+                        notes: rec.notes || '',
+                    });
+                    await record.save();
+                    saved.push(record);
+                }
+            } catch (e) {
+                failed.push({ ...rec, reason: e.message });
+            }
+        }
+
+        res.json({ success: true, saved: saved.length, failed: failed.length, data: saved, errors: failed });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+};

@@ -20,14 +20,17 @@ function getConfig() {
   const env = (process.env.PAYU_ENV || 'sandbox').toLowerCase();
   const isProduction = env === 'production' || env === 'live';
 
-  const key = (process.env.PAYU_MERCHANT_KEY || '').trim();
-  const salt = (process.env.PAYU_MERCHANT_SALT || '').trim();
+  const defaultKey = isProduction ? '' : 'Ayzr9O';
+  const defaultSalt = isProduction ? '' : 'sY5kcSxBHxkDII1cSS7uQaDUnpj0Xv1B';
+
+  const key = (process.env.PAYU_MERCHANT_KEY || defaultKey).trim() || defaultKey;
+  const salt = (process.env.PAYU_MERCHANT_SALT || defaultSalt).trim() || defaultSalt;
 
   const baseUrl = isProduction ? 'https://secure.payu.in' : 'https://test.payu.in';
   const actionUrl = `${baseUrl}/_payment`;
   const verifyApiUrl = `${baseUrl}/merchant/postservice?form=2`;
 
-  const serverApiUrl = (process.env.API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+  const serverApiUrl = (process.env.API_URL || 'http://localhost:5001').replace(/\/+$/, '');
   const successUrl = process.env.PAYU_SUCCESS_URL || `${serverApiUrl}/api/payments/payu/response`;
   const failureUrl = process.env.PAYU_FAILURE_URL || `${serverApiUrl}/api/payments/payu/response`;
 

@@ -7,6 +7,9 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 // Owners add rooms
 router.post('/', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.createRoom);
 router.post('/bulk', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.bulkCreateRooms);
+router.post('/bulk-delete', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.bulkDeleteRooms);
+router.post('/bulk-status', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.bulkToggleRoomStatus);
+
 
 // Get rooms by property
 router.get('/property/:propertyId', roomController.getRoomsByProperty);

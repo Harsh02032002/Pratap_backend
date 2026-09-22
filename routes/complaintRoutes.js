@@ -72,4 +72,20 @@ router.put(
   complaintController.updateOwnerResponse
 );
 
+// Bulk assign staff to multiple complaints
+router.put(
+  '/bulk-assign',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner'),
+  complaintController.bulkAssignStaff
+);
+
+// Bulk resolve multiple complaints
+router.put(
+  '/bulk-resolve',
+  protect,
+  authorize('superadmin', 'areamanager', 'owner'),
+  complaintController.bulkResolve
+);
+
 module.exports = router;

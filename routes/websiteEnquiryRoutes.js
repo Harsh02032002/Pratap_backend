@@ -572,4 +572,27 @@ router.delete('/:enquiry_id', protect, authorize('superadmin', 'areamanager'), a
     }
 });
 
+// ============================================================
+// POST: Bulk delete enquiries
+// ============================================================
+router.post('/bulk-delete', protect, authorize('superadmin', 'areamanager'), auditTrail('website-enquiry'), async (req, res) => {
+    try {
+        const { enquiryIds } = req.body;
+        if (!Array.isArray(enquiryIds) || enquiryIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'enquiryIds array is required' });
+        }
+        await WebsiteEnquiry.deleteMany({
+            $or: [
+                { _id: { $in: enquiryIds } },
+                { enquiry_id: { $in: enquiryIds } }
+            ]
+        });
+        return res.json({ success: true, message: `${enquiryIds.length} enquiries deleted successfully.` });
+    } catch (error) {
+        console.error('Error in bulk delete website enquiries:', error);
+        return res.status(500).json({ success: false, message: 'Error performing bulk delete' });
+    }
+});
+
 module.exports = router;
+

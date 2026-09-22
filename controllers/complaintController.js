@@ -363,3 +363,47 @@ exports.startEscalationJob = () => {
     setInterval(run, CHECK_INTERVAL_HOURS * 60 * 60 * 1000);
     console.log(`[EscalationJob] Started — every ${CHECK_INTERVAL_HOURS}h, threshold ${ESCALATION_DAYS} days`);
 };
+
+/**
+ * Bulk assign staff to multiple complaints
+ * PUT /api/complaints/bulk-assign
+ * Body: { ids: string[], staffId: string, staffName?: string }
+ */
+exports.bulkAssignStaff = async (req, res) => {
+    try {
+        const { ids, staffId, staffName } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0 || !staffId) {
+            return res.status(400).json({ success: false, message: 'ids[] and staffId are required' });
+        }
+        const result = await Complaint.updateMany(
+            { _id: { $in: ids } },
+            { $set: { assignedStaff: staffId, assignedStaffName: staffName || staffId, updatedAt: new Date() } }
+        );
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} complaints assigned` });
+    } catch (err) {
+        console.error('bulkAssignStaff error:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+/**
+ * Bulk resolve multiple complaints
+ * PUT /api/complaints/bulk-resolve
+ * Body: { ids: string[], resolution?: string }
+ */
+exports.bulkResolve = async (req, res) => {
+    try {
+        const { ids, resolution } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ success: false, message: 'ids[] is required' });
+        }
+        const result = await Complaint.updateMany(
+            { _id: { $in: ids } },
+            { $set: { status: 'Resolved', resolution: resolution || 'Resolved by admin', resolvedAt: new Date(), updatedAt: new Date() } }
+        );
+        res.json({ success: true, modified: result.modifiedCount, message: `${result.modifiedCount} complaints resolved` });
+    } catch (err) {
+        console.error('bulkResolve error:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
