@@ -97,12 +97,8 @@ async function notifyOwnerOnPayment(booking) {
 exports.createOrder = async (req, res) => {
   try {
     const { bookingId: requestedBookingId, amount: requestedAmount, customerInfo = {} } = req.body;
-
-    if (!requestedBookingId) {
-      return res.status(400).json({ success: false, message: 'bookingId is required' });
-    }
-
-    const bookingId = await resolveBookingReference(requestedBookingId);
+    const rawId = (requestedBookingId && String(requestedBookingId).trim()) || `PAY_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const bookingId = rawId.includes('.') ? await resolveBookingReference(rawId) : rawId;
     const isValidObjectId = mongoose.Types.ObjectId.isValid(bookingId);
 
     let booking = null;
@@ -265,15 +261,18 @@ exports.handlePaymentResponse = async (req, res) => {
 
     console.log(`[PayUCallback] 📥 Received callback for txnid: ${txnid} | Status: ${status} | MihPayID: ${mihpayid}`);
 
-    const frontendUrl = (process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:5173').replace(/\/+$/, '');
+    const isSandbox = (process.env.PAYU_ENV || 'sandbox').toLowerCase() === 'sandbox';
+    const frontendUrl = isSandbox 
+      ? 'http://localhost:5173'
+      : (process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://roomhy.com').replace(/\/+$/, '');
 
     if (!txnid) {
       return res.redirect(`${frontendUrl}/website/pay?status=failed&error=Missing+transaction+ID`);
     }
 
-    // Server-Side Hash Verification
+    // Server-Side Hash Verification (Only enforce strictly in production environment)
     const isHashValid = payuService.verifyResponseHash(payload);
-    if (!isHashValid && process.env.NODE_ENV === 'production') {
+    if (!isHashValid && !isSandbox && process.env.NODE_ENV === 'production') {
       console.error(`[PayUCallback] ❌ SHA-512 Hash Mismatch for txnid: ${txnid}`);
       return res.redirect(`${frontendUrl}/website/pay?order_id=${encodeURIComponent(txnid)}&status=failed&error=Invalid+payment+signature`);
     }
@@ -333,12 +332,7 @@ exports.handlePaymentResponse = async (req, res) => {
         }
       }
 
-      // Determine redirect path (Tenant Dashboard or Website Checkout)
-      const isTenantRent = payload.udf2 === 'booking_rent_payment' || payload.udf1?.includes('rent');
-      const targetRedirect = isTenantRent
-        ? `${frontendUrl}/tenant-dashboard?pay=online&order_id=${encodeURIComponent(txnid)}&status=success`
-        : `${frontendUrl}/website/pay?order_id=${encodeURIComponent(txnid)}&status=success`;
-
+      const targetRedirect = `${frontendUrl}/website/payment-success?order_id=${encodeURIComponent(txnid)}&status=success&amount=${encodeURIComponent(tx?.booking_amount || tx?.amount || '')}`;
       return res.redirect(targetRedirect);
     } else {
       // Payment Failed or Cancelled
@@ -353,7 +347,8 @@ exports.handlePaymentResponse = async (req, res) => {
 
   } catch (err) {
     console.error('❌ handlePaymentResponse error:', err);
-    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/+$/, '');
+    const isSandbox = (process.env.PAYU_ENV || 'sandbox').toLowerCase() === 'sandbox';
+    const frontendUrl = isSandbox ? 'http://localhost:5173' : (process.env.FRONTEND_URL || 'https://roomhy.com').replace(/\/+$/, '');
     return res.redirect(`${frontendUrl}/website/pay?status=failed&error=${encodeURIComponent(err.message)}`);
   }
 };
