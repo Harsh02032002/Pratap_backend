@@ -706,8 +706,27 @@ async function listPaymentsHandler(req, res) {
     const ownerLoginId = req.user.loginId;
     let txs = [];
     if (ownerLoginId) {
-      txs = await PaymentTransaction.find({ owner_id: ownerLoginId.toUpperCase() }).lean();
+      // Only transactions where money actually landed count as an "issued receipt".
+      // 'Created'/'PENDING' is a checkout session that was started but never finished
+      // (e.g. the tenant abandoned or retried it) — those aren't real receipts and were
+      // showing up here as blank-tenant, duplicate-amount rows for abandoned attempts.
+      txs = await PaymentTransaction.find({
+        owner_id: ownerLoginId.toUpperCase(),
+        status: { $in: ['PAID', 'Verified', 'Settled'] }
+      }).lean();
       if (propertyId) txs = txs.filter(t => String(t.property_id || '') === String(propertyId));
+
+      // Every online rent payment writes BOTH a RentPayment (already in `shaped`, with the
+      // real tenant/room/full amount) AND a PaymentTransaction (the owner-payout ledger
+      // entry, post-commission/GST) sharing the same booking_id. Without this exclusion,
+      // the same payment appeared twice: once as a proper receipt, once as a blank-tenant
+      // row showing the owner's net payout amount instead of what the tenant actually paid.
+      const Rent = require('../models/Rent');
+      const rentBookingIds = new Set(
+        (await Rent.find({ _id: { $in: txs.map(t => t.booking_id).filter(Boolean) } }).select('_id').lean())
+          .map(r => String(r._id))
+      );
+      txs = txs.filter(t => !rentBookingIds.has(String(t.booking_id || '')));
     }
 
     const bookingIds = txs.map(t => t.booking_id).filter(Boolean);

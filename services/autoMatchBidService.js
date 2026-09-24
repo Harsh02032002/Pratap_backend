@@ -143,7 +143,6 @@ async function notifyMatchingBidsForNewProperty(propertyDoc) {
         return { success: false, error: err.message };
     }
 }
-}
 
 module.exports = {
     determineMatchCategory,

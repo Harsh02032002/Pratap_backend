@@ -821,7 +821,20 @@ try {
     app.use('/api/media', require('./routes/mediaRoutes'));
     console.log('  ✓ mediaRoutes');
 
-    // ── PayU PG Gateway Routes ────────�// ── Quick Seed: Add test tenants to vacant rooms for owner ROOMHY9602 ────────
+    // ── PayU PG Gateway Routes ───────────────────────────────────────────────
+    app.use('/api/payments/payu', require('./routes/payuPaymentRoutes'));
+    app.use('/api/payments', require('./routes/payuPaymentRoutes'));
+    console.log('  ✓ payuPaymentRoutes');
+
+    console.log('✅ All routes loaded');
+
+} catch (err) {
+    console.error('❌ Error loading routes:', err.message);
+    console.error(err.stack);
+    process.exit(1);
+}
+
+// ── Quick Seed: Add test tenants to vacant rooms for owner ROOMHY9602 ────────
 app.get('/api/seed-test-tenants-9602', async (req, res) => {
     try {
         const Room     = require('./models/Room');
@@ -892,17 +905,6 @@ app.get('/api/seed-test-tenants-9602', async (req, res) => {
         }
 
         res.json({ success: true, message: `✅ ${created.length} test tenant(s) added!`, created, note: 'Password: Test@123' });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-antLoginId: loginId, assignedAt: new Date() };
-            await Room.findByIdAndUpdate(room._id, { $set: { bedAssignments: updatedAssignments } });
-            created.push({ room: room.title || room.number, bed: bedIndex + 1, tenant: tenant.name, loginId });
-        }
-
-        res.json({ success: true, message: `${created.length} test tenant(s) added!`, created, note: 'Password: Test@123' });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
