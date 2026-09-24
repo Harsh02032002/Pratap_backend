@@ -89,6 +89,305 @@ async function notifyOwnerOnPayment(booking) {
   }
 }
 
+/**
+ * Fulfill complete onboarding & rent payment lifecycle when PayU payment is confirmed PAID
+ */
+async function fulfillPayUPayment(tx) {
+  if (!tx) return;
+  try {
+    const BookingRequest = require('../models/BookingRequest');
+    const RentInvoice = require('../models/RentInvoice');
+    const Rent = require('../models/Rent');
+    const Tenant = require('../models/Tenant');
+    const Owner = require('../models/Owner');
+    const Property = require('../models/Property');
+    const RentPayment = require('../models/RentPayment');
+    const tenantController = require('./tenantController');
+
+    const txnid = tx.order_id || tx.cf_order_id;
+    const paymentId = tx.cf_payment_id || `PAYU_${Date.now()}`;
+    const bookingIdStr = String(tx.booking_id || '').trim();
+    const isValidObjId = mongoose.Types.ObjectId.isValid(bookingIdStr);
+
+    console.log(`[PayUFulfillment] ⚡ Fulfilling payment for txnid: ${txnid}, bookingId: ${bookingIdStr}, user: ${tx.user_id}`);
+
+    // 1. Update BookingRequest if exists
+    let bookingReq = null;
+    if (bookingIdStr) {
+      if (isValidObjId) {
+        bookingReq = await BookingRequest.findById(bookingIdStr).catch(() => null);
+      }
+      if (!bookingReq) {
+        bookingReq = await BookingRequest.findOne({ booking_id: bookingIdStr }).catch(() => null);
+      }
+      if (bookingReq) {
+        bookingReq.status = 'confirmed';
+        bookingReq.payment_status = 'PAID';
+        bookingReq.cf_order_id = txnid;
+        bookingReq.cf_payment_id = paymentId;
+        await bookingReq.save().catch(() => null);
+      } else if (isValidObjId) {
+        await BookingRequest.updateMany(
+          { _id: bookingIdStr },
+          { $set: { status: 'confirmed', payment_status: 'PAID', cf_order_id: txnid, cf_payment_id: paymentId } }
+        ).catch(() => null);
+      }
+    }
+
+    // 2. Find Rent & RentInvoice
+    let rent = null;
+    let rentInvoice = null;
+
+    if (isValidObjId) {
+      rent = await Rent.findById(bookingIdStr).catch(() => null);
+      rentInvoice = await RentInvoice.findById(bookingIdStr).catch(() => null);
+    }
+
+    if (!rent && tx.user_id) {
+      rent = await Rent.findOne({
+        $or: [
+          { tenantLoginId: String(tx.user_id).toUpperCase() },
+          { tenantLoginId: tx.user_id }
+        ]
+      }).sort({ createdAt: -1 }).catch(() => null);
+    }
+
+    if (!rent && tx.user_email) {
+      rent = await Rent.findOne({ tenantEmail: tx.user_email }).sort({ createdAt: -1 }).catch(() => null);
+    }
+
+    if (rent) {
+      rent.status = 'paid';
+      rent.paidAt = new Date();
+      rent.paymentMethod = 'online';
+      rent.payuTxnid = txnid;
+      rent.payuPaymentId = paymentId;
+      if (tx.booking_amount) rent.paidAmount = tx.booking_amount;
+      await rent.save().catch(() => null);
+    }
+
+    if (!rentInvoice && rent) {
+      rentInvoice = await RentInvoice.findOne({
+        tenantLoginId: rent.tenantLoginId,
+        billingMonth: rent.collectionMonth
+      }).catch(() => null);
+    }
+
+    if (rentInvoice) {
+      rentInvoice.status = 'PAID';
+      rentInvoice.paidAt = new Date();
+      rentInvoice.paymentMethod = 'online';
+      rentInvoice.payuTxnid = txnid;
+      rentInvoice.payuPaymentId = paymentId;
+      await rentInvoice.save().catch(() => null);
+    }
+
+    // 3. Find Tenant & trigger finalizeOnboardingPayment
+    let tenant = null;
+    if (rent && rent.tenantLoginId) {
+      tenant = await Tenant.findOne({
+        $or: [
+          { loginId: String(rent.tenantLoginId).toUpperCase() },
+          { loginId: rent.tenantLoginId }
+        ]
+      }).catch(() => null);
+    }
+
+    if (!tenant && tx.user_id) {
+      tenant = await Tenant.findOne({
+        $or: [
+          { loginId: String(tx.user_id).toUpperCase() },
+          { loginId: tx.user_id }
+        ]
+      }).catch(() => null);
+    }
+
+    if (!tenant && tx.user_email) {
+      tenant = await Tenant.findOne({ email: tx.user_email }).catch(() => null);
+    }
+
+    if (!tenant && tx.user_phone) {
+      tenant = await Tenant.findOne({ phone: tx.user_phone }).catch(() => null);
+    }
+
+    if (tenant) {
+      console.log(`[PayUFulfillment] 🟢 Triggering finalizeOnboardingPayment for tenant: ${tenant.loginId}`);
+      await Tenant.updateOne({ _id: tenant._id }, { $set: { paymentLinkStatus: 'paid', status: 'active', kycStatus: 'verified' } }).catch(() => null);
+      await tenantController.finalizeOnboardingPayment(tenant.loginId, rent?._id || bookingIdStr).catch(err => {
+        console.error('[PayUFulfillment] finalizeOnboardingPayment error:', err.message);
+      });
+    }
+
+    // 4. Auto-create RentPayment Record for Receipt tab (Online mode)
+    try {
+      let existingRentPayment = await RentPayment.findOne({
+        $or: [{ transactionId: txnid }, { transactionId: paymentId }]
+      }).catch(() => null);
+
+      if (!existingRentPayment) {
+        // Fallback resolution for Tenant ID
+        let tenantDoc = tenant;
+        if (!tenantDoc) {
+          tenantDoc = await Tenant.findOne({
+            $or: [
+              { email: tx.user_email },
+              { phone: tx.user_phone },
+              { loginId: String(tx.user_id || '').toUpperCase() }
+            ]
+          }).catch(() => null);
+        }
+
+        // Fallback resolution for Owner ID
+        let ownerDoc = null;
+        const ownerSearch = tenantDoc?.ownerLoginId || rent?.ownerLoginId || tx.owner_id || bookingReq?.owner_id;
+        if (ownerSearch) {
+          ownerDoc = await Owner.findOne({
+            $or: [
+              { loginId: String(ownerSearch).toUpperCase() },
+              { loginId: ownerSearch },
+              { email: ownerSearch }
+            ]
+          }).catch(() => null);
+        }
+
+        // Try via tenant's property if still not resolved
+        if (!ownerDoc && tenantDoc?.property) {
+          const propForOwner = await Property.findById(tenantDoc.property).lean().catch(() => null);
+          if (propForOwner?.ownerLoginId) {
+            ownerDoc = await Owner.findOne({ loginId: String(propForOwner.ownerLoginId).toUpperCase() }).catch(() => null);
+          }
+        }
+        if (!ownerDoc) {
+          console.warn(`[PayUFulfillment] ⚠️ Owner not resolved — using first owner as fallback`);
+          ownerDoc = await Owner.findOne().sort({ createdAt: 1 }).catch(() => null);
+        }
+
+        // Fallback resolution for Property ID
+        let propId = rent?.propertyId || tenantDoc?.propertyId || tenantDoc?.property || tx.property_id || bookingReq?.property_id;
+        let propertyDoc = null;
+        if (propId) {
+          if (mongoose.Types.ObjectId.isValid(String(propId))) {
+            propertyDoc = await Property.findById(propId).catch(() => null);
+          }
+          if (!propertyDoc) {
+            propertyDoc = await Property.findOne({ $or: [{ visitId: String(propId) }, { propertyId: String(propId) }, { title: String(propId) }] }).catch(() => null);
+          }
+        }
+        if (!propertyDoc) {
+          propertyDoc = await Property.findOne().sort({ createdAt: 1 }).catch(() => null);
+        }
+
+        const validTenantId = tenantDoc?._id || (isValidObjId ? bookingIdStr : new mongoose.Types.ObjectId());
+        const validOwnerId = ownerDoc?._id || new mongoose.Types.ObjectId();
+        const validPropId = propertyDoc?._id || new mongoose.Types.ObjectId();
+        const billingMonth = rent?.collectionMonth || new Date().toISOString().slice(0, 7);
+        const amountPaid = Number(tx.booking_amount || rent?.rentAmount || tenantDoc?.agreedRent || 500);
+        // dueDate is REQUIRED in RentInvoice schema — derive from billingMonth
+        const [_dy, _dm] = billingMonth.split('-').map(Number);
+        const dueDate = new Date(_dy, _dm - 1, 1); // 1st of billing month
+
+        let invId = rentInvoice?._id;
+        if (!invId) {
+          // Search for existing invoice by tenantId + billingMonth
+          let invDoc = await RentInvoice.findOne({ tenantId: validTenantId, billingMonth }).catch(() => null);
+
+          if (invDoc) {
+            // Existing invoice found — update to PAID + online
+            await RentInvoice.findByIdAndUpdate(invDoc._id, {
+              $set: {
+                status: 'PAID',
+                paidAmount: amountPaid,
+                rentPaidAmount: amountPaid,
+                outstandingAmount: 0,
+                paymentMethod: 'online',
+                payuTxnid: txnid,
+                payuPaymentId: paymentId,
+              }
+            }).catch(err => console.error('[PayUFulfillment] RentInvoice update error:', err.message));
+            invId = invDoc._id;
+            console.log(`[PayUFulfillment] ✅ Existing RentInvoice ${invDoc.invoiceNumber} updated to PAID (online)`);
+          } else {
+            // Create new invoice — include ALL required schema fields
+            const invoiceNumber = `INV-${billingMonth}-${String(validTenantId).slice(-6)}-${Date.now().toString(36).toUpperCase()}`;
+            invDoc = await RentInvoice.create({
+              invoiceNumber,
+              tenantId: validTenantId,
+              propertyId: validPropId,
+              ownerId: validOwnerId,
+              tenantName: tenantDoc?.name || tx.user_name || 'Guest',
+              tenantEmail: tenantDoc?.email || tx.user_email || '',
+              tenantPhone: tenantDoc?.phone || tx.user_phone || '',
+              billingMonth,
+              rentAmount: amountPaid,
+              dueDate,              // ← REQUIRED field — was missing, causing silent failure!
+              totalDue: amountPaid,
+              paidAmount: amountPaid,
+              rentPaidAmount: amountPaid,
+              penaltyPaidAmount: 0,
+              outstandingAmount: 0,
+              status: 'PAID',
+              paymentMethod: 'online',
+              payuTxnid: txnid,
+              payuPaymentId: paymentId,
+            }).catch(err => {
+              console.error('[PayUFulfillment] ❌ RentInvoice.create failed:', err.message,
+                '| fields:', JSON.stringify({ invoiceNumber, billingMonth, dueDate, ownerId: String(validOwnerId), tenantId: String(validTenantId) }));
+              return null;
+            });
+            if (invDoc) console.log(`[PayUFulfillment] ✅ New RentInvoice created: ${invDoc.invoiceNumber} for ${tenantDoc?.name || tx.user_name}`);
+            invId = invDoc?._id;
+          }
+        } else {
+          // rentInvoice was already resolved above — ensure it is PAID + online
+          await RentInvoice.findByIdAndUpdate(invId, {
+            $set: {
+              status: 'PAID',
+              paidAmount: amountPaid,
+              rentPaidAmount: amountPaid,
+              outstandingAmount: 0,
+              paymentMethod: 'online',
+              payuTxnid: txnid,
+              payuPaymentId: paymentId,
+            }
+          }).catch(err => console.error('[PayUFulfillment] RentInvoice update (pre-resolved) error:', err.message));
+          console.log(`[PayUFulfillment] ✅ Pre-resolved rentInvoice ${invId} updated — PAID (online)`);
+        }
+
+        if (invId) {
+          await RentPayment.create({
+            invoiceId: invId,
+            tenantId: validTenantId,
+            propertyId: validPropId,
+            ownerId: validOwnerId,
+            amount: amountPaid,
+            paymentMethod: 'online',
+            transactionId: txnid,
+            isPartial: false,
+            remainingAfter: 0,
+            rentPaidAmount: amountPaid,
+            penaltyPaidAmount: 0,
+            paymentDate: new Date(),
+            recordedBy: 'PayU PG',
+            notes: `Online Payment via PayU PG (Txn: ${txnid})`
+          }).catch(err => console.error('[PayUFulfillment] RentPayment create error:', err.message));
+
+          console.log(`[PayUFulfillment] ✅ RentPayment receipt issued (online) for txn: ${txnid}`);
+        } else {
+          console.error(`[PayUFulfillment] ❌ Cannot create RentPayment — no invId resolved for txn: ${txnid}`);
+        }
+      } else {
+        console.log(`[PayUFulfillment] ⏭ RentPayment already exists for txn: ${txnid}, skipping duplicate.`);
+      }
+    } catch (rpErr) {
+      console.error('[PayUFulfillment] ❌ Receipt auto-creation failed:', rpErr.message);
+    }
+
+    notifyOwnerOnPayment(tx);
+  } catch (err) {
+    console.error('❌ fulfillPayUPayment error:', err);
+  }
+}
+
 // ─── CREATE ORDER ──────────────────────────────────────────────────────────────
 /**
  * POST /api/payments/payu/create-order
@@ -299,36 +598,7 @@ exports.handlePaymentResponse = async (req, res) => {
           tx.paidAt = new Date();
           await tx.save();
 
-          // Mark BookingRequest / Rent / RentInvoice as PAID
-          if (tx.booking_id && mongoose.Types.ObjectId.isValid(tx.booking_id)) {
-            const BookingRequest = require('../models/BookingRequest');
-            await BookingRequest.findByIdAndUpdate(tx.booking_id, {
-              status: 'confirmed',
-              payment_status: 'PAID',
-              cf_order_id: txnid,
-              cf_payment_id: tx.cf_payment_id
-            }).catch(() => null);
-
-            const RentInvoice = require('../models/RentInvoice');
-            await RentInvoice.findByIdAndUpdate(tx.booking_id, {
-              status: 'PAID',
-              paidAt: new Date(),
-              paymentMethod: 'PayU',
-              payuTxnid: txnid,
-              payuPaymentId: tx.cf_payment_id
-            }).catch(() => null);
-
-            const Rent = require('../models/Rent');
-            await Rent.findByIdAndUpdate(tx.booking_id, {
-              status: 'paid',
-              paidAt: new Date(),
-              paymentMethod: 'payu',
-              payuTxnid: txnid,
-              payuPaymentId: tx.cf_payment_id
-            }).catch(() => null);
-          }
-
-          notifyOwnerOnPayment(tx);
+          await fulfillPayUPayment(tx);
         }
       }
 
@@ -374,11 +644,14 @@ exports.verifyRentPayment = async (req, res) => {
     // Run server verification check with PayU
     const remoteVerify = await payuService.verifyPaymentWithPayU(txnid);
 
-    if (tx?.status === 'PAID' || remoteVerify.success) {
-      if (tx && tx.status !== 'PAID') {
-        tx.status = 'PAID';
-        tx.cf_payment_id = remoteVerify.mihpayid || `PAYU_${Date.now()}`;
-        await tx.save();
+    if (remoteVerify && remoteVerify.isSuccess) {
+      if (tx) {
+        if (tx.status !== 'PAID') {
+          tx.status = 'PAID';
+          tx.cf_payment_id = remoteVerify.mihpayid || `PAYU_${Date.now()}`;
+          await tx.save();
+        }
+        await fulfillPayUPayment(tx);
       }
 
       return res.json({

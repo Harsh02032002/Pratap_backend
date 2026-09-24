@@ -1581,9 +1581,7 @@ router.post('/tenant/agreement', async (req, res) => {
             tenant: completion.tenant,
             agreementStatus: 'signed',
             provider: 'roomhy-esign',
-            nextUrl: completion.paymentUrl
-                ? completion.paymentUrl
-                : `${DIGITAL_CHECKIN_URL}/digital-checkin/tenant-confirmation?loginId=${encodeURIComponent(normalizedLoginId)}&agreementSigned=1`
+            nextUrl: `${DIGITAL_CHECKIN_URL}/digital-checkin/tenant-confirmation?loginId=${encodeURIComponent(normalizedLoginId)}&agreementSigned=1`
         });
     } catch (err) {
         console.error('tenant/agreement error:', err);

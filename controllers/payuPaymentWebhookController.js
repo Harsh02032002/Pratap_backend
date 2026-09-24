@@ -35,21 +35,29 @@ exports.handlePaymentWebhook = async (req, res) => {
         tx.paidAt = new Date();
         await tx.save();
 
-        if (tx.booking_id) {
-          await BookingRequest.findByIdAndUpdate(tx.booking_id, {
-            status: 'confirmed',
-            payment_status: 'PAID'
-          }).catch(() => null);
+        const Tenant = require('../models/Tenant');
+        const tenantController = require('./tenantController');
 
-          await RentInvoice.findByIdAndUpdate(tx.booking_id, {
-            status: 'PAID',
-            paidAt: new Date()
-          }).catch(() => null);
+        const bookingIdStr = String(tx.booking_id || '');
+        const isValidObjId = mongoose.Types.ObjectId.isValid(bookingIdStr);
 
-          await Rent.findByIdAndUpdate(tx.booking_id, {
-            status: 'paid',
-            paidAt: new Date()
-          }).catch(() => null);
+        if (isValidObjId) {
+          await BookingRequest.findByIdAndUpdate(tx.booking_id, { status: 'confirmed', payment_status: 'PAID' }).catch(() => null);
+          await RentInvoice.findByIdAndUpdate(tx.booking_id, { status: 'PAID', paidAt: new Date(), paymentMethod: 'PayU' }).catch(() => null);
+          await Rent.findByIdAndUpdate(tx.booking_id, { status: 'paid', paidAt: new Date(), paymentMethod: 'PayU' }).catch(() => null);
+        }
+
+        let tenant = null;
+        if (tx.user_id) {
+          tenant = await Tenant.findOne({ $or: [{ loginId: String(tx.user_id).toUpperCase() }, { loginId: tx.user_id }] }).catch(() => null);
+        }
+        if (!tenant && tx.user_email) {
+          tenant = await Tenant.findOne({ email: tx.user_email }).catch(() => null);
+        }
+
+        if (tenant) {
+          await Tenant.updateOne({ _id: tenant._id }, { $set: { paymentLinkStatus: 'paid', status: 'active', kycStatus: 'verified' } }).catch(() => null);
+          await tenantController.finalizeOnboardingPayment(tenant.loginId, tx.booking_id).catch(() => null);
         }
       }
     }

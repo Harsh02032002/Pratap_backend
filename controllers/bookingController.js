@@ -528,6 +528,8 @@ exports.createBookingRequest = async (req, res) => {
             longitude: req.body.longitude || null
         });
 
+
+
         await newRequest.save();
         console.log(`✅ Booking saved with ID: ${newRequest._id}`);
 
@@ -578,6 +580,24 @@ exports.createBookingRequest = async (req, res) => {
                 },
                 read: false
             });
+
+            // 🔔 Notify Superadmin about new booking/bid request
+            try {
+                await notifySuperadmin({
+                    type: 'booking',
+                    from: name || 'User',
+                    subject: `⚡ New ${request_type === 'bid' ? 'Fast Bid' : 'Booking'} Request — ${property_name || 'Property'}`,
+                    message: notificationMessage,
+                    meta: {
+                        bookingId: String(newRequest._id || ''),
+                        propertyName: property_name || '',
+                        guestName: name || '',
+                        guestPhone: phone || ''
+                    }
+                });
+            } catch (superNotifErr) {
+                console.warn('Superadmin booking notification warning:', superNotifErr.message);
+            }
 
             // 📱 Send instant FCM Push Notification to owner's devices (Laptop & Phone)
             try {

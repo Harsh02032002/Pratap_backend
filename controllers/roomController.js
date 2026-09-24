@@ -950,4 +950,119 @@ exports.bulkToggleRoomStatus = async (req, res) => {
     console.error('bulkToggleRoomStatus error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
-};
+};
+
+// ══ BULK: CREATE ROOMS ════════════════════════════════════════════════════════
+exports.bulkCreateRooms = async (req, res) => {
+  try {
+    const { propertyId, rooms: roomItems, ownerLoginId } = req.body;
+    const user = req.user;
+    if (!user) return res.status(401).json({ success: false, message: 'Auth required' });
+    if (!propertyId) return res.status(400).json({ success: false, message: 'Property ID is required' });
+    if (!Array.isArray(roomItems) || roomItems.length === 0) {
+      return res.status(400).json({ success: false, message: 'rooms array is required and must not be empty' });
+    }
+    const property = await Property.findById(propertyId).lean();
+    if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
+
+    const requestOwnerLoginId = String(ownerLoginId || user.loginId || '').toUpperCase();
+    const ownerMatches =
+      user.role === 'superadmin' ||
+      (property.owner && property.owner.toString() === user._id.toString()) ||
+      (property.ownerLoginId && String(property.ownerLoginId).toUpperCase() === String(user.loginId || '').toUpperCase()) ||
+      (property.ownerLoginId && requestOwnerLoginId && String(property.ownerLoginId).toUpperCase() === requestOwnerLoginId);
+
+    if (!ownerMatches) {
+      return res.status(403).json({ success: false, message: 'You can only add rooms to your own property' });
+    }
+
+    const docs = roomItems.map(item => ({
+      property: propertyId,
+      title: String(item.title || item.roomNo || '').trim(),
+      type: item.type || 'AC',
+      beds: Number(item.beds || item.capacity || item.totalBeds || 1),
+      price: Number(item.price || item.rent || 0),
+      unitType: item.unitType || 'Room',
+      floor: item.floor || '',
+      sharingType: item.sharingType || '',
+      gender: item.gender || '',
+      isAvailable: true,
+      facilities: Array.isArray(item.facilities) ? item.facilities : [],
+      status: 'inactive',
+      createdBy: user._id
+    }));
+
+    const created = await Room.insertMany(docs);
+    return res.status(201).json({
+      success: true,
+      rooms: created,
+      count: created.length,
+      message: `${created.length} rooms created successfully`
+    });
+  } catch (err) {
+    console.error('bulkCreateRooms error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══ BULK: CLEAR TENANT ASSIGNMENTS FROM ROOMS ═════════════════════════════════
+exports.bulkClearTenants = async (req, res) => {
+  try {
+    const { roomIds } = req.body;
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'roomIds array is required' });
+    }
+    await Room.updateMany(
+      { _id: { $in: roomIds } },
+      { $set: { bedAssignments: [], bedsInfo: [] } }
+    );
+    return res.json({ success: true, message: `Tenant assignments cleared from ${roomIds.length} rooms` });
+  } catch (err) {
+    console.error('bulkClearTenants error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══ BULK: DELETE ROOMS ════════════════════════════════════════════════════════
+exports.bulkDeleteRooms = async (req, res) => {
+  try {
+    const { roomIds } = req.body;
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'roomIds array is required' });
+    }
+    const result = await Room.deleteMany({ _id: { $in: roomIds } });
+    return res.json({
+      success: true,
+      deleted: result.deletedCount,
+      message: `${result.deletedCount} room(s) deleted successfully`
+    });
+  } catch (err) {
+    console.error('bulkDeleteRooms error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══ BULK: TOGGLE ROOM STATUS ══════════════════════════════════════════════════
+exports.bulkToggleRoomStatus = async (req, res) => {
+  try {
+    const { roomIds, status } = req.body;
+    if (!Array.isArray(roomIds) || roomIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'roomIds array is required' });
+    }
+    const validStatuses = ['active', 'inactive', 'maintenance'];
+    const newStatus = validStatuses.includes(status) ? status : 'inactive';
+    const result = await Room.updateMany(
+      { _id: { $in: roomIds } },
+      { $set: { status: newStatus } }
+    );
+    return res.json({
+      success: true,
+      modified: result.modifiedCount,
+      message: `${result.modifiedCount} room(s) status updated to ${newStatus}`
+    });
+  } catch (err) {
+    console.error('bulkToggleRoomStatus error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+

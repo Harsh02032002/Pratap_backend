@@ -305,8 +305,7 @@ router.post('/register-requirement', async (req, res) => {
             match_category: 'no_match_active',
             filter_criteria: { city, area, gender, min_price: budget_min, max_price: budget_max },
             message: message || `Budget: ₹${budget_min || 0}–₹${budget_max || 0}/month | Gender: ${gender || 'Any'} | Area: ${area || city || 'Any'}`,
-            status: 'pending',
-            is_expired: false
+            status: 'pending'
         });
 
         await requirement.save();

@@ -39,15 +39,20 @@ async function notifyMatchingBidsForNewProperty(propertyDoc) {
         // Search active pending bids in same city/area where bid_amount + 2500 >= property rent
         const query = {
             request_type: 'bid',
-            status: 'pending',
-            is_expired: { $ne: true }
+            status: 'pending'
         };
 
         if (city) {
+            const cityReg = new RegExp(city.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            const areaReg = area ? new RegExp(area.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
             query.$or = [
-                { city: new RegExp(`^${city.trim()}$`, 'i') },
-                { area: new RegExp(`^${area.trim()}$`, 'i') }
+                { city: cityReg },
+                { 'filter_criteria.city': cityReg }
             ];
+            if (areaReg) {
+                query.$or.push({ area: areaReg });
+                query.$or.push({ 'filter_criteria.area': areaReg });
+            }
         }
 
         const activeBids = await BookingRequest.find(query).lean();
@@ -138,113 +143,9 @@ async function notifyMatchingBidsForNewProperty(propertyDoc) {
         return { success: false, error: err.message };
     }
 }
-
-/**
- * Sweeper job to expire bids older than 24 hours and send 24-hour expiry notifications.
- */
-async function expireOldBids() {
-    try {
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-        const expiredBids = await BookingRequest.find({
-            request_type: 'bid',
-            status: 'pending',
-            is_expired: { $ne: true },
-            created_at: { $lt: twentyFourHoursAgo }
-        });
-
-        if (!expiredBids || expiredBids.length === 0) {
-            return { success: true, expiredCount: 0 };
-        }
-
-        console.log(`⌛ Expiring ${expiredBids.length} bids older than 24 hours...`);
-
-        let count = 0;
-        for (const bid of expiredBids) {
-            bid.status = 'rejected';
-            bid.is_expired = true;
-            bid.expired_at = new Date();
-            await bid.save();
-            count++;
-
-            const propertyName = bid.property_name || 'Property';
-            const tenantName = bid.name || 'Student';
-            const bidAmount = Number(bid.bid_amount || 0);
-
-            const title = "⌛ Bid Expired (24 Hours)";
-            const message = `Your bid of ₹${bidAmount.toLocaleString('en-IN')} for "${propertyName}" has expired after 24 hours as the owner did not respond. Your requirement remains ACTIVE in our system for future property matches!`;
-
-            // 1. In-App Notification
-            try {
-                await Notification.create({
-                    toRole: 'tenant',
-                    toLoginId: bid.user_id,
-                    from: 'Roomhy System',
-                    type: 'bid_expired_24h',
-                    meta: {
-                        title,
-                        message,
-                        bookingId: String(bid._id),
-                        propertyName,
-                        bidAmount
-                    },
-                    read: false
-                });
-            } catch (nErr) {
-                console.warn('Expiry notification save warning:', nErr.message);
-            }
-
-            // 2. Email Notification
-            if (bid.email) {
-                try {
-                    const emailSubject = `⌛ Bid Update: 24-Hour Expiry for ${propertyName}`;
-                    const emailHtml = `
-                        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
-                            <div style="background: #f59e0b; color: #ffffff; padding: 20px; text-align: center;">
-                                <h2 style="margin: 0; font-size: 20px;">24-Hour Bid Expiry Notice</h2>
-                            </div>
-                            <div style="padding: 24px; color: #1e293b; line-height: 1.6;">
-                                <p>Hi <strong>${tenantName}</strong>,</p>
-                                <p>${message}</p>
-                                <div style="background: #fffbeb; padding: 16px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 16px 0;">
-                                    <p style="margin: 4px 0;"><strong>Property:</strong> ${propertyName}</p>
-                                    <p style="margin: 4px 0;"><strong>Offered Bid:</strong> ₹${bidAmount.toLocaleString('en-IN')}/month</p>
-                                    <p style="margin: 4px 0;"><strong>Requirement Status:</strong> Active for Auto-Matching</p>
-                                </div>
-                                <p>You can submit a new bid anytime or browse other properties on Roomhy.</p>
-                            </div>
-                        </div>
-                    `;
-                    await mailer.sendMail(bid.email, emailSubject, message, emailHtml);
-                } catch (eErr) {
-                    console.warn('Expiry email warning:', eErr.message);
-                }
-            }
-
-            // 3. WhatsApp Notification
-            if (bid.phone) {
-                try {
-                    const waText = `⌛ *Roomhy Alert: Bid Expired (24 Hours)*\n\nHi ${tenantName},\n\nYour bid of ₹${bidAmount.toLocaleString('en-IN')} for *${propertyName}* has expired after 24 hours. Your requirement remains ACTIVE in our system for future property matches!`;
-                    const targetPhone = bid.phone || await resolvePhoneByEmailOrUserId({ email: bid.email, userId: bid.user_id });
-                    if (targetPhone && mailer.sendWhatsAppMessage && mailer.getMailerConfig) {
-                        await mailer.sendWhatsAppMessage(targetPhone, waText, mailer.getMailerConfig());
-                    }
-                } catch (wErr) {
-                    console.warn('Expiry WhatsApp warning:', wErr.message);
-                }
-            }
-        }
-
-        console.log(`✅ Expired ${count} bids and sent 24h expiry notifications.`);
-        return { success: true, expiredCount: count };
-    } catch (err) {
-        console.error('❌ Error in expireOldBids:', err.message);
-        return { success: false, error: err.message };
-    }
 }
 
 module.exports = {
     determineMatchCategory,
-    notifyMatchingBidsForNewProperty,
-    expireOldBids
+    notifyMatchingBidsForNewProperty
 };

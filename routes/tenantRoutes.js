@@ -1388,4 +1388,22 @@ router.post('/agreements/bulk-send', protect, authorize('superadmin', 'areamanag
     }
 });
 
+// ══ TENANTS: BULK DELETE ══════════════════════════════════════════════════════
+router.post('/bulk-delete', async (req, res) => {
+    try {
+        const { tenantIds } = req.body;
+        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'tenantIds[] array required' });
+        }
+        const result = await Tenant.deleteMany({ _id: { $in: tenantIds } });
+        return res.json({
+            success: true,
+            deleted: result.deletedCount,
+            message: `${result.deletedCount} tenant(s) deleted successfully`
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = router;

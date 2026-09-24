@@ -91,6 +91,26 @@ exports.createTicket = async (req, res) => {
         await ticket.save();
         console.log(`🎫 Ticket Created: ${ticket.ticket_id} (${ticket.ticket_type}) by ${ticket.raised_by}`);
 
+        // 🔔 Notify Superadmin about new ticket
+        try {
+            const { notifySuperadmin } = require('../utils/superadminNotifier');
+            await notifySuperadmin({
+                type: 'ticket',
+                from: ticket.raised_by_role || 'user',
+                subject: `🎫 New Ticket Raised: ${ticket.ticket_id} (${ticket.ticket_type})`,
+                message: `Ticket "${ticket.subject}" raised by ${ticket.raised_by_name || ticket.raised_by} (${ticket.raised_by_role}). Priority: ${ticket.priority}`,
+                meta: {
+                    TicketID: ticket.ticket_id,
+                    Type: ticket.ticket_type,
+                    RaisedBy: ticket.raised_by_name || ticket.raised_by,
+                    Role: ticket.raised_by_role,
+                    Property: ticket.property_name || 'N/A'
+                }
+            });
+        } catch (notifErr) {
+            console.warn('Superadmin ticket notification warning:', notifErr.message);
+        }
+
         // 🤖 Auto-Assign Ticket to Employee if unassigned
         if (!ticket.assigned_admin) {
             try {

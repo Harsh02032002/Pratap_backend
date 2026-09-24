@@ -107,7 +107,7 @@ function buildOwnerBookingQuery({ ownerIdCandidates, normalizedOwnerId, identity
     ownerCities.forEach(city => {
         query.$or.push({
             $and: [
-                { request_type: 'bid' },
+                { request_type: 'bid', is_expired: { $ne: true }, status: { $nin: ['rejected', 'cancelled'] } },
                 { $or: [{ city: new RegExp(escapeRegex(city), 'i') }, { 'filter_criteria.city': new RegExp(escapeRegex(city), 'i') }] },
                 {
                     $or: [

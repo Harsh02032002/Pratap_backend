@@ -735,18 +735,6 @@ const moveoutCompletionSchedule = cron.schedule('0 1 * * *', async () => {
     }
 });
 
-// ── 7. 24-HOUR BID EXPIRY SWEEPER ─────────────────────────────────────────
-const { expireOldBids } = require('./autoMatchBidService');
-const bidExpirySchedule = cron.schedule('*/30 * * * *', async () => {
-    if (mongoose.connection.readyState !== 1) return;
-    try {
-        console.log('⌛ Running 24-hour Bid Expiry Cron Job...');
-        await expireOldBids();
-    } catch (err) {
-        console.error('❌ Bid Expiry Cron Job error:', err.message);
-    }
-});
-
 module.exports = {
     startCronJobs: () => {
         initDemoOwner(); // Ensure DEMO owner is ready
@@ -763,7 +751,6 @@ module.exports = {
         console.log('   - Auto reminders: Daily 10:30 AM (enabled manually per unpaid rent)');
         console.log('   - Agreement renewals: Daily 9 AM (10 and 11 month checks)');
         console.log('   - Move-out notice completion: Daily 1 AM');
-        console.log('   - 24-Hour Bid Expiry: Every 30 mins');
     },
     stopCronJobs: () => {
         demoResetSchedule.stop();
@@ -772,9 +759,9 @@ module.exports = {
         autoReminderSchedule.stop();
         agreementRenewalSchedule.stop();
         moveoutCompletionSchedule.stop();
-        bidExpirySchedule.stop();
         console.log('🛑 Cron jobs stopped');
     }
 };
+
 
 
