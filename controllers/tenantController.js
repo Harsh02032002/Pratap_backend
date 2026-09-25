@@ -1207,6 +1207,7 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
 
     const mongoose = require('mongoose');
     const Rent = require('../models/Rent');
+    const RentInvoice = require('../models/RentInvoice');
     const User = require('../models/user');
     const Tenant = require('../models/Tenant');
     const { sendCredentials, sendReceiptEmail } = require('../utils/mailer');
@@ -1357,15 +1358,44 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
             throw new Error('Rent-tenant ownership mismatch cross-leakage prevented');
         }
 
+        // This function runs after every PayU payment, not just first-time onboarding —
+        // the real rent/electricity/penalty split and the human-readable invoice number
+        // live on RentInvoice, not on the bare Rent record, so look that up too.
+        // Pay Now on the tenant dashboard pays a RentInvoice directly, so rentRecordId
+        // may be an invoice _id with no Rent record for that month — look it up by id,
+        // scoped to this tenant so one tenant's id can never pull another's invoice.
+        const invoice = rent
+            ? await RentInvoice.findOne({ tenantId: rent.tenantId, billingMonth: rent.collectionMonth })
+                .sort({ createdAt: -1 }).lean().catch(() => null)
+            : (rentRecordId && mongoose.Types.ObjectId.isValid(String(rentRecordId))
+                ? await RentInvoice.findOne({ _id: rentRecordId, tenantId: updatedTenant._id }).lean().catch(() => null)
+                : null);
+
+        const PAYMENT_METHOD_LABELS = {
+            online: 'Online Payment', payu: 'Online Payment (PayU)', cashfree: 'Online Payment (Cashfree)',
+            razorpay: 'Online Payment (Razorpay)', upi: 'UPI', bank_transfer: 'Bank Transfer',
+            cash: 'Cash', already_paid: 'Already Paid', other: 'Other',
+        };
+        const rawPaymentMethod = invoice?.paymentMethod || rent?.paymentMethod || 'online';
+
+        // receiptHtml() computes its own totalDue = rentAmount + penalty + electricity,
+        // so `rentAmount` here must be the BASE rent only — passing the already-combined
+        // invoice.totalDue would double-count electricity/penalty on top of themselves,
+        // the exact bug already fixed once in the owner-side receipt view (receipts.jsx).
         const receiptDetails = {
-            receiptNo: rent?._id || `RCPT-${Date.now().toString(36).toUpperCase()}`,
+            receiptNo: invoice?.invoiceNumber || rent?._id || `RCPT-${Date.now().toString(36).toUpperCase()}`,
             tenantName: updatedTenant.name,
             propertyName: updatedTenant.propertyTitle,
             roomNo: updatedTenant.roomNo,
-            amount: rent?.rentAmount || updatedTenant.agreedRent,
-            paidAmount: rent?.paidAmount || rent?.rentAmount || updatedTenant.agreedRent,
-            paymentMethod: (rent?.paymentMethod === 'cashfree' || rent?.paymentMethod === 'online') ? 'Online (Cashfree)' : (rent?.paymentMethod || 'Online'),
-            period: rent?.collectionMonth || new Date().toISOString().slice(0, 7)
+            rentAmount: invoice?.rentAmount || rent?.rentAmount || updatedTenant.agreedRent,
+            paidAmount: invoice?.paidAmount || rent?.paidAmount || rent?.rentAmount || updatedTenant.agreedRent,
+            paymentMethod: PAYMENT_METHOD_LABELS[rawPaymentMethod] || 'Online Payment',
+            electricity: invoice?.electricityBill || 0,
+            penalty: invoice?.totalPenalty || 0,
+            // Move-in/advance is only billed on the tenant's first (move-in) invoice, so it
+            // comes from that invoice alone — never from the tenant's agreement terms.
+            advanceCharge: invoice ? (invoice.advanceChargeAmount || 0) : (rent?.advanceChargeAmount || 0),
+            period: invoice?.billingMonth || rent?.collectionMonth || new Date().toISOString().slice(0, 7)
         };
 
         await sendReceiptEmail(updatedTenant.email, receiptDetails);
@@ -1384,6 +1414,7 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
  */
 exports.retryFailedOnboardingEmails = async (req, res) => {
     const Rent = require('../models/Rent');
+    const RentInvoice = require('../models/RentInvoice');
     const { sendCredentials, sendReceiptEmail } = require('../utils/mailer');
 
     try {
@@ -1421,15 +1452,30 @@ exports.retryFailedOnboardingEmails = async (req, res) => {
                     const rent = tenant.onboardingRentId
                         ? await Rent.findById(tenant.onboardingRentId).lean()
                         : null;
+                    const invoice = rent
+                        ? await RentInvoice.findOne({ tenantId: rent.tenantId, billingMonth: rent.collectionMonth })
+                            .sort({ createdAt: -1 }).lean().catch(() => null)
+                        : null;
+                    const PAYMENT_METHOD_LABELS = {
+                        online: 'Online Payment', payu: 'Online Payment (PayU)', cashfree: 'Online Payment (Cashfree)',
+                        razorpay: 'Online Payment (Razorpay)', upi: 'UPI', bank_transfer: 'Bank Transfer',
+                        cash: 'Cash', already_paid: 'Already Paid', other: 'Other',
+                    };
+                    const rawPaymentMethod = invoice?.paymentMethod || rent?.paymentMethod || 'online';
+                    // Same double-counting hazard as finalizeOnboardingPayment above:
+                    // rentAmount must be the base rent only, not the combined totalDue.
                     const receiptDetails = {
-                        receiptNo: rent?._id || `RCPT-${Date.now().toString(36).toUpperCase()}`,
+                        receiptNo: invoice?.invoiceNumber || rent?._id || `RCPT-${Date.now().toString(36).toUpperCase()}`,
                         tenantName: tenant.name,
                         propertyName: tenant.propertyTitle,
                         roomNo: tenant.roomNo,
-                        amount: rent?.rentAmount || tenant.agreedRent,
-                        paidAmount: rent?.paidAmount || tenant.agreedRent,
-                        paymentMethod: rent?.paymentMethod || 'Razorpay / Cash',
-                        period: rent?.collectionMonth || new Date().toISOString().slice(0, 7)
+                        rentAmount: invoice?.rentAmount || rent?.rentAmount || tenant.agreedRent,
+                        paidAmount: invoice?.paidAmount || rent?.paidAmount || tenant.agreedRent,
+                        paymentMethod: PAYMENT_METHOD_LABELS[rawPaymentMethod] || 'Online Payment',
+                        electricity: invoice?.electricityBill || 0,
+                        penalty: invoice?.totalPenalty || 0,
+                        advanceCharge: invoice ? (invoice.advanceChargeAmount || 0) : (rent?.advanceChargeAmount || 0),
+                        period: invoice?.billingMonth || rent?.collectionMonth || new Date().toISOString().slice(0, 7)
                     };
 
                     await sendReceiptEmail(tenant.email, receiptDetails);

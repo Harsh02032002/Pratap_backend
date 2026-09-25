@@ -692,7 +692,9 @@ async function listPaymentsHandler(req, res) {
       billingMonth: p.invoiceId?.billingMonth || '',
       invoiceNumber: p.invoiceId?.invoiceNumber || '',
       rentAmount: p.invoiceId?.rentAmount || p.amount,
-      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || Number(p.tenantId?.digitalCheckin?.agreementDetails?.advanceCharge || 0) || 0,
+      // Move-in charge belongs to the move-in invoice only. The tenant's agreement lists
+      // it once, but falling back to that put it on every later month's receipt too.
+      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || 0,
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
@@ -721,11 +723,15 @@ async function listPaymentsHandler(req, res) {
       // entry, post-commission/GST) sharing the same booking_id. Without this exclusion,
       // the same payment appeared twice: once as a proper receipt, once as a blank-tenant
       // row showing the owner's net payout amount instead of what the tenant actually paid.
+      // A rent payment's booking_id is either a Rent _id or (Pay Now on the tenant
+      // dashboard) a RentInvoice _id — both mean it's already shown via RentPayment.
       const Rent = require('../models/Rent');
-      const rentBookingIds = new Set(
-        (await Rent.find({ _id: { $in: txs.map(t => t.booking_id).filter(Boolean) } }).select('_id').lean())
-          .map(r => String(r._id))
-      );
+      const txBookingIds = txs.map(t => t.booking_id).filter(id => mongoose.Types.ObjectId.isValid(String(id)));
+      const [rentDocs, invoiceDocs] = await Promise.all([
+        Rent.find({ _id: { $in: txBookingIds } }).select('_id').lean(),
+        RentInvoice.find({ _id: { $in: txBookingIds } }).select('_id').lean(),
+      ]);
+      const rentBookingIds = new Set([...rentDocs, ...invoiceDocs].map(r => String(r._id)));
       txs = txs.filter(t => !rentBookingIds.has(String(t.booking_id || '')));
     }
 

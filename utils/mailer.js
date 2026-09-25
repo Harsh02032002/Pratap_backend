@@ -786,7 +786,8 @@ function receiptHtml(receipt) {
   const originalRent = Number(receipt.originalRent || receipt.rentAmount || receipt.amount || 0);
   const penalty = Number(receipt.penalty || receipt.latePenalty || 0);
   const electricity = Number(receipt.electricity || receipt.electricityCharge || 0);
-  const totalDue = originalRent + penalty + electricity;
+  const advanceCharge = Number(receipt.advanceCharge || receipt.advanceChargeAmount || 0);
+  const totalDue = originalRent + penalty + electricity + advanceCharge;
   const paidAmt = Number(receipt.paidAmount || receipt.paid || totalDue);
   const period = receipt.period || receipt.billingMonth || receipt.collectionMonth || 'Current Month';
   const receiptNo = receipt.receiptNo || receipt.invoiceNumber || receipt.id || `RCPT-${Date.now().toString(36).toUpperCase()}`;
@@ -882,6 +883,7 @@ function receiptHtml(receipt) {
       </tr>
       ${penalty > 0 ? `<tr><td>Late Penalty</td><td class="right">₹${penalty.toLocaleString('en-IN')}</td></tr>` : ''}
       ${electricity > 0 ? `<tr><td>Electricity Bill</td><td class="right">₹${electricity.toLocaleString('en-IN')}</td></tr>` : ''}
+      ${advanceCharge > 0 ? `<tr><td>Move-in Charges</td><td class="right">₹${advanceCharge.toLocaleString('en-IN')}</td></tr>` : ''}
     </tbody>
   </table>
   <div class="totals-wrap">
@@ -889,6 +891,7 @@ function receiptHtml(receipt) {
       <div class="t-row"><span class="tk">Rent Amount</span><span class="tv">₹${originalRent.toLocaleString('en-IN')}</span></div>
       ${penalty > 0 ? `<div class="t-row"><span class="tk">Late Penalty</span><span class="tv">₹${penalty.toLocaleString('en-IN')}</span></div>` : ''}
       ${electricity > 0 ? `<div class="t-row"><span class="tk">Electricity</span><span class="tv">₹${electricity.toLocaleString('en-IN')}</span></div>` : ''}
+      ${advanceCharge > 0 ? `<div class="t-row"><span class="tk">Move-in Charges</span><span class="tv">₹${advanceCharge.toLocaleString('en-IN')}</span></div>` : ''}
       <div class="t-row sep"><span class="tk">Total Amount Paid</span><span class="tv">₹${paidAmt.toLocaleString('en-IN')}</span></div>
     </div>
   </div>
