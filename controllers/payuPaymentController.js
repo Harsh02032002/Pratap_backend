@@ -157,13 +157,18 @@ async function fulfillPayUPayment(tx) {
     }
 
     if (rent) {
-      rent.status = 'paid';
+      rent.paymentStatus = 'paid';
       rent.paidAt = new Date();
-      rent.paymentMethod = 'online';
+      // Rent.paymentMethod's enum is ['cash','payu','razorpay','bank_transfer','other'] —
+      // 'online' isn't one of them. That mismatch made every save() here throw a
+      // validation error, silently swallowed below, so paymentStatus/paidAmount never
+      // actually persisted and the tenant dashboard kept showing the invoice as unpaid
+      // even after a real, successful PayU payment.
+      rent.paymentMethod = 'payu';
       rent.payuTxnid = txnid;
       rent.payuPaymentId = paymentId;
       if (tx.booking_amount) rent.paidAmount = tx.booking_amount;
-      await rent.save().catch(() => null);
+      await rent.save().catch(err => console.error('[PayUFulfillment] ❌ Rent.save() failed:', err.message));
     }
 
     if (!rentInvoice && rent) {
@@ -238,28 +243,54 @@ async function fulfillPayUPayment(tx) {
         }
 
         // Fallback resolution for Owner ID
+        //
+        // The owner's ID used everywhere else (req.user._id from the auth middleware,
+        // and the ownerId already stored on every other RentPayment/RentInvoice) is the
+        // User collection's _id, not the Owner collection's — the same loginId can exist
+        // as two separate documents with two different _ids. Looking this up against
+        // Owner instead of User silently wrote a payment record the owner's own session
+        // could never query back (a real payment that became invisible on their Issued
+        // Receipts page). User is tried first to match that established convention;
+        // Owner is only a fallback for accounts that genuinely have no User record.
+        const User = require('../models/user');
         let ownerDoc = null;
         const ownerSearch = tenantDoc?.ownerLoginId || rent?.ownerLoginId || tx.owner_id || bookingReq?.owner_id;
         if (ownerSearch) {
-          ownerDoc = await Owner.findOne({
+          ownerDoc = await User.findOne({
+            role: 'owner',
             $or: [
               { loginId: String(ownerSearch).toUpperCase() },
               { loginId: ownerSearch },
               { email: ownerSearch }
             ]
           }).catch(() => null);
+          if (!ownerDoc) {
+            ownerDoc = await Owner.findOne({
+              $or: [
+                { loginId: String(ownerSearch).toUpperCase() },
+                { loginId: ownerSearch },
+                { email: ownerSearch }
+              ]
+            }).catch(() => null);
+          }
         }
 
         // Try via tenant's property if still not resolved
         if (!ownerDoc && tenantDoc?.property) {
           const propForOwner = await Property.findById(tenantDoc.property).lean().catch(() => null);
           if (propForOwner?.ownerLoginId) {
-            ownerDoc = await Owner.findOne({ loginId: String(propForOwner.ownerLoginId).toUpperCase() }).catch(() => null);
+            ownerDoc = await User.findOne({ role: 'owner', loginId: String(propForOwner.ownerLoginId).toUpperCase() }).catch(() => null);
+            if (!ownerDoc) {
+              ownerDoc = await Owner.findOne({ loginId: String(propForOwner.ownerLoginId).toUpperCase() }).catch(() => null);
+            }
           }
         }
         if (!ownerDoc) {
           console.warn(`[PayUFulfillment] ⚠️ Owner not resolved — using first owner as fallback`);
-          ownerDoc = await Owner.findOne().sort({ createdAt: 1 }).catch(() => null);
+          ownerDoc = await User.findOne({ role: 'owner' }).sort({ createdAt: 1 }).catch(() => null);
+          if (!ownerDoc) {
+            ownerDoc = await Owner.findOne().sort({ createdAt: 1 }).catch(() => null);
+          }
         }
 
         // Fallback resolution for Property ID
@@ -281,7 +312,15 @@ async function fulfillPayUPayment(tx) {
         const validOwnerId = ownerDoc?._id || new mongoose.Types.ObjectId();
         const validPropId = propertyDoc?._id || new mongoose.Types.ObjectId();
         const billingMonth = rent?.collectionMonth || new Date().toISOString().slice(0, 7);
+        // amountPaid is the TOTAL actually charged via PayU — now correctly rent + advance
+        // combined (see createOrder below). It must NOT be dumped whole into rentAmount:
+        // that mislabels the advance portion as rent, so a receipt for e.g. rent ₹3,000 +
+        // move-in ₹10,000 showed "Original Rent ₹13,000" plus a *second* ₹10,000 Move In
+        // line, double-counting the advance into a fake ₹23,000 "Total Rent Due" against
+        // an actual ₹13,000 paid. Split it back into its real components from `rent`.
         const amountPaid = Number(tx.booking_amount || rent?.rentAmount || tenantDoc?.agreedRent || 500);
+        const baseRentAmount = Number(rent?.rentAmount ?? tenantDoc?.agreedRent ?? amountPaid);
+        const advanceChargeAmt = Number(rent?.advanceChargeAmount || 0);
         // dueDate is REQUIRED in RentInvoice schema — derive from billingMonth
         const [_dy, _dm] = billingMonth.split('-').map(Number);
         const dueDate = new Date(_dy, _dm - 1, 1); // 1st of billing month
@@ -297,7 +336,7 @@ async function fulfillPayUPayment(tx) {
               $set: {
                 status: 'PAID',
                 paidAmount: amountPaid,
-                rentPaidAmount: amountPaid,
+                rentPaidAmount: baseRentAmount,
                 outstandingAmount: 0,
                 paymentMethod: 'online',
                 payuTxnid: txnid,
@@ -318,11 +357,12 @@ async function fulfillPayUPayment(tx) {
               tenantEmail: tenantDoc?.email || tx.user_email || '',
               tenantPhone: tenantDoc?.phone || tx.user_phone || '',
               billingMonth,
-              rentAmount: amountPaid,
+              rentAmount: baseRentAmount,
+              advanceChargeAmount: advanceChargeAmt,
               dueDate,              // ← REQUIRED field — was missing, causing silent failure!
               totalDue: amountPaid,
               paidAmount: amountPaid,
-              rentPaidAmount: amountPaid,
+              rentPaidAmount: baseRentAmount,
               penaltyPaidAmount: 0,
               outstandingAmount: 0,
               status: 'PAID',
@@ -343,7 +383,7 @@ async function fulfillPayUPayment(tx) {
             $set: {
               status: 'PAID',
               paidAmount: amountPaid,
-              rentPaidAmount: amountPaid,
+              rentPaidAmount: baseRentAmount,
               outstandingAmount: 0,
               paymentMethod: 'online',
               payuTxnid: txnid,
@@ -455,7 +495,7 @@ exports.createOrder = async (req, res) => {
           property_id: String(rentDoc.propertyId || 'N/A'),
           property_name: rentDoc.propertyName || 'RoomHy Property',
           check_in_date: rentDoc.createdAt,
-          amount: rentDoc.dueAmount || rentDoc.rentAmount
+          amount: rentDoc.totalDue || rentDoc.rentAmount
         };
       }
     }

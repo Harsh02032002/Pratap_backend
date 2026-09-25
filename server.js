@@ -821,12 +821,94 @@ try {
     app.use('/api/media', require('./routes/mediaRoutes'));
     console.log('  ✓ mediaRoutes');
 
-    // ── PayU PG Gateway Routes (loaded via router files) ──────────────────────
+    // ── PayU PG Gateway Routes ───────────────────────────────────────────────
+    app.use('/api/payments/payu', require('./routes/payuPaymentRoutes'));
+    app.use('/api/payments', require('./routes/payuPaymentRoutes'));
+    console.log('  ✓ payuPaymentRoutes');
+
+    console.log('✅ All routes loaded');
+
 } catch (err) {
-    console.error('❌ Failed to load routes:', err.message);
+    console.error('❌ Error loading routes:', err.message);
+    console.error(err.stack);
     process.exit(1);
 }
 
+// ── Quick Seed: Add test tenants to vacant rooms for owner ROOMHY9602 ────────
+app.get('/api/seed-test-tenants-9602', async (req, res) => {
+    try {
+        const Room     = require('./models/Room');
+        const Tenant   = require('./models/Tenant');
+        const Property = require('./models/Property');
+        const bcrypt   = require('bcryptjs');
+        const ownerLoginId = 'ROOMHY9602';
+
+        // Find owner's properties first (Room has no ownerLoginId field)
+        const properties = await Property.find({ ownerLoginId: { $regex: new RegExp(`^${ownerLoginId}$`, 'i') } }).lean();
+        if (properties.length === 0) {
+            return res.json({ success: false, message: `No properties found for owner ${ownerLoginId}` });
+        }
+        const propIds = properties.map(p => p._id);
+
+        // Find all rooms for these properties
+        const rooms = await Room.find({ property: { $in: propIds }, isDeleted: { $ne: true } }).lean();
+        if (rooms.length === 0) {
+            return res.json({ success: false, message: 'No rooms found for this owner' });
+        }
+
+        // Filter rooms that have at least one vacant bed slot
+        const vacantRooms = rooms.filter(r => {
+            const assignments = r.bedAssignments || [];
+            const totalBeds = Math.max(r.beds || 1, 1);
+            for (let b = 0; b < totalBeds; b++) {
+                if (!assignments[b] || !assignments[b].tenantId) return true;
+            }
+            return false;
+        });
+
+        if (vacantRooms.length === 0) {
+            return res.json({ success: true, message: `All ${rooms.length} room(s) are fully occupied — no vacant beds!` });
+        }
+
+        const hashedPwd = await bcrypt.hash('Test@123', 10);
+        const created = [];
+
+        for (let i = 0; i < vacantRooms.length; i++) {
+            const room = vacantRooms[i];
+            const assignments = room.bedAssignments || [];
+            const totalBeds = Math.max(room.beds || 1, 1);
+            let bedIndex = 0;
+            for (let b = 0; b < totalBeds; b++) {
+                if (!assignments[b] || !assignments[b].tenantId) { bedIndex = b; break; }
+            }
+            const suffix = `${Date.now()}${i}`.slice(-6);
+            const loginId = `TEST${suffix}`;
+            const tenantName = `Test Tenant ${i + 1}`;
+
+            const tenant = await Tenant.create({
+                name: tenantName,
+                phone: `9900${String(Date.now()).slice(-6)}`,
+                email: `test${suffix}@roomhy.test`,
+                loginId, password: hashedPwd,
+                ownerLoginId, property: room.property, room: room._id,
+                roomNo: room.title, bedNo: bedIndex + 1,
+                agreedRent: room.price || 2000,
+                status: 'active', moveInDate: new Date(), kycStatus: 'pending',
+            });
+
+            const updatedAssignments = [...assignments];
+            while (updatedAssignments.length <= bedIndex) updatedAssignments.push({});
+            updatedAssignments[bedIndex] = { tenantId: tenant._id, tenantName, tenantLoginId: loginId, assignedAt: new Date() };
+            await Room.findByIdAndUpdate(room._id, { $set: { bedAssignments: updatedAssignments } });
+
+            created.push({ room: room.title, bed: bedIndex + 1, tenant: tenantName, loginId });
+        }
+
+        res.json({ success: true, message: `✅ ${created.length} test tenant(s) added!`, created, note: 'Password: Test@123' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 app.get('/api/health', (req, res) => {
     const pool = getPoolStats();
