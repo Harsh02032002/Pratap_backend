@@ -2437,7 +2437,7 @@ router.post('/support/tickets', protect, authorize('superadmin', 'owner'), async
 });
 
 // PUT support ticket update
-router.put('/support/tickets/:id', protect, authorize('superadmin'), async (req, res) => {
+router.put('/support/tickets/:id', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), async (req, res) => {
   try {
     const SupportTicket = require('../models/SupportTicket');
     const { id } = req.params;
@@ -2608,7 +2608,9 @@ router.get('/support/resolution-data', protect, authorize('superadmin', 'areaman
       percent: `${((resolutionTimeBuckets[name] / totalResolvedCount) * 100).toFixed(1)}%`
     }));
 
-    const issues = tickets.map(t => {
+    const { resolvePropertyEmployee } = require('../utils/propertyEmployeeResolver');
+
+    const issues = await Promise.all(tickets.map(async t => {
       let res_status = 'Pending Review';
       if (t.status === 'Resolved') res_status = 'Resolved';
       else if (t.status === 'Closed') res_status = 'Closed';
@@ -2626,19 +2628,97 @@ router.get('/support/resolution-data', protect, authorize('superadmin', 'areaman
         res_time = `${Math.round(openHours)} Hours`;
       }
 
+      let assignedAdminName = t.assigned_admin_name;
+      if (!assignedAdminName || assignedAdminName === 'Unassigned' || assignedAdminName === 'N/A') {
+        const propEmp = await resolvePropertyEmployee({
+          propertyId: t.property_id,
+          ownerLoginId: t.owner_id,
+          city: t.city,
+          area: t.area
+        });
+        if (propEmp) {
+          assignedAdminName = propEmp.name;
+          SupportTicket.updateOne(
+            { _id: t._id },
+            {
+              $set: {
+                assigned_admin: propEmp.loginId,
+                assigned_admin_name: propEmp.name,
+                status: t.status === 'Open' ? 'Assigned' : t.status
+              }
+            }
+          ).catch(() => {});
+        }
+      }
+
+      let propName = t.property_name;
+      if (!propName || propName === 'N/A' || propName === 'null' || propName.trim() === '') {
+        try {
+          if (t.property_id) {
+            const ApprovedProperty = require('../models/ApprovedProperty');
+            const prop = await ApprovedProperty.findById(t.property_id).select('title propertyInfo').lean().catch(() => null);
+            if (prop) propName = prop.title || prop.propertyInfo?.propertyName || null;
+          }
+          if (!propName && (t.owner_id || t.owner_name)) {
+            const ApprovedProperty = require('../models/ApprovedProperty');
+            const VisitData = require('../models/VisitData');
+            const ownerQuery = t.owner_id ? { ownerLoginId: String(t.owner_id).toUpperCase() } : { ownerName: t.owner_name };
+            const prop = await ApprovedProperty.findOne(ownerQuery).select('title').lean().catch(() => null);
+            if (prop?.title) {
+              propName = prop.title;
+            } else {
+              const visit = await VisitData.findOne(ownerQuery).select('propertyName title').lean().catch(() => null);
+              if (visit) propName = visit.propertyName || visit.title;
+            }
+          }
+          if (!propName && t.raised_by) {
+            const Tenant = require('../models/Tenant');
+            const Rent = require('../models/Rent');
+            const tenantDoc = await Tenant.findOne({ loginId: String(t.raised_by).toUpperCase() }).select('propertyTitle').lean().catch(() => null);
+            if (tenantDoc?.propertyTitle) {
+              propName = tenantDoc.propertyTitle;
+            } else {
+              const rentDoc = await Rent.findOne({ tenantLoginId: String(t.raised_by).toUpperCase() }).select('propertyName').lean().catch(() => null);
+              if (rentDoc?.propertyName) propName = rentDoc.propertyName;
+            }
+          }
+          if (propName && propName !== 'N/A') {
+            SupportTicket.updateOne({ _id: t._id }, { $set: { property_name: propName } }).catch(() => {});
+          }
+        } catch (_) {}
+      }
+
+      let resolvedType = t.ticket_type;
+      if (!resolvedType || resolvedType === 'Other' || resolvedType === 'General' || resolvedType.trim() === '') {
+        const role = String(t.raised_by_role || '').toLowerCase();
+        if (role === 'property_owner' || role === 'owner' || (t.owner_name && t.raised_by_name && t.owner_name === t.raised_by_name) || (t.owner_id && t.raised_by && String(t.owner_id).toUpperCase() === String(t.raised_by).toUpperCase())) {
+          resolvedType = 'Owner Complaint';
+        } else if (role === 'tenant' || role === 'user') {
+          resolvedType = 'Tenant Complaint';
+        } else if (t.owner_name) {
+          resolvedType = 'Owner Complaint';
+        } else {
+          resolvedType = 'Tenant Complaint';
+        }
+
+        if (resolvedType && resolvedType !== t.ticket_type) {
+          SupportTicket.updateOne({ _id: t._id }, { $set: { ticket_type: resolvedType } }).catch(() => {});
+        }
+      }
+
       return {
         id: t._id,
         ticket_id: t.ticket_id || `TK-${t._id.toString().substring(18).toUpperCase()}`,
-        type: t.ticket_type || 'Other',
-        property: t.property_name || 'N/A',
+        type: resolvedType || 'Tenant Complaint',
+        property: propName || 'N/A',
         tenant: t.raised_by_name || 'N/A',
         owner: t.owner_name || 'N/A',
-        admin: t.assigned_admin_name || 'Unassigned',
+        admin: assignedAdminName || 'Unassigned',
         res_status,
         res_time,
         created: start ? new Date(start).toISOString().split('T')[0] : 'N/A'
       };
-    });
+    }));
 
     res.json({
       success: true,

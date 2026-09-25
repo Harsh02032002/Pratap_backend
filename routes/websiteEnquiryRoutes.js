@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const WebsiteEnquiry = require('../models/WebsiteEnquiry');
 const Owner = require('../models/Owner');
 const Employee = require('../models/Employee');
+const Property = require('../models/Property');
 const { sendMail } = require('../utils/mailer');
 const { notifySuperadmin } = require('../utils/superadminNotifier');
 const { formLimiter, captchaProtection } = require('../middleware/security');
@@ -77,6 +78,103 @@ router.post('/submit', formLimiter, captchaProtection({ required: false }), asyn
 
         // Save to MongoDB
         await enquiry.save();
+
+        // ── ALSO CREATE A PENDING_APPROVAL PROPERTY RECORD FOR VERIFICATION CENTER ──
+        try {
+            // Check if Owner already exists in system
+            const existingOwner = await Owner.findOne({
+                $or: [
+                    { phone: owner_phone },
+                    { email: (owner_email || '').toLowerCase() }
+                ]
+            });
+
+            // Normalize gender enum
+            let normalizedGender = String(gender_suitability || 'any').toLowerCase();
+            if (normalizedGender === 'unisex' || normalizedGender === 'both' || !['male', 'female', 'any'].includes(normalizedGender)) {
+                normalizedGender = 'any';
+            }
+
+            // Normalize propertyType enum
+            let normalizedType = String(property_type || 'pg').toLowerCase();
+            const validTypes = ['pg', 'hostel', 'co-living', 'coliving', 'apartment', 'room', 'flat', 'house', 'villa', 'studio'];
+            if (!validTypes.includes(normalizedType)) {
+                normalizedType = 'pg';
+            }
+
+            const formattedAmenities = (amenities || []).map(a => {
+                if (typeof a === 'string') return { name: a, icon: 'check', category: 'basic' };
+                return a;
+            });
+
+            // ── AUTO-ASSIGN EMPLOYEE FOR THAT CITY & AREA ──
+            let assignedEmp = null;
+            const searchCity = (city || 'Jaipur').trim();
+            const searchArea = (locality || city || '').trim();
+
+            if (searchCity) {
+                if (searchArea) {
+                    assignedEmp = await Employee.findOne({
+                        city: new RegExp(`^${searchCity}$`, 'i'),
+                        area: new RegExp(`^${searchArea}$`, 'i'),
+                        isActive: true
+                    });
+                    if (!assignedEmp) {
+                        assignedEmp = await Employee.findOne({
+                            city: new RegExp(`^${searchCity}$`, 'i'),
+                            area: new RegExp(searchArea, 'i'),
+                            isActive: true
+                        });
+                    }
+                }
+                if (!assignedEmp) {
+                    assignedEmp = await Employee.findOne({
+                        city: new RegExp(`^${searchCity}$`, 'i'),
+                        isActive: true
+                    });
+                }
+            }
+
+            const pendingProperty = new Property({
+                title: property_name,
+                propertyType: normalizedType,
+                city: city,
+                locality: locality || city || '',
+                area: locality || city || '',
+                address: address || `${locality || city}, ${city}`,
+                pincode: pincode || '',
+                description: description || additional_message || '',
+                monthlyRent: parseInt(rent) || 0,
+                securityDeposit: parseInt(deposit) || (parseInt(rent) || 0) * 2,
+                gender: normalizedGender,
+                owner: existingOwner ? existingOwner._id : null,
+                ownerLoginId: existingOwner ? existingOwner.loginId : null,
+                ownerName: owner_name,
+                ownerPhone: owner_phone,
+                contact: {
+                    name: owner_name,
+                    number: owner_phone,
+                    email: owner_email || ''
+                },
+                assignedTo: assignedEmp ? assignedEmp._id : null,
+                assignedToName: assignedEmp ? assignedEmp.name : '',
+                assignedToEmail: assignedEmp ? (assignedEmp.email || '') : '',
+                assignedToPhone: assignedEmp ? (assignedEmp.phone || '') : '',
+                assignedToLoginId: assignedEmp ? (assignedEmp.loginId || '') : '',
+                status: 'pending_approval',
+                isApproved: false,
+                isPublished: false,
+                isLiveOnWebsite: false,
+                enquiry_id: enquiry_id,
+                amenities: formattedAmenities,
+                images: photos || []
+            });
+
+            await pendingProperty.save();
+            console.log(`✅ Pending Property created for Verification Center & Auto-assigned to ${assignedEmp ? assignedEmp.name : 'None'}: ${pendingProperty._id} (${pendingProperty.title})`);
+        } catch (propErr) {
+            console.error('Failed to create pending property record:', propErr.message);
+        }
 
         try {
             await notifySuperadmin({

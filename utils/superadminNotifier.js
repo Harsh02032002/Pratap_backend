@@ -50,6 +50,20 @@ async function notifySuperadmin({
         read: false
     });
 
+    // Dispatch FCM / Web Push Notification to Superadmin devices
+    try {
+        const fcmService = require('../services/fcmService');
+        await fcmService.sendToUser('superadmin', {
+            title: subject,
+            body: message,
+            icon: '/pwa-192x192.png',
+            clickAction: '/superadmin/support/resolution',
+            data: { type, ...meta }
+        }).catch(() => {});
+    } catch (fcmErr) {
+        console.warn('Superadmin FCM push warning:', fcmErr.message);
+    }
+
     // Only send email to superadmin if explicitly configured via env
     if (process.env.SEND_ADMIN_EMAIL_NOTIFICATIONS === 'true') {
         try {

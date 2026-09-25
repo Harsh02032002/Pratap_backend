@@ -395,7 +395,7 @@ async function fulfillPayUPayment(tx) {
  */
 exports.createOrder = async (req, res) => {
   try {
-    const { bookingId: requestedBookingId, amount: requestedAmount, customerInfo = {} } = req.body;
+    const { bookingId: requestedBookingId, amount: requestedAmount, customerInfo = {}, paymentSource } = req.body;
     const rawId = (requestedBookingId && String(requestedBookingId).trim()) || `PAY_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const bookingId = rawId.includes('.') ? await resolveBookingReference(rawId) : rawId;
     const isValidObjectId = mongoose.Types.ObjectId.isValid(bookingId);
@@ -508,6 +508,11 @@ exports.createOrder = async (req, res) => {
     await tx.save();
 
     // Prepare PayU parameters
+    // udf2 encodes the payment source so the response handler knows where to redirect:
+    //   'rent_onboarding'  → email-link rent payment  → redirect to tenant dashboard
+    //   'rent_dashboard'   → in-app rent payment      → redirect to tenant dashboard
+    //   'booking_payment'  → booking amount payment   → redirect to payment-success page
+    const resolvedUdf2 = paymentSource || 'booking_payment';
     const payuOrder = payuService.preparePaymentOrder({
       txnid,
       amount: payableAmount,
@@ -516,7 +521,7 @@ exports.createOrder = async (req, res) => {
       email: customerEmail,
       phone: customerPhone,
       udf1: String(bookingId),
-      udf2: 'booking_rent_payment'
+      udf2: resolvedUdf2
     });
 
     return res.json({
@@ -602,7 +607,18 @@ exports.handlePaymentResponse = async (req, res) => {
         }
       }
 
-      const targetRedirect = `${frontendUrl}/website/payment-success?order_id=${encodeURIComponent(txnid)}&status=success&amount=${encodeURIComponent(tx?.booking_amount || tx?.amount || '')}`;
+      // Determine redirect based on payment source stored in udf2
+      const paymentSourceField = String(payload.udf2 || tx?.udf2 || '').trim();
+      const isRentPayment = paymentSourceField === 'rent_onboarding' || paymentSourceField === 'rent_dashboard';
+
+      let targetRedirect;
+      if (isRentPayment) {
+        // Rent payment (email link or dashboard) → straight to Tenant Dashboard
+        targetRedirect = `${frontendUrl}/tenant/tenantdashboard?payment=success&order_id=${encodeURIComponent(txnid)}&amount=${encodeURIComponent(tx?.booking_amount || tx?.amount || '')}`;
+      } else {
+        // Booking payment → show Payment Success page
+        targetRedirect = `${frontendUrl}/website/payment-success?order_id=${encodeURIComponent(txnid)}&status=success&amount=${encodeURIComponent(tx?.booking_amount || tx?.amount || '')}`;
+      }
       return res.redirect(targetRedirect);
     } else {
       // Payment Failed or Cancelled

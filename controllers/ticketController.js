@@ -56,6 +56,39 @@ exports.createTicket = async (req, res) => {
             exists = await SupportTicket.findOne({ ticket_id });
         }
 
+        let resolvedPropertyName = property_name || null;
+        if (!resolvedPropertyName) {
+            try {
+                if (property_id) {
+                    const ApprovedProperty = require('../models/ApprovedProperty');
+                    const prop = await ApprovedProperty.findById(property_id).select('title propertyInfo').lean().catch(() => null);
+                    if (prop) resolvedPropertyName = prop.title || prop.propertyInfo?.propertyName || null;
+                }
+                if (!resolvedPropertyName && owner_id) {
+                    const ApprovedProperty = require('../models/ApprovedProperty');
+                    const VisitData = require('../models/VisitData');
+                    const prop = await ApprovedProperty.findOne({ ownerLoginId: String(owner_id).toUpperCase() }).select('title').lean().catch(() => null);
+                    if (prop?.title) {
+                        resolvedPropertyName = prop.title;
+                    } else {
+                        const visit = await VisitData.findOne({ ownerLoginId: String(owner_id).toUpperCase() }).select('propertyName title').lean().catch(() => null);
+                        if (visit) resolvedPropertyName = visit.propertyName || visit.title;
+                    }
+                }
+                if (!resolvedPropertyName && raised_by) {
+                    const Tenant = require('../models/Tenant');
+                    const Rent = require('../models/Rent');
+                    const tenantDoc = await Tenant.findOne({ loginId: String(raised_by).toUpperCase() }).select('propertyTitle').lean().catch(() => null);
+                    if (tenantDoc?.propertyTitle) {
+                        resolvedPropertyName = tenantDoc.propertyTitle;
+                    } else {
+                        const rentDoc = await Rent.findOne({ tenantLoginId: String(raised_by).toUpperCase() }).select('propertyName').lean().catch(() => null);
+                        if (rentDoc?.propertyName) resolvedPropertyName = rentDoc.propertyName;
+                    }
+                }
+            } catch (_) {}
+        }
+
         // Create Ticket
         const ticket = new SupportTicket({
             ticket_id,
@@ -69,7 +102,7 @@ exports.createTicket = async (req, res) => {
             user_email: user_email || null,
             user_phone: user_phone || null,
             property_id: property_id || null,
-            property_name: property_name || null,
+            property_name: resolvedPropertyName,
             booking_id: booking_id || null,
             owner_id: owner_id || null,
             owner_name: owner_name || null,
@@ -111,70 +144,109 @@ exports.createTicket = async (req, res) => {
             console.warn('Superadmin ticket notification warning:', notifErr.message);
         }
 
-        // 🤖 Auto-Assign Ticket to Employee if unassigned
-        if (!ticket.assigned_admin) {
-            try {
-                const Employee = require('../models/Employee');
-                const cityFilter = ticket.city || ticket.area || '';
-                let assignedEmp = null;
-                
-                if (cityFilter) {
-                    assignedEmp = await Employee.findOne({
-                        isActive: { $ne: false },
-                        isDeleted: { $ne: true },
-                        $or: [
-                            { city: new RegExp(cityFilter, 'i') },
-                            { area: new RegExp(cityFilter, 'i') },
-                            { locationCode: new RegExp(cityFilter, 'i') }
-                        ]
-                    }).select('loginId name email phone').lean();
-                }
+        // ─── SMART TICKET ROUTING ────────────────────────────────────────────────
+        // Rules:
+        //  A. Tenant ticket, ticket_type = 'Owner Complaint'
+        //       → Route to Owner panel: notify owner directly
+        //  B. Tenant ticket, other types (company/admin complaint)
+        //       → Assign to the specific Employee who created the visit/property
+        //  C. Owner ticket
+        //       → Assign to the specific Employee who created the visit/property
+        //  D. No employee found → city/area fallback → any active employee
+        try {
+            const { resolvePropertyEmployee } = require('../utils/propertyEmployeeResolver');
 
-                if (!assignedEmp) {
-                    assignedEmp = await Employee.findOne({
-                        isActive: { $ne: false },
-                        isDeleted: { $ne: true }
-                    }).select('loginId name email phone').lean();
-                }
+            const isOwnerComplaint = raised_by_role === 'tenant' && String(ticket_type || '').toLowerCase().includes('owner complaint');
 
-                if (!assignedEmp) {
-                    assignedEmp = await User.findOne({
-                        role: 'employee',
-                        isActive: { $ne: false }
-                    }).select('loginId name email phone').lean();
-                }
+            if (isOwnerComplaint) {
+                // ── A: Tenant → Owner complaint → notify owner ──────────────────
+                ticket.routed_to_panel = 'owner';
+                ticket.assigned_to_panel = 'owner';
+                ticket.activity_log.push({
+                    action: 'Routed to Owner Panel',
+                    performed_by: 'system',
+                    performed_by_name: 'System Router',
+                    from_status: 'Open',
+                    to_status: 'Open',
+                    note: `Ticket routed to Owner panel (owner_id: ${owner_id || 'N/A'}) as per tenant selection`,
+                    at: new Date()
+                });
+                await ticket.save();
+                console.log(`🏠 Ticket ${ticket.ticket_id} routed to Owner panel for owner: ${owner_id || 'N/A'}`);
 
-                if (assignedEmp) {
-                    ticket.assigned_admin = assignedEmp.loginId || String(assignedEmp._id);
-                    ticket.assigned_admin_name = assignedEmp.name || assignedEmp.loginId;
+                if (owner_id) {
+                    await Notification.create({
+                        toRole: 'property_owner',
+                        toLoginId: String(owner_id).toUpperCase(),
+                        from: String(raised_by),
+                        type: 'support_ticket_created',
+                        title: `🎫 Tenant Complaint: ${ticket.ticket_id}`,
+                        message: `Your tenant ${ticket.raised_by_name} has raised a complaint: "${subject}"`,
+                        meta: { ticket_id: ticket.ticket_id, ticket_type: ticket.ticket_type, subject },
+                        read: false
+                    }).catch(e => console.warn('Owner ticket notification warning:', e.message));
+
+                    fcmService.sendToUser(String(owner_id).toUpperCase(), {
+                        title: `🎫 Tenant Complaint: ${ticket.ticket_id}`,
+                        body: `${ticket.raised_by_name} raised: "${subject}"`,
+                        icon: '/pwa-192x192.png',
+                        clickAction: '/hostelowner/support',
+                        data: { ticketId: ticket.ticket_id, type: 'tenant_owner_complaint' }
+                    }).catch(() => {});
+                }
+            } else {
+                // ── B / C: Route to the Employee who created this property ──────
+                const propEmployee = await resolvePropertyEmployee({
+                    propertyId: property_id || null,
+                    ownerLoginId: owner_id || null,
+                    city,
+                    area
+                });
+
+                if (propEmployee) {
+                    ticket.assigned_admin = propEmployee.loginId;
+                    ticket.assigned_admin_name = propEmployee.name;
                     ticket.status = 'Assigned';
                     ticket.assigned_at = new Date();
 
                     ticket.activity_log.push({
-                        action: 'Auto-Assigned to Employee',
+                        action: 'Auto-Assigned to Property Employee',
                         performed_by: 'system',
                         performed_by_name: 'System Auto-Assign Engine',
                         from_status: 'Open',
                         to_status: 'Assigned',
-                        note: `Auto-assigned to Employee ${assignedEmp.name || assignedEmp.loginId} (${assignedEmp.loginId})`,
+                        note: `Auto-assigned to Employee ${propEmployee.name} (${propEmployee.loginId}) — property visit creator`,
                         at: new Date()
                     });
 
                     await ticket.save();
-                    console.log(`🤖 Ticket ${ticket.ticket_id} auto-assigned to employee ${assignedEmp.name} (${assignedEmp.loginId})`);
+                    console.log(`🤖 Ticket ${ticket.ticket_id} auto-assigned to property employee ${propEmployee.name} (${propEmployee.loginId})`);
 
-                    fcmService.sendToUser(assignedEmp.loginId || String(assignedEmp._id), {
+                    fcmService.sendToUser(propEmployee.loginId, {
                         title: `🚨 Ticket Assigned: ${ticket.ticket_id}`,
-                        body: `Ticket for "${ticket.subject}" in ${ticket.city || 'your area'} assigned to you.`,
+                        body: `"${subject}" from ${ticket.raised_by_name} (${ticket.raised_by_role}) assigned to you.`,
                         icon: '/pwa-192x192.png',
                         clickAction: '/employee/tickets',
                         data: { ticketId: ticket.ticket_id, type: 'ticket_assigned' }
                     }).catch(() => {});
+
+                    await Notification.create({
+                        toRole: 'employee',
+                        toLoginId: propEmployee.loginId,
+                        from: String(raised_by),
+                        type: 'support_ticket_assigned',
+                        title: `🎫 Ticket Assigned to You: ${ticket.ticket_id}`,
+                        message: `Ticket "${subject}" from ${ticket.raised_by_name} (${ticket.raised_by_role}) has been assigned to you.`,
+                        meta: { ticket_id: ticket.ticket_id, ticket_type: ticket.ticket_type, subject, raised_by: ticket.raised_by_name, raised_by_role },
+                        read: false
+                    }).catch(e => console.warn('Employee ticket assignment notification warning:', e.message));
                 }
-            } catch (autoErr) {
-                console.warn('Auto-assign ticket warning:', autoErr.message);
             }
+        } catch (routeErr) {
+            console.warn('Smart ticket routing warning:', routeErr.message);
         }
+
+
 
         // 1. Email Notification to Ticket Raiser
         if (user_email) {

@@ -86,6 +86,13 @@ const supportTicketSchema = new mongoose.Schema({
   assigned_admin_name: { type: String, default: null },
   assigned_at: { type: Date, default: null },
 
+  // ─── ROUTING PANEL ──────────────────────────────────────────────────────────
+  // 'owner'  = tenant complaint routed to owner panel
+  // 'employee' = routed to employee (default)
+  // 'superadmin' = escalated to superadmin
+  routed_to_panel: { type: String, enum: ['owner', 'employee', 'superadmin', null], default: null },
+  assigned_to_panel: { type: String, default: null },
+
   // ─── SLA TRACKING ─────────────────────────────────────────────────────────
   // SLA target in hours (based on priority: Critical=4h, High=24h, Medium=48h, Low=72h)
   sla_hours: { type: Number, default: 48 },

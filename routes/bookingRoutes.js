@@ -176,6 +176,25 @@ router.post('/contact-submit', async (req, res) => {
         });
         
         await ticket.save();
+
+        // 🔔 Notify Superadmin about Contact Us Enquiry
+        try {
+            const { notifySuperadmin } = require('../utils/superadminNotifier');
+            await notifySuperadmin({
+                type: 'contact_us',
+                from: 'website_user',
+                subject: `💬 Website Enquiry: ${subject}`,
+                message: `Message from ${name} (${email}): "${message}"`,
+                meta: {
+                    TicketID: ticket.ticket_id || ticket._id,
+                    Name: name,
+                    Email: email,
+                    Subject: subject
+                }
+            });
+        } catch (notifErr) {
+            console.warn('Superadmin contact notify failed:', notifErr.message);
+        }
         
         res.status(201).json({
             success: true,

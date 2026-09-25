@@ -5,13 +5,14 @@ const NotificationSchema = new mongoose.Schema({
   toLoginId: { type: String, default: '' },
   from: { type: String, required: true },
   type: { type: String, default: 'info' },
-  // Optional severity, used by filtering/sorting in the paginated API. Older
-  // documents without this field are treated as 'normal'.
+  title: { type: String, default: '' },
+  message: { type: String, default: '' },
+  subject: { type: String, default: '' },
   priority: { type: String, enum: ['low', 'normal', 'high', 'urgent'], default: 'normal' },
   meta: { type: mongoose.Schema.Types.Mixed, default: {} },
   read: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
-});
+}, { strict: false });
 
 NotificationSchema.index({ toLoginId: 1, createdAt: -1 });
 NotificationSchema.index({ toRole: 1, createdAt: -1 });

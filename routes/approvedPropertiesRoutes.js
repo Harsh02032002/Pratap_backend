@@ -915,9 +915,123 @@ router.put('/:visitId/toggle-live', async (req, res) => {
 
         await property.save();
 
+        // 🔔 When property goes LIVE — notify area-matched employee + superadmin
+        if (isLiveOnWebsite) {
+            try {
+                const Employee = require('../models/Employee');
+                const Notification = require('../models/Notification');
+                const fcmService = require('../services/fcmService');
+
+                const propName = property.propertyInfo?.propertyName || property.propertyInfo?.title || property.visitId || 'Property';
+                const ownerName = property.propertyInfo?.ownerName || property.ownerLoginId || 'Owner';
+                const ownerLoginId = property.ownerLoginId || property.propertyInfo?.ownerLoginId || '';
+                const propCity = (property.propertyInfo?.city || property.propertyInfo?.area || '').trim();
+                const propArea = (property.propertyInfo?.area || '').trim();
+
+                // ── Find employee by city/area match ──────────────────────────────
+                let areaEmployee = null;
+
+                if (propCity || propArea) {
+                    const orFilters = [];
+                    if (propCity) {
+                        orFilters.push(
+                            { city: new RegExp(propCity, 'i') },
+                            { locationCode: new RegExp(propCity, 'i') }
+                        );
+                    }
+                    if (propArea) {
+                        orFilters.push(
+                            { area: new RegExp(propArea, 'i') },
+                            { areaCode: new RegExp(propArea, 'i') }
+                        );
+                    }
+                    areaEmployee = await Employee.findOne({
+                        $or: orFilters,
+                        isActive: { $ne: false },
+                        isDeleted: { $ne: true }
+                    }).select('loginId name email phone city area').lean().catch(() => null);
+                }
+
+                // Fallback: any active employee
+                if (!areaEmployee) {
+                    areaEmployee = await Employee.findOne({
+                        isActive: { $ne: false },
+                        isDeleted: { $ne: true }
+                    }).select('loginId name email phone city area').lean().catch(() => null);
+                }
+
+                if (areaEmployee) {
+                    // In-app notification to area employee
+                    await Notification.create({
+                        toRole: 'employee',
+                        toLoginId: areaEmployee.loginId,
+                        from: ownerLoginId || 'owner',
+                        type: 'property_listed_website',
+                        title: `🏠 Property Listed: "${propName}"`,
+                        message: `Owner "${ownerName}" has listed property "${propName}" live on the website. Please verify the listing details.`,
+                        meta: {
+                            visitId: property.visitId,
+                            propertyName: propName,
+                            ownerLoginId,
+                            city: propCity,
+                            area: propArea,
+                            action: 'verify_property',
+                            canReassign: true  // ← superadmin can reassign this
+                        },
+                        read: false
+                    }).catch(e => console.warn('[toggle-live] Employee notification warning:', e.message));
+
+                    // FCM push to employee device
+                    fcmService.sendToUser(areaEmployee.loginId, {
+                        title: `🏠 Property Listed by Owner`,
+                        body: `"${propName}" is now live. Please verify the listing.`,
+                        icon: '/pwa-192x192.png',
+                        clickAction: `/superadmin/properties`,
+                        data: { visitId: property.visitId, type: 'property_listed_website' }
+                    }).catch(() => {});
+
+                    console.log(`[toggle-live] 📣 Notified area employee ${areaEmployee.loginId} (${areaEmployee.name}) for city: ${propCity} — property: ${property.visitId}`);
+                }
+
+                // In-app notification to superadmin (with reassign option metadata)
+                await Notification.create({
+                    toRole: 'superadmin',
+                    toLoginId: 'superadmin',
+                    from: ownerLoginId || 'owner',
+                    type: 'property_listed_website',
+                    title: `🏠 Property Listed on Website: "${propName}"`,
+                    message: `Owner "${ownerName}" listed "${propName}" live on Roomhy website. Auto-assigned to employee: ${areaEmployee?.name || 'N/A'} (${areaEmployee?.loginId || 'N/A'}, ${areaEmployee?.city || propCity || 'N/A'}). You can reassign to any other employee.`,
+                    meta: {
+                        visitId: property.visitId,
+                        propertyName: propName,
+                        ownerLoginId,
+                        assignedEmployee: areaEmployee?.loginId || null,
+                        assignedEmployeeName: areaEmployee?.name || null,
+                        city: propCity,
+                        area: propArea,
+                        action: 'review_property',
+                        canReassign: true  // ← superadmin sees reassign button
+                    },
+                    read: false
+                }).catch(e => console.warn('[toggle-live] Superadmin notification warning:', e.message));
+
+                // FCM push to superadmin
+                fcmService.sendToRole('superadmin', {
+                    title: `🏠 Owner Listed Property: "${propName}"`,
+                    body: `"${propName}" by ${ownerName} is live. Area employee: ${areaEmployee?.name || 'N/A'}.`,
+                    icon: '/pwa-192x192.png',
+                    clickAction: '/superadmin/properties',
+                    data: { visitId: property.visitId, type: 'property_listed_website' }
+                }).catch(() => {});
+
+            } catch (notifErr) {
+                console.warn('[toggle-live] Property listing notification error:', notifErr.message);
+            }
+        }
 
 
         console.log('✅ [approved-properties/toggle-live] Updated property:', visitId, 'isLive:', isLiveOnWebsite);
+
 
 
 

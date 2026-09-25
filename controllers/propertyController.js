@@ -472,6 +472,33 @@ exports.getAllProperties = async (req, res) => {
       .skip(skip)
       .limit(limit);
 
+    // Auto-assign any unassigned pending properties to active employee matching city/area
+    const Employee = require('../models/Employee');
+    for (let p of properties) {
+      if ((p.status === 'pending_approval' || p.status === 'pending') && !p.assignedToName) {
+        const c = (p.city || 'Jaipur').trim();
+        const a = (p.area || p.locality || '').trim();
+        let emp = null;
+        if (c) {
+          if (a) {
+            emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), area: new RegExp(`^${a}$`, 'i'), isActive: true });
+            if (!emp) emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), area: new RegExp(a, 'i'), isActive: true });
+          }
+          if (!emp) {
+            emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), isActive: true });
+          }
+        }
+        if (emp) {
+          p.assignedTo = emp._id;
+          p.assignedToName = emp.name;
+          p.assignedToEmail = emp.email || '';
+          p.assignedToPhone = emp.phone || '';
+          p.assignedToLoginId = emp.loginId || '';
+          try { await p.save(); } catch (_) {}
+        }
+      }
+    }
+
     // Sanitize property images array to strictly exclude live camera photos
     const cleanedProperties = properties.map(p => {
       const obj = p.toObject ? p.toObject() : { ...p };
