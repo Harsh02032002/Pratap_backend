@@ -58,12 +58,25 @@ exports.healTenantInvoices = async (ownerLoginId) => {
             });
 
             if (rentRecord) {
-                console.log(`🧹 Healing RentInvoice ${inv._id}: Tenant already paid via Rent record!`);
-                const paidAmt = rentRecord.paidAmount || inv.rentAmount || 0;
+                // A paid Rent record only proves what IT paid. The invoice may since have
+                // grown (electricity added, late fee accrued) — never shrink paidAmount,
+                // and only mark PAID when rent + late fee + electricity are all covered.
+                // Blindly forcing PAID here silently wiped balances reopened by a later
+                // electricity charge, every time this job ran.
+                const rentAmt = Number(inv.rentAmount || 0);
+                const totalDue = rentAmt + Number(inv.totalPenalty || 0)
+                    + Number(inv.electricityBill || 0) + Number(inv.advanceChargeAmount || 0);
+                const paidAmt = Math.max(Number(inv.paidAmount || 0), Number(rentRecord.paidAmount || 0));
+                const outstanding = Math.max(0, totalDue - paidAmt);
+                const newStatus = outstanding > 0 ? (paidAmt > 0 ? 'PARTIAL' : 'PENDING') : 'PAID';
+
+                if (paidAmt === Number(inv.paidAmount || 0) && newStatus === inv.status) continue;
+
+                console.log(`🧹 Healing RentInvoice ${inv._id}: paid ₹${paidAmt} of ₹${totalDue} via Rent record → ${newStatus}`);
                 inv.paidAmount = paidAmt;
-                inv.rentPaidAmount = paidAmt;
-                inv.outstandingAmount = 0;
-                inv.status = 'PAID';
+                inv.rentPaidAmount = Math.max(Number(inv.rentPaidAmount || 0), Math.min(rentAmt, paidAmt));
+                inv.outstandingAmount = outstanding;
+                inv.status = newStatus;
                 inv.paymentMethod = rentRecord.paymentMethod || 'cash';
                 inv.razorpayPaymentId = rentRecord.razorpayPaymentId || '';
                 inv.paymentDate = rentRecord.paymentDate || new Date();

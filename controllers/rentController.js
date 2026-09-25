@@ -23,6 +23,64 @@ function cashRetrySecondsRemaining(rejectedAt, now = Date.now()) {
 
 exports.cashRetrySecondsRemaining = cashRetrySecondsRemaining;
 
+/**
+ * The $set that records `thisPayment` against an existing RentInvoice.
+ *
+ * - paidAmount ACCUMULATES: a tenant can settle one invoice across several
+ *   payments (rent first, an electricity top-up later). Overwriting it with just
+ *   the latest payment made fully-paid invoices show a balance remaining.
+ * - What's owed (rent, late fee, electricity, advance) is never redefined here.
+ *   The late fee is taken from evaluateInvoice on the pre-payment state: the live
+ *   figure the tenant was charged, or the frozen one if the rent was already paid.
+ *   Deriving it from the payment amount (the old code) zeroed it on small top-ups.
+ */
+async function buildInvoicePaymentUpdate(invoice, thisPayment, paidAt = new Date(), prefetch = {}) {
+  const rentAmount = Number(invoice.rentAmount || 0);
+  const electricity = Number(invoice.electricityBill || 0);
+  const advance = Number(invoice.advanceChargeAmount || 0);
+
+  let totalPenalty = Number(invoice.totalPenalty || 0);
+  let penaltyFields = {};
+  try {
+    const { updates } = await evaluateInvoice(invoice, null, prefetch);
+    totalPenalty = Number(updates.totalPenalty || 0);
+    penaltyFields = {
+      totalPenalty: updates.totalPenalty,
+      minorPenaltyAmount: updates.minorPenaltyAmount,
+      majorPenaltyAmount: updates.majorPenaltyAmount,
+      currentPhase: updates.currentPhase,
+      daysSinceDue: updates.daysSinceDue,
+    };
+  } catch (err) {
+    console.warn("buildInvoicePaymentUpdate: evaluateInvoice failed, using stored late fee:", err.message);
+  }
+
+  const totalDue = rentAmount + totalPenalty + electricity + advance;
+  const priorRentPaid = Number(invoice.rentPaidAmount || 0);
+  const priorPenaltyPaid = Number(invoice.penaltyPaidAmount || 0);
+  const paidAmount = Number(invoice.paidAmount || 0) + Number(thisPayment || 0);
+  const outstandingAmount = Math.max(0, totalDue - paidAmount);
+
+  // Paid-so-far breakdown only: late fee first, then rent (invoiceService.recordPayment order).
+  let remaining = Number(thisPayment || 0);
+  const penaltyPaidNow = Math.max(0, Math.min(remaining, totalPenalty - priorPenaltyPaid));
+  remaining -= penaltyPaidNow;
+  const rentPaidNow = Math.max(0, Math.min(remaining, rentAmount - priorRentPaid));
+
+  return {
+    ...penaltyFields,
+    status: outstandingAmount > 0 ? "PARTIAL" : "PAID",
+    paidAmount,
+    totalDue,
+    rentPaidAmount: priorRentPaid + rentPaidNow,
+    penaltyPaidAmount: priorPenaltyPaid + penaltyPaidNow,
+    outstandingAmount,
+    lastEvaluatedAt: paidAt,
+  };
+}
+
+exports.buildInvoicePaymentUpdate = buildInvoicePaymentUpdate;
+
 async function getTenantProfileByLoginId(loginId) {
   const normalizedLoginId = String(loginId || "")
     .trim()
@@ -2028,27 +2086,12 @@ exports.verifyCashPaymentOtp = async (req, res) => {
 
       invoice = await RentInvoice.findOne(invoiceQuery).lean();
       if (invoice) {
-        const invoicePaidAmount = Number(
-          rent.paidAmount || rent.totalDue || invoice.totalDue || rent.rentAmount || 0,
-        );
-        const invoiceRentAmount = Number(
-          invoice.rentAmount || rent.rentAmount || 1500,
-        );
-        const invoiceElectricity = Number(invoice.electricityBill || 0);
-        // Correctly split out the penalty based on what was actually paid, discounting the electricity bill
-        const truePenaltyAmount = Math.max(0, invoicePaidAmount - invoiceRentAmount - invoiceElectricity);
-
+        // This cash payment's own amount — from `rent.totalDue` as set when the
+        // request was created (requestCashPayment), not `rent.paidAmount`, which by
+        // this point has already been overwritten with the same value above.
+        const thisPayment = Number(rent.totalDue || rent.rentAmount || 0);
         await RentInvoice.findByIdAndUpdate(invoice._id, {
-          $set: {
-            status: "PAID",
-            paidAmount: invoicePaidAmount,
-            totalDue: invoicePaidAmount,
-            totalPenalty: truePenaltyAmount,
-            rentPaidAmount: invoiceRentAmount,
-            penaltyPaidAmount: truePenaltyAmount,
-            outstandingAmount: 0,
-            lastEvaluatedAt: paidAt,
-          },
+          $set: await buildInvoicePaymentUpdate(invoice, thisPayment, paidAt),
         });
         invoice = await RentInvoice.findById(invoice._id).lean();
 
@@ -3057,13 +3100,13 @@ exports.verifyAuthCashOtp = async (req, res) => {
         }
       }
     } else {
-      // Update existing invoice
+      // Update existing invoice — add this payment to what was already paid.
+      const paymentUpdate = await buildInvoicePaymentUpdate(invoice.toObject ? invoice.toObject() : invoice, Number(rent.totalDue || 0));
       invoice = await RentInvoice.findByIdAndUpdate(
         invoice._id,
         {
           $set: {
-            status: 'PAID',
-            paidAmount: rent.totalDue || 0,
+            ...paymentUpdate,
             paymentDate: new Date(),
             paymentMethod: actualPaymentMethod
           }

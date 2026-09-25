@@ -106,6 +106,14 @@ async function fulfillPayUPayment(tx) {
 
     const txnid = tx.order_id || tx.cf_order_id;
     const paymentId = tx.cf_payment_id || `PAYU_${Date.now()}`;
+    // This function can run twice for the same transaction (PayU webhook +
+    // the tenant's browser redirect both call it). The RentPayment record
+    // created near the end of this function is the existing dedup marker for
+    // that replay — reuse it here, before any invoice is written, so a
+    // second run doesn't re-add the same money on top of itself.
+    const alreadyFulfilled = await RentPayment.findOne({
+      $or: [{ transactionId: txnid }, { transactionId: paymentId }]
+    }).catch(() => null);
     const bookingIdStr = String(tx.booking_id || '').trim();
     const isValidObjId = mongoose.Types.ObjectId.isValid(bookingIdStr);
 
@@ -182,12 +190,23 @@ async function fulfillPayUPayment(tx) {
     }
 
     if (rentInvoice) {
-      rentInvoice.status = 'PAID';
       rentInvoice.paidAt = new Date();
       // Set the paid amount here too: the receipt email is sent (step 3) before step 4
       // writes it, so without this the email read the invoice's pre-payment paidAmount.
-      rentInvoice.paidAmount = Number(tx.booking_amount) || rentInvoice.totalDue;
-      rentInvoice.outstandingAmount = 0;
+      //
+      // paidAmount must ACCUMULATE across separate transactions on the same invoice —
+      // e.g. rent+penalty paid first, then electricity added and paid separately later.
+      // Overwriting it with just this transaction's amount (the old behavior) made the
+      // receipt and dashboard under-report what the tenant had actually paid. Guarded by
+      // alreadyFulfilled so a replayed webhook/redirect call for the same transaction
+      // can't add the same money twice.
+      const thisPayment = Number(tx.booking_amount) || 0;
+      const priorPaid = Number(rentInvoice.paidAmount || 0);
+      rentInvoice.paidAmount = alreadyFulfilled
+        ? priorPaid
+        : (priorPaid + thisPayment) || rentInvoice.totalDue;
+      rentInvoice.outstandingAmount = Math.max(0, Number(rentInvoice.totalDue || 0) - Number(rentInvoice.paidAmount || 0));
+      rentInvoice.status = rentInvoice.outstandingAmount > 0 ? 'PARTIAL' : 'PAID';
       rentInvoice.paymentMethod = 'online';
       rentInvoice.payuTxnid = txnid;
       rentInvoice.payuPaymentId = paymentId;
@@ -224,11 +243,7 @@ async function fulfillPayUPayment(tx) {
 
     // 4. Auto-create RentPayment Record for Receipt tab (Online mode)
     try {
-      let existingRentPayment = await RentPayment.findOne({
-        $or: [{ transactionId: txnid }, { transactionId: paymentId }]
-      }).catch(() => null);
-
-      if (!existingRentPayment) {
+      if (!alreadyFulfilled) {
         // Fallback resolution for Tenant ID
         let tenantDoc = tenant;
         if (!tenantDoc && tx.tenant_id) {
@@ -337,15 +352,19 @@ async function fulfillPayUPayment(tx) {
           let invDoc = await RentInvoice.findOne({ tenantId: validTenantId, billingMonth }).catch(() => null);
 
           if (invDoc) {
-            // Existing invoice found — update to PAID + online
+            // Existing invoice found — accumulate onto whatever was already paid
+            // (see the accumulation note above rentInvoice.paidAmount) rather than
+            // overwrite with just this transaction's amount.
             penaltyPaid = Number(invDoc.totalPenalty || 0);
+            const newPaidAmount = Number(invDoc.paidAmount || 0) + amountPaid;
+            const newOutstanding = Math.max(0, Number(invDoc.totalDue || 0) - newPaidAmount);
             await RentInvoice.findByIdAndUpdate(invDoc._id, {
               $set: {
-                status: 'PAID',
-                paidAmount: amountPaid,
+                status: newOutstanding > 0 ? 'PARTIAL' : 'PAID',
+                paidAmount: newPaidAmount,
                 rentPaidAmount: Number(invDoc.rentAmount ?? baseRentAmount),
                 penaltyPaidAmount: penaltyPaid,
-                outstandingAmount: 0,
+                outstandingAmount: newOutstanding,
                 paymentMethod: 'online',
                 payuTxnid: txnid,
                 payuPaymentId: paymentId,
@@ -386,14 +405,17 @@ async function fulfillPayUPayment(tx) {
             invId = invDoc?._id;
           }
         } else {
-          // rentInvoice was already resolved above — ensure it is PAID + online
+          // rentInvoice was already resolved & correctly accumulated above (the
+          // `if (rentInvoice)` block near the top of this function) — reuse that
+          // result instead of re-deriving paidAmount from this transaction alone,
+          // which would overwrite the cumulative total with just this payment.
           await RentInvoice.findByIdAndUpdate(invId, {
             $set: {
-              status: 'PAID',
-              paidAmount: amountPaid,
+              status: rentInvoice.status,
+              paidAmount: rentInvoice.paidAmount,
               rentPaidAmount: baseRentAmount,
               penaltyPaidAmount: penaltyPaid,
-              outstandingAmount: 0,
+              outstandingAmount: rentInvoice.outstandingAmount,
               paymentMethod: 'online',
               payuTxnid: txnid,
               payuPaymentId: paymentId,

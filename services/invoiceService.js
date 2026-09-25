@@ -310,7 +310,7 @@ async function evaluateInvoice(invoice, asOfDate = null, prefetch = {}) {
     }
   }
 
-  const penalties = calculatePenalties(invoice, config, asOfDate);
+  let penalties = calculatePenalties(invoice, config, asOfDate);
   const previousPhase = invoice.currentPhase;
 
   const electricityBill = invoice.electricityBill || 0;
@@ -318,6 +318,23 @@ async function evaluateInvoice(invoice, asOfDate = null, prefetch = {}) {
   // `penalties.totalDue` is actually the remaining unpaid portion of the base.
   // We need `totalDue` to represent the GROSS total invoice amount, and `outstandingAmount` for the unpaid portion.
   const rentPaid = invoice.rentPaidAmount ?? invoice.paidAmount ?? 0;
+
+  // A late fee stops accruing once the rent it is charged on has been paid — freeze it
+  // at what was recorded then. Without this, re-evaluating a rent-settled invoice (e.g.
+  // one reopened to PARTIAL because electricity was added later) recomputes the fee as
+  // of today: a per_day fee keeps growing after the tenant paid, and a percentage fee
+  // (charged on unpaid rent) collapses to ₹0 and drops off the receipt.
+  const rentSettled = (invoice.rentAmount || 0) > 0 && rentPaid >= (invoice.rentAmount || 0);
+  if (rentSettled) {
+    penalties = {
+      ...penalties,
+      phase: invoice.currentPhase ?? penalties.phase,
+      daysSinceDue: invoice.daysSinceDue ?? penalties.daysSinceDue,
+      minorPenalty: invoice.minorPenaltyAmount || 0,
+      majorPenalty: invoice.majorPenaltyAmount || 0,
+      totalPenalty: invoice.totalPenalty || 0,
+    };
+  }
 
   const updates = {
     daysSinceDue: penalties.daysSinceDue,
