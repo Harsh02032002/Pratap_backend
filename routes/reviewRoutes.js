@@ -236,12 +236,76 @@ router.get('/property/:propertyId/user-review', protect, async (req, res) => {
   try {
     const { propertyId } = req.params;
     const userId = req.user._id;
+    const email = req.user.email;
+    const mongoose = require('mongoose');
+    const Tenant = require('../models/Tenant');
+    const Property = require('../models/Property');
+    const ApprovedProperty = require('../models/ApprovedProperty');
+    const now = new Date();
     
     const review = await Review.hasUserReviewed(propertyId, userId);
+
+    const userEmailClean = String(email || '').trim().toLowerCase();
+    const userPhoneClean = String(req.user?.phone || '').trim();
+
+    let candidateObjectIds = [];
+    if (mongoose.Types.ObjectId.isValid(propertyId)) {
+      candidateObjectIds.push(new mongoose.Types.ObjectId(propertyId));
+    }
+    try {
+      const [pDoc, aDoc] = await Promise.all([
+        mongoose.Types.ObjectId.isValid(propertyId) ? Property.findById(propertyId).lean() : Property.findOne({ $or: [{ visitId: propertyId }, { propertyId }] }).lean(),
+        mongoose.Types.ObjectId.isValid(propertyId) ? ApprovedProperty.findById(propertyId).lean() : ApprovedProperty.findOne({ $or: [{ visitId: propertyId }, { propertyId }] }).lean()
+      ]);
+      if (pDoc) {
+        if (pDoc._id && mongoose.Types.ObjectId.isValid(pDoc._id)) candidateObjectIds.push(new mongoose.Types.ObjectId(pDoc._id));
+        if (pDoc.propertyId && mongoose.Types.ObjectId.isValid(pDoc.propertyId)) candidateObjectIds.push(new mongoose.Types.ObjectId(pDoc.propertyId));
+      }
+      if (aDoc) {
+        if (aDoc._id && mongoose.Types.ObjectId.isValid(aDoc._id)) candidateObjectIds.push(new mongoose.Types.ObjectId(aDoc._id));
+        if (aDoc.propertyId && mongoose.Types.ObjectId.isValid(aDoc.propertyId)) candidateObjectIds.push(new mongoose.Types.ObjectId(aDoc.propertyId));
+      }
+    } catch (e) {}
+
+    const uniqueObjIdStrings = [...new Set(candidateObjectIds.map(id => id.toString()))];
+    const finalPropObjectIds = uniqueObjIdStrings.map(id => new mongoose.Types.ObjectId(id));
+
+    let tenantRecord = null;
+    if (finalPropObjectIds.length > 0) {
+      tenantRecord = await Tenant.findOne({
+        property: { $in: finalPropObjectIds },
+        isDeleted: { $ne: true },
+        $and: [
+          {
+            $or: [
+              {
+                status: { $in: ['active', 'Active'] },
+                $or: [
+                  { moveInDate: { $lte: now } },
+                  { moveInDate: null },
+                  { moveInDate: { $exists: false } }
+                ]
+              },
+              {
+                status: { $in: ['inactive', 'Inactive'] }
+              }
+            ]
+          },
+          {
+            $or: [
+              { user: userId },
+              ...(userEmailClean ? [{ email: { $regex: new RegExp(`^${userEmailClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }] : []),
+              ...(userPhoneClean ? [{ phone: userPhoneClean }] : [])
+            ]
+          }
+        ]
+      }).lean();
+    }
     
     res.status(200).json({
       success: true,
       hasReviewed: !!review,
+      canReview: !!tenantRecord,
       review: review || null
     });
   } catch (error) {
@@ -298,14 +362,7 @@ router.post('/', protect, async (req, res) => {
       });
     }
 
-    // Validate if propertyId is a valid MongoDB ObjectId to prevent CastError
     const mongoose = require('mongoose');
-    if (!mongoose.Types.ObjectId.isValid(propertyId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid property ID format.'
-      });
-    }
     
     // Check if user has already rated this property (only if rating > 0)
     if (Number(rating) > 0) {
@@ -317,101 +374,94 @@ router.post('/', protect, async (req, res) => {
         });
       }
     }
-    // ✅ GATE: Only tenants who lived or are living in the property can submit reviews
+    // ✅ GATE: Only tenants who are currently living in THIS SPECIFIC property (status = 'active', moveInDate <= now) or have moved out of THIS SPECIFIC property (status = 'inactive') can submit reviews for it.
     const Tenant = require('../models/Tenant');
+    const Property = require('../models/Property');
     const ApprovedProperty = require('../models/ApprovedProperty');
     const now = new Date();
+    const isDev = process.env.NODE_ENV !== 'production';
 
-    // Resolve ApprovedProperty._id → Property._id if needed
-    let actualPropertyId = propertyId;
+    const userEmailClean = String(email || '').trim().toLowerCase();
+    const userPhoneClean = String(req.user?.phone || '').trim();
+
+    let candidateObjectIds = [];
+    if (mongoose.Types.ObjectId.isValid(propertyId)) {
+      candidateObjectIds.push(new mongoose.Types.ObjectId(propertyId));
+    }
     try {
-      const approvedProp = await ApprovedProperty.findById(propertyId).select('propertyId').lean();
-      if (approvedProp?.propertyId) {
-        actualPropertyId = mongoose.Types.ObjectId(approvedProp.propertyId);
+      const [pDoc, aDoc] = await Promise.all([
+        mongoose.Types.ObjectId.isValid(propertyId) ? Property.findById(propertyId).lean() : Property.findOne({ $or: [{ visitId: propertyId }, { propertyId }] }).lean(),
+        mongoose.Types.ObjectId.isValid(propertyId) ? ApprovedProperty.findById(propertyId).lean() : ApprovedProperty.findOne({ $or: [{ visitId: propertyId }, { propertyId }] }).lean()
+      ]);
+      if (pDoc) {
+        if (pDoc._id && mongoose.Types.ObjectId.isValid(pDoc._id)) candidateObjectIds.push(new mongoose.Types.ObjectId(pDoc._id));
+        if (pDoc.propertyId && mongoose.Types.ObjectId.isValid(pDoc.propertyId)) candidateObjectIds.push(new mongoose.Types.ObjectId(pDoc.propertyId));
       }
-    } catch (_) {}
-
-    // STRICT VALIDATION: Check if tenant has lived or is living in this property
-    const tenantRecord = await Tenant.findOne({
-      isDeleted: { $ne: true },
-      $and: [
-        { $or: [{ property: actualPropertyId }, { property: propertyId }] },
-        { $or: [{ email }, { user: userId }, { loginId: req.user.loginId }] }
-      ]
-    }).lean();
-
-    let resolvedBookingId = '';
-    let resolvedTenantId = '';
-    let resolvedOwnerId = '';
-    let hasLivedInProperty = false;
-
-    if (tenantRecord) {
-      // Check if tenant has moved in (for active tenants)
-      if (tenantRecord.status === 'active') {
-        const hasMovedIn = !tenantRecord.moveInDate || new Date(tenantRecord.moveInDate) <= now;
-        if (hasMovedIn) {
-          hasLivedInProperty = true;
+      if (aDoc) {
+        if (aDoc._id && mongoose.Types.ObjectId.isValid(aDoc._id)) candidateObjectIds.push(new mongoose.Types.ObjectId(aDoc._id));
+        if (aDoc.propertyId && mongoose.Types.ObjectId.isValid(aDoc.propertyId)) candidateObjectIds.push(new mongoose.Types.ObjectId(aDoc.propertyId));
+        if (aDoc.visitId || aDoc.propertyId) {
+          const linkedP = await Property.findOne({
+            $or: [
+              ...(aDoc.visitId ? [{ visitId: aDoc.visitId }] : []),
+              ...(aDoc.propertyId ? [{ propertyId: aDoc.propertyId }] : [])
+            ]
+          }).lean();
+          if (linkedP && linkedP._id && mongoose.Types.ObjectId.isValid(linkedP._id)) {
+            candidateObjectIds.push(new mongoose.Types.ObjectId(linkedP._id));
+          }
         }
       }
-      // For inactive tenants, they have lived there in the past
-      else if (tenantRecord.status === 'inactive') {
-        hasLivedInProperty = true;
-      }
+    } catch (err) {
+      console.error('Error resolving candidate property IDs for review gate:', err);
     }
 
-    // Query BookingRequest to find the booking ID (secondary check)
-    const BookingRequest = require('../models/BookingRequest');
-    const userBooking = await BookingRequest.findOne({
-      $and: [
-        {
-          $or: [
-            { property_id: actualPropertyId },
-            { property_id: propertyId }
-          ]
-        },
-        {
-          $or: [
-            { user_id: String(userId) },
-            { email: email }
-          ]
-        },
-        {
-          $or: [
-            { booking_status: 'confirmed' },
-            { status: 'confirmed' },
-            { status: 'booked' },
-            { payment_status: 'completed' },
-            { booking_status: { $in: ['active', 'completed'] } },
-            { bookingStatus: { $in: ['active', 'completed'] } },
-            { move_in_status: { $in: ['completed', 'active'] } },
-            { moveInStatus: { $in: ['completed', 'active'] } },
-            { move_in_completed_at: { $ne: null } }
-          ]
-        }
-      ]
-    });
+    const uniqueObjIdStrings = [...new Set(candidateObjectIds.map(id => id.toString()))];
+    const finalPropObjectIds = uniqueObjIdStrings.map(id => new mongoose.Types.ObjectId(id));
+
+    let tenantRecord = null;
+    if (finalPropObjectIds.length > 0) {
+      tenantRecord = await Tenant.findOne({
+        property: { $in: finalPropObjectIds },
+        isDeleted: { $ne: true },
+        $and: [
+          {
+            $or: [
+              {
+                status: { $in: ['active', 'Active'] },
+                $or: [
+                  { moveInDate: { $lte: now } },
+                  { moveInDate: null },
+                  { moveInDate: { $exists: false } }
+                ]
+              },
+              {
+                status: { $in: ['inactive', 'Inactive'] }
+              }
+            ]
+          },
+          {
+            $or: [
+              { user: userId },
+              ...(userEmailClean ? [{ email: { $regex: new RegExp(`^${userEmailClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }] : []),
+              ...(userPhoneClean ? [{ phone: userPhoneClean }] : [])
+            ]
+          }
+        ]
+      }).lean();
+    }
+
+    if (!tenantRecord) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only tenants who are currently living in this property or have moved out can submit a review.'
+      });
+    }
 
     // Resolve IDs for Mongoose validation requirements
-    if (tenantRecord) {
-      resolvedTenantId = tenantRecord.loginId || String(userId);
-      resolvedOwnerId = tenantRecord.ownerLoginId || '';
-    } else {
-      resolvedTenantId = String(userId);
-    }
-
-    if (userBooking) {
-      resolvedBookingId = userBooking.visitId || userBooking._id.toString();
-      if (!resolvedOwnerId) {
-        resolvedOwnerId = userBooking.owner_id || '';
-      }
-    } else if (tenantRecord) {
-      // Direct tenant without booking request
-      resolvedBookingId = `DIRECT-${tenantRecord.loginId || tenantRecord._id.toString()}`;
-    } else if (isDev) {
-      // Fallbacks for testing in dev mode
-      resolvedBookingId = `DEV-${userId}`;
-      resolvedOwnerId = 'DEV-OWNER';
-    }
+    const resolvedTenantId = tenantRecord.loginId || String(userId);
+    let resolvedOwnerId = tenantRecord.ownerLoginId || '';
+    const resolvedBookingId = `TENANT-${tenantRecord.loginId || tenantRecord._id.toString()}`;
 
     // Fallback: If ownerId is still not resolved, query the property details to get it
     if (!resolvedOwnerId) {
@@ -465,7 +515,7 @@ router.post('/', protect, async (req, res) => {
     console.error('Error creating review:', error);
     res.status(500).json({
       success: false,
-      message: 'Error creating review'
+      message: error.message || 'Error creating review'
     });
   }
 });

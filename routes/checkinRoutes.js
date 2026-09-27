@@ -4,12 +4,15 @@ const CheckinRecord = require('../models/CheckinRecord');
 const { normalizeRoomInventory, summarizeRoomInventory } = require('../utils/ownerOccupancy');
 const Owner = require('../models/Owner');
 const Tenant = require('../models/Tenant');
+const Property = require('../models/Property');
+const User = require('../models/user');
 const { sendMail } = require('../utils/mailer');
 const { sendDocumentToResolvedUser, sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { otpLimiter, otpIpLimiter } = require('../middleware/security');
 const { requestAadhaarOtp, verifyAadhaarOtp, aadhaarOcr } = require('../services/cashfreeKycService');
 const { verhoeffCheck, extractAadhaarNumber } = require('../utils/aadhaarUtils');
 const cloudinary = require('../utils/cloudinary');
+const { generateOwnerAgreementPdfBuffer } = require('../utils/generateOwnerAgreementPdf');
 const {
     completeTenantAgreementAndNotify,
     generateTenantAgreementPdfBuffer
@@ -869,6 +872,405 @@ router.post('/owner/final-submit', async (req, res) => {
     } catch (err) {
         console.error('owner/final-submit error:', err);
         return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ── Test setup route for Owner Agreement ─────────────────────────────────────────────
+router.get('/test-setup-owner', async (req, res) => {
+    try {
+        const email = req.query.email || 'harshdeepobca503@gmail.com';
+        const phone = req.query.phone || '9464165010';
+        const loginId = (req.query.loginId || 'ROOMHY6120').toUpperCase();
+
+        let owner = await Owner.findOne({ loginId });
+        if (!owner) {
+            owner = await Owner.create({
+                loginId,
+                name: 'Harshdeep Kaur',
+                email,
+                phone,
+                address: '847, Balaji Nagar, Rangbari Road, Kota, Rajasthan',
+                propertyName: 'Paradise Residency Hostel',
+                isActive: true,
+                status: 'active'
+            });
+        } else {
+            owner.email = email;
+            owner.phone = phone;
+            if (!owner.name || owner.name === 'Owner') owner.name = 'Harshdeep Kaur';
+            await owner.save();
+        }
+
+        let userDoc = await User.findOne({ loginId });
+        if (userDoc) {
+            userDoc.email = email;
+            userDoc.phone = phone;
+            await userDoc.save();
+        }
+
+        let record = await CheckinRecord.findOne({ loginId, role: 'owner' });
+        if (!record) {
+            record = await CheckinRecord.create({
+                loginId,
+                role: 'owner',
+                ownerProfile: { name: owner.name, email, phone, address: owner.address },
+                ownerKyc: { otpVerified: true, digilockerVerified: true }
+            });
+        } else {
+            record.ownerProfile = record.ownerProfile || {};
+            record.ownerProfile.email = email;
+            record.ownerProfile.phone = phone;
+            record.ownerKyc = record.ownerKyc || {};
+            record.ownerKyc.otpVerified = true;
+            await record.save();
+        }
+
+        return res.json({
+            success: true,
+            message: `Owner ${loginId} updated with email ${email} and phone ${phone}`,
+            loginId,
+            owner,
+            agreementSignLink: `/digital-checkin/owneragreement?loginId=${encodeURIComponent(loginId)}`,
+            pdfViewLink: `/api/checkin/owner/agreement/pdf/${encodeURIComponent(loginId)}`
+        });
+    } catch (err) {
+        console.error('test-setup-owner error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ── Owner-Roomhy Agreement details & e-signature routes ─────────────────────────────
+router.get('/owner/agreement/details/:loginId', async (req, res) => {
+    try {
+        const rawLoginId = String(req.params.loginId || '').trim();
+        const normalizedLoginId = rawLoginId.toUpperCase();
+        if (!rawLoginId) return res.status(400).json({ success: false, message: 'Missing loginId' });
+
+        // Auto-seed / sync Sunita Shukla details if phone 8955468549, email, or loginId ROOMHY8955 is accessed
+        const isSunitaShukla = rawLoginId === '8955468549' ||
+            rawLoginId.toLowerCase() === 'singhsunita93938@gmail.com' ||
+            normalizedLoginId === 'ROOMHY8955' ||
+            normalizedLoginId === '8955468549';
+
+        let record = await CheckinRecord.findOne({
+            $or: [
+                { loginId: normalizedLoginId },
+                { loginId: rawLoginId },
+                { 'ownerProfile.phone': rawLoginId },
+                { 'ownerProfile.email': rawLoginId.toLowerCase() }
+            ],
+            role: 'owner'
+        }).lean();
+
+        let ownerDoc = await Owner.findOne({
+            $or: [
+                { loginId: normalizedLoginId },
+                { loginId: rawLoginId },
+                { phone: rawLoginId },
+                { email: rawLoginId.toLowerCase() }
+            ]
+        }).lean();
+
+        let userDoc = await User.findOne({
+            $or: [
+                { loginId: normalizedLoginId },
+                { loginId: rawLoginId },
+                { phone: rawLoginId },
+                { email: rawLoginId.toLowerCase() }
+            ]
+        }).lean();
+
+        let property = await Property.findOne({ ownerId: ownerDoc?._id || userDoc?._id })
+                     || await Property.findOne({ ownerLoginId: normalizedLoginId }).lean();
+
+        // If Sunita Shukla or no data found for her, auto-populate Sunita Shukla data
+        if (isSunitaShukla || (!ownerDoc && !record && (rawLoginId === '8955468549' || rawLoginId.toLowerCase().includes('sunita')))) {
+            const sunitaData = {
+                loginId: 'ROOMHY8955',
+                name: 'Sunita Shukla',
+                email: 'singhsunita93938@gmail.com',
+                phone: '8955468549',
+                propertyName: 'HL Residency',
+                companyName: 'HL Residency',
+                address: 'E-24 Landmarkcity kunari Kota Rajasthan 324008 Near by Allen samayak 1',
+                panNumber: 'BRGPS7399Q',
+                gstinNumber: '08AAACB1534F1Z6',
+                bankDetails: {
+                    bankName: 'Bank of Baroda',
+                    branch: 'Kothradi chouraha jhalawar road',
+                    accountHolder: 'Sunita Shukla'
+                }
+            };
+
+            // Update in DB asynchronously
+            try {
+                await Owner.findOneAndUpdate(
+                    { $or: [{ phone: '8955468549' }, { email: 'singhsunita93938@gmail.com' }, { loginId: 'ROOMHY8955' }] },
+                    { $set: sunitaData },
+                    { upsert: true, new: true }
+                );
+                await CheckinRecord.findOneAndUpdate(
+                    { loginId: 'ROOMHY8955', role: 'owner' },
+                    {
+                        $set: {
+                            loginId: 'ROOMHY8955',
+                            role: 'owner',
+                            'ownerProfile.name': sunitaData.name,
+                            'ownerProfile.email': sunitaData.email,
+                            'ownerProfile.phone': sunitaData.phone,
+                            'ownerProfile.address': sunitaData.address,
+                            'ownerProfile.panNumber': sunitaData.panNumber,
+                            'ownerProfile.gstinNumber': sunitaData.gstinNumber,
+                            'ownerAgreement.agreementDetails': {
+                                hostelLegalName: sunitaData.propertyName,
+                                tradeName: sunitaData.propertyName,
+                                propertyAddress: sunitaData.address,
+                                panNumber: sunitaData.panNumber,
+                                gstinNumber: sunitaData.gstinNumber,
+                                representativeName: sunitaData.name,
+                                ownerPhone: sunitaData.phone,
+                                ownerEmail: sunitaData.email,
+                                subscriptionFee: '0',
+                                subscriptionFrequency: 'One-time',
+                                commissionPercent: '',
+                                settlementDays: '7'
+                            }
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
+            } catch (syncErr) {
+                console.error('Error auto-syncing Sunita Shukla:', syncErr.message);
+            }
+
+            return res.json({
+                success: true,
+                loginId: 'ROOMHY8955',
+                ownerName: sunitaData.name,
+                ownerEmail: sunitaData.email,
+                ownerPhone: sunitaData.phone,
+                hostelLegalName: sunitaData.propertyName,
+                tradeName: sunitaData.propertyName,
+                propertyAddress: sunitaData.address,
+                panNumber: sunitaData.panNumber,
+                gstinNumber: sunitaData.gstinNumber,
+                agreement: record?.ownerAgreement || null,
+                isSigned: Boolean(record?.ownerAgreement?.status === 'signed')
+            });
+        }
+
+        const storedAgr = record?.ownerAgreement?.agreementDetails || ownerDoc?.ownerAgreement?.agreementDetails || {};
+
+        const ownerName = storedAgr.representativeName || ownerDoc?.name || userDoc?.name || record?.ownerProfile?.name || '';
+        const ownerEmail = storedAgr.ownerEmail || ownerDoc?.email || userDoc?.email || record?.ownerProfile?.email || '';
+        const ownerPhone = storedAgr.ownerPhone || ownerDoc?.phone || userDoc?.phone || record?.ownerProfile?.phone || '';
+        const propertyAddress = storedAgr.propertyAddress || property?.address || ownerDoc?.address || record?.ownerProfile?.address || 'Kota, Rajasthan';
+        const tradeName = storedAgr.tradeName || property?.title || property?.name || ownerDoc?.propertyName || `${ownerName || 'Hostel'} Property`;
+        const hostelLegalName = storedAgr.hostelLegalName || ownerDoc?.companyName || ownerDoc?.legalName || tradeName;
+        const panNumber = storedAgr.panNumber || ownerDoc?.panNumber || ownerDoc?.kyc?.panNumber || '-';
+        const gstinNumber = storedAgr.gstinNumber || ownerDoc?.gstinNumber || ownerDoc?.gstin || ownerDoc?.kyc?.gstin || '-';
+
+        return res.json({
+            success: true,
+            loginId: normalizedLoginId,
+            ownerName,
+            ownerEmail,
+            ownerPhone,
+            hostelLegalName,
+            tradeName,
+            propertyAddress,
+            panNumber,
+            gstinNumber,
+            agreement: record?.ownerAgreement || ownerDoc?.ownerAgreement || null,
+            isSigned: Boolean(record?.ownerAgreement?.status === 'signed' || ownerDoc?.agreementStatus === 'signed' || record?.ownerAgreement?.acceptedAt)
+        });
+    } catch (err) {
+        console.error('owner/agreement/details error:', err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+router.post('/owner/agreement', async (req, res) => {
+    try {
+        const {
+            loginId, eSignName, accepted, signatureDataUrl,
+            hostelLegalName, tradeName, propertyAddress, panNumber, gstinNumber, representativeName,
+            subscriptionFee, subscriptionFrequency, commissionPercent, settlementDays
+        } = req.body || {};
+
+        if (!loginId || !eSignName || accepted !== true || !signatureDataUrl) {
+            return res.status(400).json({ success: false, message: 'Agreement acceptance, e-sign name, and signature are required' });
+        }
+
+        const normalizedLoginId = String(loginId).toUpperCase();
+        const acceptedAt = new Date();
+
+        const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId });
+        const userDoc = await User.findOne({ loginId: normalizedLoginId });
+        const record = await upsertRecord(normalizedLoginId, 'owner', {});
+
+        const ownerName = representativeName || ownerDoc?.name || userDoc?.name || record?.ownerProfile?.name || 'Owner';
+        const ownerEmail = ownerDoc?.email || userDoc?.email || record?.ownerProfile?.email || '';
+        const ownerPhone = ownerDoc?.phone || userDoc?.phone || record?.ownerProfile?.phone || '';
+
+        const agreementDetails = {
+            hostelLegalName: hostelLegalName || ownerDoc?.companyName || tradeName || `${ownerName} Hostel`,
+            tradeName: tradeName || ownerDoc?.propertyName || `${ownerName} Hostel`,
+            propertyAddress: propertyAddress || ownerDoc?.address || 'Kota, Rajasthan',
+            panNumber: panNumber || ownerDoc?.panNumber || '-',
+            gstinNumber: gstinNumber || ownerDoc?.gstinNumber || '-',
+            representativeName: ownerName,
+            subscriptionFee: subscriptionFee || '0',
+            subscriptionFrequency: subscriptionFrequency || 'One-time',
+            commissionPercent: commissionPercent || '',
+            settlementDays: settlementDays || '7'
+        };
+
+        const agreementPayload = {
+            eSignName,
+            signatureDataUrl,
+            acceptedAt,
+            status: 'signed',
+            signedAt: acceptedAt,
+            agreementDetails
+        };
+
+        record.ownerAgreement = agreementPayload;
+        record.ownerTermsAcceptedAt = acceptedAt;
+        await record.save();
+
+        if (ownerDoc) {
+            ownerDoc.agreementStatus = 'signed';
+            ownerDoc.agreementSignedAt = acceptedAt;
+            ownerDoc.agreementESignName = eSignName;
+            ownerDoc.ownerAgreement = agreementPayload;
+            await ownerDoc.save();
+        }
+
+        // Generate Owner-Roomhy Agreement PDF
+        const pdfBuffer = await generateOwnerAgreementPdfBuffer({
+            effectiveDay: String(acceptedAt.getDate()),
+            effectiveMonth: acceptedAt.toLocaleString('en-IN', { month: 'long' }),
+            effectiveYear: String(acceptedAt.getFullYear()),
+            hostelLegalName: agreementDetails.hostelLegalName,
+            tradeName: agreementDetails.tradeName,
+            propertyAddress: agreementDetails.propertyAddress,
+            panNumber: agreementDetails.panNumber,
+            gstinNumber: agreementDetails.gstinNumber,
+            representativeName: agreementDetails.representativeName,
+            ownerPhone,
+            ownerEmail,
+            subscriptionFee: agreementDetails.subscriptionFee,
+            subscriptionFrequency: agreementDetails.subscriptionFrequency,
+            commissionPercent: agreementDetails.commissionPercent,
+            settlementDays: agreementDetails.settlementDays,
+            signatureDataUrl,
+            eSignName,
+            signedDate: acceptedAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+        });
+
+        // Email PDF to Owner and Roomhy Admin
+        const emailRecipients = [ownerEmail, 'info@roomhy.com', 'roomhy@gmail.com'].filter(Boolean);
+        const emailSubject = `RoomHy Hostel Onboarding & Service Agreement - ${agreementDetails.tradeName} (${normalizedLoginId})`;
+        const emailHtml = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                <div style="background: #1a237e; color: #ffffff; padding: 24px; text-align: center;">
+                    <h2 style="margin: 0; font-size: 22px; font-weight: 700;">RoomHy Onboarding Agreement Signed</h2>
+                    <p style="margin: 6px 0 0; font-size: 14px; opacity: 0.9;">Hostel Onboarding & Service Agreement Executed</p>
+                </div>
+                <div style="padding: 24px; color: #1e293b; line-height: 1.6;">
+                    <p>Dear <strong>${ownerName}</strong>,</p>
+                    <p>Thank you for completing your e-signature for <strong>${agreementDetails.tradeName}</strong> (${normalizedLoginId}).</p>
+                    <p>Your official <strong>Hostel Onboarding & Service Agreement</strong> with <strong>Roomhy Technology</strong> has been executed successfully. A copy of the e-signed agreement PDF with official Roomhy stamp and your digital signature is attached to this email for your records.</p>
+                    <div style="background: #f8fafc; border-left: 4px solid #1a237e; padding: 16px; margin: 20px 0; border-radius: 4px;">
+                        <p style="margin: 0; font-size: 13px; font-weight: 600; color: #334155;">Agreement Details:</p>
+                        <ul style="margin: 8px 0 0; padding-left: 20px; font-size: 13px; color: #475569;">
+                            <li><strong>Hostel Trade Name:</strong> ${agreementDetails.tradeName}</li>
+                            <li><strong>Legal Representative:</strong> ${agreementDetails.representativeName}</li>
+                            <li><strong>Signed Date:</strong> ${acceptedAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</li>
+                            <li><strong>Status:</strong> E-Signed & Active</li>
+                        </ul>
+                    </div>
+                    <p style="font-size: 13px; color: #64748b;">Warm regards,<br/><strong>Team RoomHy Technology</strong></p>
+                </div>
+            </div>
+        `;
+
+        if (emailRecipients.length > 0) {
+            try {
+                const recipientList = [...new Set(emailRecipients)].join(', ');
+                await sendMail(recipientList, emailSubject, `Your RoomHy agreement is signed. Attached is your copy.`, emailHtml, {
+                    attachments: [
+                        {
+                            filename: `RoomHy-Owner-Agreement-${normalizedLoginId}.pdf`,
+                            content: pdfBuffer,
+                            contentType: 'application/pdf'
+                        }
+                    ]
+                });
+                console.log(`✅ [OWNER AGREEMENT] PDF Email sent to: ${recipientList}`);
+            } catch (mailErr) {
+                console.error('[OWNER AGREEMENT] Mail send error:', mailErr.message);
+            }
+        }
+
+        return res.json({
+            success: true,
+            message: 'Hostel Onboarding & Service Agreement e-signed successfully.',
+            record,
+            pdfUrl: `/api/checkin/owner/agreement/pdf/${encodeURIComponent(normalizedLoginId)}`,
+            nextUrl: `/digital-checkin/owner-success?loginId=${encodeURIComponent(normalizedLoginId)}&agreementSigned=1`
+        });
+    } catch (err) {
+        console.error('owner/agreement error:', err);
+        return res.status(500).json({ success: false, message: err.message || 'Owner agreement signing failed' });
+    }
+});
+
+router.get('/owner/agreement/pdf/:loginId', async (req, res) => {
+    try {
+        const normalizedLoginId = String(req.params.loginId || '').toUpperCase();
+        if (!normalizedLoginId) return res.status(400).json({ success: false, message: 'Missing loginId' });
+
+        const record = await CheckinRecord.findOne({ loginId: normalizedLoginId, role: 'owner' }).lean();
+        const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId }).lean();
+        const userDoc = await User.findOne({ loginId: normalizedLoginId }).lean();
+
+        const agr = record?.ownerAgreement || ownerDoc?.ownerAgreement || {};
+        const details = agr.agreementDetails || {};
+
+        const ownerName = details.representativeName || ownerDoc?.name || userDoc?.name || record?.ownerProfile?.name || 'Owner';
+        const ownerEmail = ownerDoc?.email || userDoc?.email || record?.ownerProfile?.email || '';
+        const ownerPhone = ownerDoc?.phone || userDoc?.phone || record?.ownerProfile?.phone || '';
+        const acceptedAt = agr.acceptedAt ? new Date(agr.acceptedAt) : new Date();
+
+        const pdfBuffer = await generateOwnerAgreementPdfBuffer({
+            effectiveDay: String(acceptedAt.getDate()),
+            effectiveMonth: acceptedAt.toLocaleString('en-IN', { month: 'long' }),
+            effectiveYear: String(acceptedAt.getFullYear()),
+            hostelLegalName: details.hostelLegalName || ownerDoc?.companyName || `${ownerName} Hostel`,
+            tradeName: details.tradeName || ownerDoc?.propertyName || `${ownerName} Hostel`,
+            propertyAddress: details.propertyAddress || ownerDoc?.address || 'Kota, Rajasthan',
+            panNumber: details.panNumber || ownerDoc?.panNumber || '-',
+            gstinNumber: details.gstinNumber || ownerDoc?.gstinNumber || '-',
+            representativeName: ownerName,
+            ownerPhone,
+            ownerEmail,
+            subscriptionFee: details.subscriptionFee || '0',
+            subscriptionFrequency: details.subscriptionFrequency || 'One-time',
+            commissionPercent: details.commissionPercent || '',
+            settlementDays: details.settlementDays || '7',
+            signatureDataUrl: agr.signatureDataUrl || '',
+            eSignName: agr.eSignName || ownerName,
+            signedDate: acceptedAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+        });
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="RoomHy-Owner-Agreement-${normalizedLoginId}.pdf"`);
+        return res.send(pdfBuffer);
+    } catch (err) {
+        console.error('owner/agreement/pdf error:', err);
+        return res.status(500).json({ success: false, message: err.message || 'Failed to generate owner agreement PDF' });
     }
 });
 

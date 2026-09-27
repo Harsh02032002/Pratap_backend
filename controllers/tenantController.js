@@ -187,10 +187,11 @@ exports.assignTenant = async (req, res) => {
 
         let assignedPropertyTitle = String(propertyTitle || '').trim();
 
+        let ownerProfile = null;
         const normalizedOwnerLoginId = String(ownerLoginId || '').toUpperCase();
         if (normalizedOwnerLoginId) {
-            const ownerProfile = await Owner.findOne({ loginId: normalizedOwnerLoginId })
-                .select('checkinUpiId checkinBankAccountNumber profile')
+            ownerProfile = await Owner.findOne({ loginId: normalizedOwnerLoginId })
+                .select('checkinUpiId checkinBankAccountNumber profile propertyTitle propertyName')
                 .lean();
             const ownerHasPaymentDetails = String(
                 ownerProfile?.checkinUpiId ||
@@ -280,9 +281,6 @@ exports.assignTenant = async (req, res) => {
         }
 
         if (!assignedPropertyTitle && ownerLoginId) {
-            const ownerProfile = await Owner.findOne({ loginId: String(ownerLoginId).toUpperCase() })
-                .select('propertyTitle propertyName')
-                .lean();
             assignedPropertyTitle = String(
                 assignedPropertyTitle ||
                 property?.title ||
@@ -755,11 +753,8 @@ exports.assignTenant = async (req, res) => {
 </body>
 </html>
                 `;
-                const text = `Tenant account created.\nProperty: ${assignedPropertyTitle || property.title || '-'}\nRoom Number: ${roomNo || '-'}\nBed Number: ${bedNo || '-'}\nRent: INR ${parseInt(agreedRent || 0, 10)}\nSecurity Deposit Total: INR ${depositTotal}\nSecurity Deposit Paid: INR ${depositPaid}\nSecurity Deposit Balance: INR ${depositBalance}\nLogin ID: ${tenant.loginId}\nDigital Check-In: ${tenantCheckinLink}\n\nNote: Your password will be sent after completing payment.`;
-
-                mailer.sendMail(tenant.email, subject, text, html)
-                    .then(() => console.log(`[MAIL] KYC link email sent successfully to ${tenant.email}`))
-                    .catch((mailErr) => console.error('[MAIL ERROR] Failed to send tenant credentials:', mailErr && mailErr.message));
+                // Room allotment email suppressed — credentials & onboarding emails are sent ONLY after payment completion
+                console.log(`[TENANT ALLOTMENT] Room allotted for ${tenant.loginId}. Email suppressed until payment completion.`);
             }
 
             // Send WhatsApp to tenant's phone (the number owner entered during room allotment)
@@ -1335,16 +1330,22 @@ exports.finalizeOnboardingPayment = async (loginId, rentRecordId) => {
     console.log(`[ONBOARDING EMAIL] Starting email dispatch for ${updatedTenant.loginId}`);
     console.log(`[ONBOARDING EMAIL] Credential result:`, { credLoginId, hasTempPassword: !!tempPassword });
 
-    // Email 1: Credentials
-    try {
-        console.log(`[ONBOARDING EMAIL] Sending credentials to ${updatedTenant.email}`);
-        await sendCredentials(updatedTenant.email, credLoginId, tempPassword, 'Tenant');
-        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'sent' } });
-        console.log(`[ONBOARDING EMAIL] ✓ Credentials sent to ${updatedTenant.email}`);
-    } catch (credEmailErr) {
-        console.error(`[ONBOARDING EMAIL] ✗ Credentials FAILED for ${updatedTenant.email}:`, credEmailErr.message);
-        console.error(`[ONBOARDING EMAIL] Stack:`, credEmailErr.stack);
-        await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed' } });
+    // Email 1: Credentials (ONLY for first-time onboarding — skip if credentials were already sent)
+    const alreadySentCredentials = updatedTenant.credentialsEmailStatus === 'sent' || updatedTenant.credentialsSent === true;
+
+    if (!alreadySentCredentials) {
+        try {
+            console.log(`[ONBOARDING EMAIL] Sending first-time credentials to ${updatedTenant.email}`);
+            await sendCredentials(updatedTenant.email, credLoginId, tempPassword, 'Tenant');
+            await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'sent', credentialsSent: true } });
+            console.log(`[ONBOARDING EMAIL] ✓ Credentials sent to ${updatedTenant.email}`);
+        } catch (credEmailErr) {
+            console.error(`[ONBOARDING EMAIL] ✗ Credentials FAILED for ${updatedTenant.email}:`, credEmailErr.message);
+            console.error(`[ONBOARDING EMAIL] Stack:`, credEmailErr.stack);
+            await Tenant.updateOne({ _id: updatedTenant._id }, { $set: { credentialsEmailStatus: 'failed' } });
+        }
+    } else {
+        console.log(`[ONBOARDING EMAIL] ℹ️ Credentials already sent to ${updatedTenant.email} previously. Skipping credentials email for subsequent monthly rent payment.`);
     }
 
     // Email 2: Receipt / Invoice (to tenant)

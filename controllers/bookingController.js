@@ -533,29 +533,7 @@ exports.createBookingRequest = async (req, res) => {
         await newRequest.save();
         console.log(`✅ Booking saved with ID: ${newRequest._id}`);
 
-        if (request_type === 'bid' && resolvedOwnerId && email) {
-            try {
-                const tenantChatId = generateWebsiteUserIdFromEmail(email) || String(user_id);
-                const ownerChatId = String(resolvedOwnerId).trim().toUpperCase();
-                const pairKey = [ownerChatId, tenantChatId].sort().join(':').toUpperCase();
-                await ChatMessage.create({
-                    room_id: ownerChatId,
-                    conversation_id: pairKey,
-                    sender_login_id: tenantChatId,
-                    sender_name: name || 'Website Tenant',
-                    sender_role: 'website_user',
-                    message: bid_amount > 0
-                        ? `New bid received for ${property_name}: ₹${Number(bid_amount).toLocaleString('en-IN')}/month`
-                        : `New bid received for ${property_name}: Open Bid / Negotiable`,
-                    message_type: 'text',
-                    is_read: false,
-                    created_at: new Date(),
-                    updated_at: new Date()
-                });
-            } catch (chatErr) {
-                console.warn('Failed to create bid chat notification:', chatErr.message);
-            }
-        }
+        // Bid requests do not generate chat messages in conversation thread (notifications handled below)
 
         // Create owner in-app notification for real-time panel alerts.
         try {
@@ -1394,7 +1372,7 @@ exports.approveBooking = async (req, res) => {
                     const userRoomId = String(chat.userRoomId || '').toLowerCase();
                     const messageSpecs = [
                         { room_id: userRoomId, sender_login_id: ownerRoomId, sender_name: ownerName, sender_role: 'property_owner' },
-                        { room_id: ownerRoomId, sender_login_id: userRoomId, sender_name: tenantName, sender_role: 'website_user' }
+                        { room_id: ownerRoomId, sender_login_id: ownerRoomId, sender_name: ownerName, sender_role: 'property_owner' }
                     ];
 
                     for (const spec of messageSpecs) {

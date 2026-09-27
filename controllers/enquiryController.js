@@ -266,9 +266,9 @@ exports.updateEnquiry = async (req, res) => {
               ChatMessage.create({
                 room_id: normalizedOwnerId,
                 conversation_id: pairKey,
-                sender_login_id: String(normalizedUserId || '').toLowerCase(),
-                sender_name: tenantName,
-                sender_role: 'website_user',
+                sender_login_id: String(normalizedOwnerId || '').toUpperCase(),
+                sender_name: ownerName,
+                sender_role: 'property_owner',
                 message: welcomeMsg,
                 message_type: 'text',
                 created_at: new Date(),

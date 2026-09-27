@@ -209,6 +209,7 @@ const TenantSchema = new mongoose.Schema({
 
 TenantSchema.index({ ownerLoginId: 1 });
 TenantSchema.index({ property: 1 });
+TenantSchema.index({ property: 1, status: 1 });
 // Serves the nightly move-out completion job (services/moveoutService.js).
 TenantSchema.index({ 'moveoutRequest.status': 1, 'moveoutRequest.noticeEndDate': 1 });
 // Serves the ex-tenant communication guard (services/tenantCommsGuard.js),

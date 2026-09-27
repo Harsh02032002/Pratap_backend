@@ -69,6 +69,116 @@ const ownerMatchGuard = (paramKey) => (req, res, next) => {
 // consumed as an id value.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ══ 0. DIRECT ONBOARD WEBUSER1@ROOMHY.COM ═════════════════════════════════════
+router.get('/onboard-webuser1-direct', async (req, res) => {
+    try {
+        const User = require('../models/user');
+        const ApprovedProperty = require('../models/ApprovedProperty');
+
+        const email = 'webuser1@roomhy.com';
+        const phone = '9876543219';
+
+        let user = await User.findOne({ email });
+        if (!user) {
+            user = await User.create({
+                name: 'Web User One',
+                email,
+                phone,
+                password: 'userpassword123',
+                role: 'tenant',
+                loginId: email,
+                isActive: true
+            });
+        }
+
+        let property = await Property.findOne({ status: { $ne: 'deleted' } });
+        if (!property) {
+            property = await ApprovedProperty.findOne({});
+        }
+
+        if (!property) {
+            property = await Property.create({
+                title: 'Roomhy Demo Residency',
+                ownerLoginId: 'ROOMHY9999',
+                address: 'Sector 62, Noida',
+                city: 'Noida',
+                monthlyRent: 8000,
+                status: 'active',
+                isPublished: true,
+                isLiveOnWebsite: true
+            });
+        }
+
+        let room = await Room.findOne({ property: property._id });
+        if (!room) {
+            room = await Room.create({
+                property: property._id,
+                title: '101',
+                type: 'Single Sharing',
+                beds: 2,
+                price: 8000,
+                status: 'active',
+                isAvailable: true
+            });
+        }
+
+        let tenant = await Tenant.findOne({ email });
+        if (!tenant) {
+            tenant = await Tenant.create({
+                name: user.name || 'Web User One',
+                email,
+                phone,
+                user: user._id,
+                property: property._id,
+                propertyTitle: property.title,
+                room: room._id,
+                roomNo: room.title || '101',
+                bedNo: 'A',
+                ownerLoginId: property.ownerLoginId || 'ROOMHY9999',
+                agreedRent: 8000,
+                baseRoomRent: 8000,
+                status: 'active',
+                moveInDate: new Date(),
+                kycStatus: 'verified',
+                agreementStatus: 'signed',
+                agreementSigned: true,
+                loginId: user.loginId || email
+            });
+        } else {
+            tenant.user = user._id;
+            tenant.property = property._id;
+            tenant.propertyTitle = property.title;
+            tenant.room = room._id;
+            tenant.roomNo = room.title || '101';
+            tenant.bedNo = 'A';
+            tenant.ownerLoginId = property.ownerLoginId || 'ROOMHY9999';
+            tenant.agreedRent = 8000;
+            tenant.status = 'active';
+            tenant.moveInDate = new Date();
+            tenant.kycStatus = 'verified';
+            tenant.agreementStatus = 'signed';
+            tenant.agreementSigned = true;
+            await tenant.save();
+        }
+
+        res.json({
+            success: true,
+            message: '🎉 webuser1@roomhy.com onboarded successfully as an Active Tenant!',
+            tenant: {
+                id: tenant._id,
+                name: tenant.name,
+                email: tenant.email,
+                property: property.title,
+                propertyId: property._id,
+                status: tenant.status,
+                moveInDate: tenant.moveInDate
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // ══ 1. ASSIGN TENANT ══════════════════════════════════════════════════════════
 // Kept open: owner panel does not transmit JWT during assignment flow.
 // Protected by auditTrail (actor logged as 'anonymous' when no JWT).

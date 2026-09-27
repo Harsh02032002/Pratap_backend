@@ -161,6 +161,10 @@ exports.getInbox = async (req, res) => {
     const summaryMap = new Map();
 
     for (const msg of messages) {
+      if (String(msg.message || '').includes('New bid received for')) {
+        continue;
+      }
+
       const sender = normalizeLoginId(msg.sender_login_id);
       const receiver = normalizeLoginId(msg.room_id);
       const isOutgoing = loginVariants.includes(sender);
@@ -486,8 +490,13 @@ exports.getConversation = async (req, res) => {
         seenSystemContent.add(contentKey);
       }
 
+      // Skip automated "New bid received" messages from chat UI
+      if (String(msg.message || '').includes('New bid received for')) {
+        continue;
+      }
+
       if (String(msg.message || '').includes('I have reviewed and accepted your request for')) {
-        const welcomeKey = `${String(msg.conversation_id || '')}:${String(msg.sender_login_id || '').toLowerCase()}:${String(msg.message || '')}`;
+        const welcomeKey = `${String(msg.conversation_id || '')}:${String(msg.message || '').trim()}`;
         if (seenAcceptanceWelcomes.has(welcomeKey)) continue;
         seenAcceptanceWelcomes.add(welcomeKey);
       }

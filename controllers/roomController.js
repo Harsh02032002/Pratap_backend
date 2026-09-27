@@ -218,25 +218,30 @@ exports.getRoomsByProperty = async (req, res) => {
             }).lean();
         }
 
-        // Also check ApprovedProperty and VisitData for fallback roomTypes & occupancy
-        const ApprovedProperty = require('../models/ApprovedProperty');
-        const VisitData = require('../models/VisitData');
+        // Check ApprovedProperty and VisitData lazily ONLY if property doc or roomTypes are not directly available
+        let appDoc = null;
+        let visitDoc = null;
 
-        const appDoc = await ApprovedProperty.findOne({
-            $or: [
-                mongoose.Types.ObjectId.isValid(propertyId) ? { _id: new mongoose.Types.ObjectId(propertyId) } : null,
-                { propertyId: propertyId },
-                { visitId: propertyId },
-                { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
-            ].filter(Boolean)
-        }).sort({ updatedAt: -1 }).lean();
+        if (!propDoc || !propDoc.roomTypes || propDoc.roomTypes.length === 0) {
+            const ApprovedProperty = require('../models/ApprovedProperty');
+            const VisitData = require('../models/VisitData');
 
-        const visitDoc = await VisitData.findOne({
-            $or: [
-                { visitId: propertyId },
-                { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
-            ]
-        }).sort({ updatedAt: -1 }).lean();
+            appDoc = await ApprovedProperty.findOne({
+                $or: [
+                    mongoose.Types.ObjectId.isValid(propertyId) ? { _id: new mongoose.Types.ObjectId(propertyId) } : null,
+                    { propertyId: propertyId },
+                    { visitId: propertyId },
+                    { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
+                ].filter(Boolean)
+            }).sort({ updatedAt: -1 }).lean();
+
+            visitDoc = await VisitData.findOne({
+                $or: [
+                    { visitId: propertyId },
+                    { 'generatedCredentials.loginId': String(propertyId).toUpperCase() }
+                ]
+            }).sort({ updatedAt: -1 }).lean();
+        }
 
         const roomTypesFromAny = (propDoc?.roomTypes?.length ? propDoc.roomTypes : null) || 
                                 (appDoc?.roomTypes?.length ? appDoc.roomTypes : null) || 
@@ -256,7 +261,9 @@ exports.getRoomsByProperty = async (req, res) => {
         queryOr.push({ property: propertyId });
 
         const query = { $or: queryOr, isDeleted: { $ne: true } };
-        let roomsQuery = Room.find(query).populate('property', 'title');
+        let roomsQuery = Room.find(query)
+            .select('title roomNo type price beds capacity totalBeds floor status isAvailable property propertyId bedAssignments pricePerBed monthlyRent')
+            .populate('property', 'title');
         
         if (limit > 0) {
             roomsQuery = roomsQuery.skip((page - 1) * limit).limit(limit);
