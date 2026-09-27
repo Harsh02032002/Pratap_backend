@@ -239,24 +239,43 @@ async function findAllTenantsInRoom(propertyId, roomNo) {
 }
 
 /**
- * Sync electricity bill to ALL active tenants in the room, split equally.
+ * Whether a tenant occupied the room before the given billing month began.
+ * A tenant who moved in during (or after) `billingMonth` is not billed for
+ * it — electricity billing for them starts the following month.
+ */
+function isEligibleForBillingMonth(tenant, billingMonth) {
+  const moveInDateStr = tenant.moveInDate || tenant.createdAt;
+  if (!moveInDateStr) return true; // no date on record — don't block billing
+  const moveInMonth = new Date(moveInDateStr).toISOString().slice(0, 7);
+  return moveInMonth < billingMonth;
+}
+
+/**
+ * Sync electricity bill to eligible active tenants in the room, split equally.
  *
  * Business Rule:
- *   - 1 active tenant in room  → full bill to that 1 tenant
- *   - 2 active tenants         → bill ÷ 2 each
- *   - 3 active tenants         → bill ÷ 3 each
+ *   - 1 eligible tenant in room  → full bill to that 1 tenant
+ *   - 2 eligible tenants         → bill ÷ 2 each
+ *   - 3 eligible tenants         → bill ÷ 3 each
  *   (based on CURRENT active occupancy, not room capacity)
+ *
+ * A tenant who moved into the room during `billingMonth` is excluded from
+ * both the split and the count for that month — see isEligibleForBillingMonth.
+ * They become eligible starting the month after they moved in.
  */
 async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord) {
   const allTenants = await findAllTenantsInRoom(propertyId, roomNo);
   if (!allTenants.length) return { synced: false, reason: 'no_tenant' };
 
+  const eligibleTenants = allTenants.filter(t => isEligibleForBillingMonth(t, billingMonth));
+  if (!eligibleTenants.length) return { synced: false, reason: 'no_eligible_tenant' };
+
   const totalBill = meterRecord.totalBill || 0;
-  const occupantCount = allTenants.length;
+  const occupantCount = eligibleTenants.length;
   const perTenantShare = Math.round(totalBill / occupantCount);
 
   const results = [];
-  for (const tenant of allTenants) {
+  for (const tenant of eligibleTenants) {
     let invoice = await RentInvoice.findOne({
       tenantId: tenant._id,
       billingMonth,
@@ -299,8 +318,25 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
 
     Object.assign(invoice, electricityFields);
     const { updates } = await evaluateInvoice(invoice);
+
+    // evaluateInvoice() recomputes outstandingAmount but — by design, see its
+    // other callers — never touches `status`; every other caller only invokes
+    // it on invoices that aren't PAID/WAIVED/CANCELLED yet, so there's nothing
+    // to reconcile. This is the one caller that can add a charge to an invoice
+    // that was already marked PAID, so it's the one place that must re-derive
+    // status from the fresh outstandingAmount — otherwise a tenant who already
+    // settled rent+penalty keeps showing PAID after electricity adds a real due.
+    const currentStatus = String(invoice.status || '').toUpperCase();
+    const statusUpdate = ['WAIVED', 'CANCELLED'].includes(currentStatus)
+      ? {}
+      : {
+          status: updates.outstandingAmount > 0
+            ? ((invoice.paidAmount || 0) > 0 ? 'PARTIAL' : 'PENDING')
+            : 'PAID',
+        };
+
     await RentInvoice.findByIdAndUpdate(invoice._id, {
-      $set: { ...updates, ...electricityFields },
+      $set: { ...updates, ...electricityFields, ...statusUpdate },
     });
 
     results.push({ tenantId: tenant._id, invoiceId: invoice._id, synced: true, share: perTenantShare });
@@ -320,5 +356,6 @@ module.exports = {
   calcInvoiceOutstanding,
   enrichTenantsWithDues,
   findTenantByRoom,
+  isEligibleForBillingMonth,
   syncElectricityToInvoice,
 };

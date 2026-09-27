@@ -692,10 +692,17 @@ async function listPaymentsHandler(req, res) {
       billingMonth: p.invoiceId?.billingMonth || '',
       invoiceNumber: p.invoiceId?.invoiceNumber || '',
       rentAmount: p.invoiceId?.rentAmount || p.amount,
-      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || Number(p.tenantId?.digitalCheckin?.agreementDetails?.advanceCharge || 0) || 0,
+      // Move-in charge belongs to the move-in invoice only. The tenant's agreement lists
+      // it once, but falling back to that put it on every later month's receipt too.
+      advanceChargeAmount: p.advanceChargeAmount || p.invoiceId?.advanceChargeAmount || 0,
       electricityBill: p.invoiceId?.electricityBill || 0,
       totalPenalty: p.invoiceId?.totalPenalty || 0,
       totalDue: p.invoiceId?.totalDue || p.amount,
+      // The invoice's cumulative paid-to-date, not just this one transaction — a tenant
+      // who paid rent in one transaction and electricity in a later one has TWO RentPayment
+      // rows here, each with its own small `amount`, but the receipt for either one should
+      // reflect what the invoice as a whole has collected so far, not just that one row.
+      paidAmount: p.invoiceId?.paidAmount ?? p.amount,
       invoiceStatus: p.invoiceId?.status || '',   // actual DB status: PAID / PARTIAL / PENDING
       status: 'received',
     }));
@@ -721,11 +728,15 @@ async function listPaymentsHandler(req, res) {
       // entry, post-commission/GST) sharing the same booking_id. Without this exclusion,
       // the same payment appeared twice: once as a proper receipt, once as a blank-tenant
       // row showing the owner's net payout amount instead of what the tenant actually paid.
+      // A rent payment's booking_id is either a Rent _id or (Pay Now on the tenant
+      // dashboard) a RentInvoice _id — both mean it's already shown via RentPayment.
       const Rent = require('../models/Rent');
-      const rentBookingIds = new Set(
-        (await Rent.find({ _id: { $in: txs.map(t => t.booking_id).filter(Boolean) } }).select('_id').lean())
-          .map(r => String(r._id))
-      );
+      const txBookingIds = txs.map(t => t.booking_id).filter(id => mongoose.Types.ObjectId.isValid(String(id)));
+      const [rentDocs, invoiceDocs] = await Promise.all([
+        Rent.find({ _id: { $in: txBookingIds } }).select('_id').lean(),
+        RentInvoice.find({ _id: { $in: txBookingIds } }).select('_id').lean(),
+      ]);
+      const rentBookingIds = new Set([...rentDocs, ...invoiceDocs].map(r => String(r._id)));
       txs = txs.filter(t => !rentBookingIds.has(String(t.booking_id || '')));
     }
 
@@ -929,43 +940,36 @@ async function getTenantInvoiceSummary(req, res) {
         status: { $in: ['Verified', 'Settled', 'COMPLETED', 'completed'] }
       }).lean();
 
+      // Only the Rent/RentInvoice this exact order paid for. This used to also match
+      // every not-yet-PAID invoice of the tenant, so one old verified payment marked
+      // later months — and any balance reopened by a new electricity charge or late
+      // fee — as PAID, overwriting paidAmount with that single old payment.
+      // $max keeps a larger cumulative paidAmount from being shrunk.
       if (verifiedTxs.length > 0) {
         for (const vtx of verifiedTxs) {
+          if (!vtx.cf_order_id) continue;
           const vAmt = vtx.booking_amount || 0;
           await Rent.updateMany(
-            {
-              $or: [
-                { cashfreeOrderId: vtx.cf_order_id },
-                { tenantLoginId: tenantLoginId, paymentStatus: { $ne: 'paid' } }
-              ]
-            },
+            { cashfreeOrderId: vtx.cf_order_id, paymentStatus: { $ne: 'paid' } },
             {
               $set: {
                 paymentStatus: 'paid',
-                paidAmount: vAmt,
                 paymentDate: vtx.payment_date || new Date(),
                 paymentMethod: 'cashfree'
-              }
+              },
+              $max: { paidAmount: vAmt },
             }
           ).catch(() => {});
 
           await RentInvoice.updateMany(
-            {
-              $or: [
-                { cashfreeOrderId: vtx.cf_order_id },
-                { tenantId: tenant._id, status: { $ne: 'PAID' } },
-                { tenantLoginId: tenantLoginId, status: { $ne: 'PAID' } }
-              ]
-            },
+            { cashfreeOrderId: vtx.cf_order_id, status: { $nin: ['PAID', 'WAIVED', 'CANCELLED'] } },
             {
               $set: {
                 status: 'PAID',
-                paymentStatus: 'PAID',
-                paidAmount: vAmt,
-                rentPaidAmount: vAmt,
                 outstandingAmount: 0,
                 paymentMethod: 'online'
-              }
+              },
+              $max: { paidAmount: vAmt },
             }
           ).catch(() => {});
         }
@@ -1157,6 +1161,18 @@ async function getTenantInvoiceSummary(req, res) {
       if (r.collectionMonth) rentMap[r.collectionMonth] = r;
     }
 
+    // The Rent model has no concept of electricity, so its paymentStatus can say
+    // "paid" forever even after the invoice grows a new, genuinely unpaid balance
+    // (e.g. the owner adds an electricity reading after rent+penalty were already
+    // settled). A non-zero outstandingAmount on the invoice always wins — it's the
+    // one number that gets recomputed whenever a new charge lands on the invoice.
+    const isInvoiceSettled = (invoiceLike, rentLike) => {
+      if (Number(invoiceLike?.outstandingAmount ?? 0) > 0) return false;
+      const rentSaysPaid = String(rentLike?.paymentStatus || '').toLowerCase() === 'paid';
+      const invoiceSaysPaid = String(invoiceLike?.status || '').toUpperCase() === 'PAID';
+      return rentSaysPaid || invoiceSaysPaid;
+    };
+
     // Hydrate ALL invoices
     for (const inv of invoices) {
       const r = rentMap[inv.billingMonth];
@@ -1166,14 +1182,12 @@ async function getTenantInvoiceSummary(req, res) {
         inv.cashOtpExpiry = r.cashOtpExpiry;
         inv.cashRejectedAt = r.cashRejectedAt;
         inv.cashRejectedReason = r.cashRejectedReason;
-        // Prioritize Rent model paymentStatus over Invoice status
-        // This ensures OTP-verified payments show as paid immediately
-        inv.paymentStatus = String(r.paymentStatus || inv.status).toLowerCase() === 'paid' ? 'paid' : 'pending';
+        inv.paymentStatus = isInvoiceSettled(inv, r) ? 'paid' : 'pending';
         // VERY IMPORTANT: Ensure frontend `targetRentObj._id` maps back to Rent `_id`
         // if this was requested by cash endpoints which expect `Rent.findById()`.
         inv._id = r._id;
       } else {
-        inv.paymentStatus = String(inv.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+        inv.paymentStatus = isInvoiceSettled(inv, null) ? 'paid' : 'pending';
       }
     }
 
@@ -1185,11 +1199,10 @@ async function getTenantInvoiceSummary(req, res) {
         liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
         liveInvoice.cashRejectedAt = lr.cashRejectedAt;
         liveInvoice.cashRejectedReason = lr.cashRejectedReason;
-        // Prioritize Rent model paymentStatus over Invoice status
-        liveInvoice.paymentStatus = String(lr.paymentStatus || liveInvoice.status).toLowerCase() === 'paid' ? 'paid' : 'pending';
+        liveInvoice.paymentStatus = isInvoiceSettled(liveInvoice, lr) ? 'paid' : 'pending';
         liveInvoice._id = lr._id;
       } else {
-        liveInvoice.paymentStatus = String(liveInvoice.status).toUpperCase() === 'PAID' ? 'paid' : 'pending';
+        liveInvoice.paymentStatus = isInvoiceSettled(liveInvoice, null) ? 'paid' : 'pending';
       }
     }
 
