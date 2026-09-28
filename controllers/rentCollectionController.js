@@ -670,7 +670,7 @@ async function listPaymentsHandler(req, res) {
       .sort({ paymentDate: -1 })
       .limit(limit)
       .populate('tenantId', 'name roomNo phone email propertyId digitalCheckin')
-      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
+      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount roomNo advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
     const shaped = payments.map(p => ({
@@ -678,7 +678,12 @@ async function listPaymentsHandler(req, res) {
       tenantId: p.tenantId?._id || null,
       transactionId: p.transactionId || p._id.toString().slice(-8).toUpperCase(),
       tenantName: p.tenantId?.name || '—',
-      roomNo: p.tenantId?.roomNo || '—',
+      // Historical room for THIS invoice, not the tenant's current room — a
+      // tenant who has since transferred must not have old receipts silently
+      // relabeled with their new room. Invoices generated before this field
+      // existed have no stored value; showing that honestly beats guessing
+      // via the tenant's current room, which is exactly the bug this fixes.
+      roomNo: p.invoiceId?.roomNo || 'Room info unavailable',
       tenantPhone: p.tenantId?.phone || '',
       tenantEmail: p.tenantId?.email || '',
       propertyId: p.tenantId?.propertyId || '',
@@ -761,7 +766,10 @@ async function listPaymentsHandler(req, res) {
         remainingAfter: 0,
         notes: t.notes || 'Booking Payment',
         invoiceId: null,
-        billingMonth: t.payment_date ? new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '',
+        // "YYYY-MM", matching every RentPayment-based row's billingMonth — a
+        // localized "Sep 2026" string here made these rows unmatchable by the
+        // frontend's month filter, which compares raw billingMonth values.
+        billingMonth: t.payment_date ? new Date(t.payment_date).toISOString().slice(0, 7) : '',
         invoiceNumber: t.razorpay_payment_id || '—',
         rentAmount: t.owner_amount,
         electricityBill: 0,

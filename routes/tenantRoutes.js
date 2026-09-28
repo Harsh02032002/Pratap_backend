@@ -11,6 +11,8 @@ const { calcNoticeEndDate } = require('../services/moveoutService');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const tenantController = require('../controllers/tenantController');
 const { auditTrail } = require('../middleware/auditTrail');
+const roomTransferService = require('../services/roomTransferService');
+const { nextBillingMonth } = require('../utils/istDate');
 
 // ─── Field-level security projection ─────────────────────────────────────────
 // Sensitive fields are stripped at the DB query layer (defence-in-depth).
@@ -1094,56 +1096,37 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         const bedNoChanged  = req.body.bedNo  !== undefined && req.body.bedNo  !== tenant.bedNo;
 
         if (roomNoChanged || bedNoChanged) {
-            if (tenant.room && tenant.bedNo) {
-                const oldRoom = await Room.findById(tenant.room);
-                if (oldRoom && oldRoom.bedAssignments) {
-                    const oldBedNoRaw = String(tenant.bedNo).trim().replace(/^[Bb]ed\s*/i, '');
-                    const oldIndex = Number(oldBedNoRaw) - 1;
-                    if (oldIndex >= 0 && oldRoom.bedAssignments[oldIndex] &&
-                        String(oldRoom.bedAssignments[oldIndex].tenantId) === String(tenant._id)) {
-                        oldRoom.bedAssignments[oldIndex] = {};
-                        oldRoom.markModified('bedAssignments');
-                        await oldRoom.save();
-                    }
-                }
-            }
-
-            const targetRoomNo    = req.body.roomNo !== undefined ? req.body.roomNo : tenant.roomNo;
-            const targetBedNoRaw  = req.body.bedNo  !== undefined ? req.body.bedNo  : tenant.bedNo;
-            const targetBedNoStr  = String(targetBedNoRaw).trim().replace(/^[Bb]ed\s*/i, '');
-
-            let newRoomObj = null;
-            if (targetRoomNo) {
-                newRoomObj = await Room.findOne({
+            const targetRoomNo = req.body.roomNo !== undefined ? req.body.roomNo : tenant.roomNo;
+            const newRoomObj = targetRoomNo
+                ? await Room.findOne({
                     property: tenant.property,
                     title: { $regex: `^${String(targetRoomNo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
-                });
-            }
+                  })
+                : null;
 
             if (newRoomObj) {
-                tenant.room = newRoomObj._id;
-                if (targetBedNoStr) {
-                    const bIndex = Number(targetBedNoStr) - 1;
-                    if (bIndex >= 0) {
-                        if (!newRoomObj.bedAssignments) newRoomObj.bedAssignments = [];
-                        while (newRoomObj.bedAssignments.length <= bIndex) newRoomObj.bedAssignments.push({});
-
-                        const occupant = newRoomObj.bedAssignments[bIndex];
-                        if (occupant && occupant.tenantId && String(occupant.tenantId) !== String(tenant._id)) {
-                            return res.status(400).json({ message: `Bed ${targetBedNoRaw} in Room ${targetRoomNo} is already occupied.` });
-                        }
-
-                        newRoomObj.bedAssignments[bIndex] = {
-                            tenantId: tenant._id,
-                            tenantName: req.body.name || tenant.name,
-                            tenantLoginId: tenant.loginId,
-                            assignedAt: new Date()
-                        };
-                        newRoomObj.markModified('bedAssignments');
-                        await newRoomObj.save();
-                    }
+                // Delegates to the SAME service the dedicated POST /:id/transfer
+                // endpoint uses — one transfer implementation, not two. This
+                // predates that endpoint and is kept for any caller (e.g. the
+                // "Edit Tenant" form) that bundles a room change with other
+                // profile fields. No explicit transferDate here, so "now" is
+                // used, same as before this consolidation.
+                try {
+                    await roomTransferService.transferTenant({
+                        tenant,
+                        newRoom: newRoomObj,
+                        newBedNo: req.body.bedNo,
+                        newAgreedRent: req.body.agreedRent,
+                        performedBy: callerLoginId(req) || 'unknown',
+                    });
+                } catch (transferErr) {
+                    return res.status(transferErr.status || 500).json({ message: transferErr.message });
                 }
             } else if (targetRoomNo) {
+                // No matching room found for the given title — preserve the
+                // pre-existing fallback (clear the room link) rather than
+                // silently doing nothing; there's no valid room to transfer
+                // into, so there's nothing for the shared service to do.
                 tenant.room = undefined;
             }
         } else {
@@ -1166,13 +1149,29 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
             if (req.body.name)                         rentUpdate.tenantName  = req.body.name;
             if (req.body.phone)                        rentUpdate.tenantPhone = req.body.phone;
             if (req.body.email)                        rentUpdate.tenantEmail = req.body.email;
-            if (req.body.roomNo !== undefined)         rentUpdate.roomNumber  = req.body.roomNo;
-            if (req.body.agreedRent !== undefined) {
-                rentUpdate.rentAmount = Number(req.body.agreedRent);
-                rentUpdate.totalDue   = Number(req.body.agreedRent);
-            }
+            // roomNumber/rentAmount/totalDue are billing fields, not contact
+            // details — folding them into the same $set as name/phone/email
+            // is what let a room change silently rewrite whatever "pending"
+            // Rent doc existed, including one for the CURRENT billing period.
+            // Scope those specifically to the period the change actually
+            // takes effect: this billing month keeps the old room/rent (see
+            // the RoomAssignmentHistory write above); the new values only
+            // apply from next month onward.
+            const rentUpdateFilter = { tenantLoginId: tenant.loginId, paymentStatus: 'pending' };
             if (Object.keys(rentUpdate).length > 0) {
-                await Rent.updateMany({ tenantLoginId: tenant.loginId, paymentStatus: 'pending' }, { $set: rentUpdate });
+                await Rent.updateMany(rentUpdateFilter, { $set: rentUpdate });
+            }
+            // A room/bed change already went through roomTransferService above,
+            // which scopes its own Rent update by effective billing month — do
+            // not also apply one here or it would double-process the same
+            // change. This only handles a pure rent renegotiation with no room
+            // change (e.g. an owner adjusting rent without moving the tenant),
+            // which needs the same "not yet effective this month" protection.
+            if (!(roomNoChanged || bedNoChanged) && req.body.agreedRent !== undefined) {
+                await Rent.updateMany(
+                    { ...rentUpdateFilter, collectionMonth: { $gte: nextBillingMonth(new Date()) } },
+                    { $set: { rentAmount: Number(req.body.agreedRent), totalDue: Number(req.body.agreedRent) } }
+                );
             }
         }
 
@@ -1339,6 +1338,59 @@ router.post('/:id/reactivate', protect, authorize('superadmin', 'areamanager', '
         return res.json({ success: true, message: 'Tenant account reactivated successfully', data: tenant });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ══ 23b. ADMIN/OWNER: TRANSFER TENANT TO A NEW ROOM ═════════════════════════
+// Thin HTTP wrapper — all transfer business logic lives in
+// services/roomTransferService.js, shared with the generic PATCH handler
+// above (which still allows a room change bundled with other profile edits).
+// There is exactly one transfer implementation, not two.
+router.post('/:id/transfer', protect, authorize('superadmin', 'areamanager', 'owner'), auditTrail('tenants'), async (req, res) => {
+    try {
+        const { newRoomId, newRoomNo, newBedNo, newAgreedRent, transferDate } = req.body || {};
+        if (!newRoomId && !newRoomNo) {
+            return res.status(400).json({ success: false, message: 'newRoomId or newRoomNo is required' });
+        }
+        if (transferDate !== undefined && isNaN(new Date(transferDate).getTime())) {
+            return res.status(400).json({ success: false, message: 'transferDate is not a valid date' });
+        }
+
+        const tenant = await Tenant.findById(req.params.id);
+        if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+
+        if (req.user.role === 'owner') {
+            const tenantProperty = await Property.findById(tenant.property);
+            if (!tenantProperty || String(tenantProperty.ownerLoginId).toUpperCase() !== callerLoginId(req)) {
+                return res.status(403).json({ success: false, message: 'Forbidden: You do not own this tenant\'s property' });
+            }
+        }
+
+        const newRoom = newRoomId
+            ? await Room.findOne({ _id: newRoomId, property: tenant.property })
+            : await Room.findOne({
+                property: tenant.property,
+                title: { $regex: `^${String(newRoomNo).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' },
+              });
+        if (!newRoom) return res.status(404).json({ success: false, message: 'Target room not found on this property' });
+
+        const result = await roomTransferService.transferTenant({
+            tenant,
+            newRoom,
+            newBedNo,
+            newAgreedRent,
+            transferDate,
+            performedBy: req.user?.loginId || String(req.user?.id || 'unknown'),
+        });
+
+        return res.json({
+            success: true,
+            message: 'Tenant transferred. The current billing period keeps the old room/rent; the new room/rent applies from next month.',
+            data: { tenant: result.tenant, assignment: result.assignment },
+        });
+    } catch (err) {
+        console.error('[tenantRoutes] transfer error:', err);
+        return res.status(err.status || 500).json({ success: false, message: err.message });
     }
 });
 

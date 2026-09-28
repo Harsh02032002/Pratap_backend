@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const mailer = require('../utils/mailer');
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { enrichTenantsWithDues } = require('../services/tenantDuesService');
+const roomAssignmentService = require('../services/roomAssignmentService');
 const { validateDocumentType } = require('../utils/documentValidator');
 
 /**
@@ -513,6 +514,24 @@ exports.assignTenant = async (req, res) => {
             const occupiedCount = roomObj.bedAssignments.filter(b => b && (b.tenantId || b.tenantLoginId || b.tenantName)).length;
             roomObj.isAvailable = occupiedCount < totalBeds;
             await roomObj.save();
+
+            // First assignment-history row, so billing can resolve "which
+            // room/rent applied this month" from day one instead of only
+            // starting from this tenant's first transfer.
+            try {
+                await roomAssignmentService.recordOnboarding({
+                    tenantId: tenant._id,
+                    propertyId: property._id,
+                    roomId: roomObj._id,
+                    roomNo: roomObj.title,
+                    bedNo: normalizedBedNo,
+                    agreedRent: tenant.agreedRent,
+                    effectiveFrom: tenant.moveInDate || new Date(),
+                    performedBy: req.user ? req.user.id : 'system',
+                });
+            } catch (histErr) {
+                console.error('[assignTenant] Failed to record initial assignment history:', histErr.message);
+            }
 
             // Recalculate and sync property bed/room counters
             try {

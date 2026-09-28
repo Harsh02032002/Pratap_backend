@@ -29,7 +29,15 @@ const rentInvoiceSchema = new Schema({
 
   ownerId: { type: Schema.Types.ObjectId, ref: 'Owner', required: true, index: true },
   propertyId: { type: Schema.Types.ObjectId, ref: 'Property', required: true },
-  unitId: { type: Schema.Types.ObjectId },
+  unitId: { type: Schema.Types.ObjectId, ref: 'Room' },
+  // Room number at the time this invoice was generated — a display-safe
+  // snapshot so a later transfer can't change what an old invoice/receipt
+  // shows. Resolved from RoomAssignmentHistory when available (see
+  // services/roomAssignmentService.js), else from the tenant's room at
+  // generation time. Absent on invoices created before this field existed;
+  // show "room information unavailable" rather than falling back to the
+  // tenant's current room for those.
+  roomNo: { type: String, default: '' },
   tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
   tenantName: { type: String, default: '' },
   tenantEmail: { type: String, default: '' },

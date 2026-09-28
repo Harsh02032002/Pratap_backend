@@ -6,6 +6,7 @@ const Tenant = require('../models/Tenant');
 const Property = require('../models/Property');
 const User = require('../models/user');
 const { evaluateInvoice, generateMonthlyInvoices } = require('./invoiceService');
+const { getOccupantsForRoomAndBillingMonth } = require('./roomAssignmentService');
 
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -203,11 +204,20 @@ async function findTenantByRoom(propertyId, roomNo) {
 }
 
 /**
- * Find ALL active (non-deleted) tenants currently occupying a room.
- * STRICT: must have room ObjectId set (deleted tenants get room cleared)
- * and isDeleted must not be true.
+ * Find the tenant(s) who occupied a room during a given billing month, for
+ * electricity attribution.
+ *
+ * Historical usage must attribute to whoever was actually assigned during
+ * that billing period — not whoever happens to occupy the room right now.
+ * A meter reading entered after a tenant has already transferred out (or
+ * been replaced) must not bill the new occupant for the old one's usage,
+ * and must not go unbilled just because the room is empty today. So this
+ * checks RoomAssignmentHistory FIRST; only when no history row covers that
+ * room+month (the room predates this feature, or has never had a transfer)
+ * does it fall back to today's live-occupancy lookup, which is exactly the
+ * previous behavior.
  */
-async function findAllTenantsInRoom(propertyId, roomNo) {
+async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
   if (!propertyId || !roomNo) return [];
   const baseSelect = '_id property room roomNo agreedRent ownerLoginId moveInDate createdAt';
 
@@ -216,6 +226,16 @@ async function findAllTenantsInRoom(propertyId, roomNo) {
     property: propertyId,
     title: { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') },
   }).select('_id title').lean();
+
+  if (room && billingMonth) {
+    const historicalOccupantIds = await getOccupantsForRoomAndBillingMonth(room._id, billingMonth);
+    if (historicalOccupantIds.length) {
+      return Tenant.find({
+        _id: { $in: historicalOccupantIds },
+        isDeleted: { $ne: true },
+      }).select(baseSelect).lean();
+    }
+  }
 
   if (room) {
     // Only tenants actively linked to this room ObjectId AND not deleted
@@ -264,7 +284,7 @@ function isEligibleForBillingMonth(tenant, billingMonth) {
  * They become eligible starting the month after they moved in.
  */
 async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord) {
-  const allTenants = await findAllTenantsInRoom(propertyId, roomNo);
+  const allTenants = await findAllTenantsInRoom(propertyId, roomNo, billingMonth);
   if (!allTenants.length) return { synced: false, reason: 'no_tenant' };
 
   const eligibleTenants = allTenants.filter(t => isEligibleForBillingMonth(t, billingMonth));

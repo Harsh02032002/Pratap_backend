@@ -1445,6 +1445,19 @@ router.post('/tenant/profile', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Tenant not found for this login ID' });
         }
 
+        // This endpoint is unauthenticated by design (a tenant reaches it with
+        // only their login ID, before they have a session) — so it must not
+        // double as an uncontrolled room/rent-change path. roomNo/agreedRent
+        // are only settable on the tenant's FIRST profile submission; any
+        // later change has to go through the authenticated transfer endpoint
+        // (POST /api/tenants/:id/transfer), which is billing-period-aware.
+        // Gated on digitalCheckin.profile.submittedAt (set below, at the end
+        // of this same handler) rather than `profileFilled` — that field is
+        // not declared on the Tenant schema, so under Mongoose's default
+        // strict mode assigning it below is a no-op that never persists and
+        // would always read back false, making a guard on it a no-op too.
+        const isFirstSubmission = !tenant.digitalCheckin?.profile?.submittedAt;
+
         tenant.name = name || tenant.name;
         if (email) tenant.email = email;
         if (phone) tenant.phone = phone;
@@ -1452,9 +1465,11 @@ router.post('/tenant/profile', async (req, res) => {
         tenant.guardianNumber = guardianNumber || tenant.guardianNumber;
         tenant.profileFilled = true;
         if (propertyName) tenant.propertyTitle = propertyName;
-        if (roomNo) tenant.roomNo = roomNo;
-        if (agreedRent !== undefined && agreedRent !== null && agreedRent !== '') tenant.agreedRent = Number(agreedRent);
-        if (moveInDate) tenant.moveInDate = new Date(moveInDate);
+        if (isFirstSubmission) {
+            if (roomNo) tenant.roomNo = roomNo;
+            if (agreedRent !== undefined && agreedRent !== null && agreedRent !== '') tenant.agreedRent = Number(agreedRent);
+            if (moveInDate) tenant.moveInDate = new Date(moveInDate);
+        }
 
         tenant.digitalCheckin = tenant.digitalCheckin || {};
         tenant.digitalCheckin.profile = {
