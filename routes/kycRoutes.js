@@ -10,6 +10,7 @@ const { sendOTPSMS, formatPhoneNumber } = require('../utils/smsService');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyKycSignupScope } = require('../utils/scopeHelpers');
+const { maskAadhaar, maskPan } = require('../utils/maskIdNumbers');
 
 // Temporary OTP store (for production, move to Redis/database)
 const signupOtpStore = new Map();
@@ -454,9 +455,27 @@ router.post('/login/verify-otp', async (req, res) => {
 router.get('/', protect, authorize('superadmin', 'areamanager', 'employee'), applyEmployeeScope, async (req, res) => {
     try {
         const query = applyKycSignupScope(req, {});
-        const signups = await KYCVerification.find(query).select('-password');
-        console.log(`✓ Retrieved ${signups.length} signups from MongoDB`);
-        res.json(signups);
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit, 10) || 500));
+
+        const [total, signups] = await Promise.all([
+            KYCVerification.countDocuments(query),
+            KYCVerification.find(query)
+                .select('-password')
+                .sort({ createdAt: -1 })
+                .skip((page - 1) * limit)
+                .limit(limit)
+                .lean()
+        ]);
+
+        const masked = signups.map(s => ({
+            ...s,
+            aadhaarNumber: maskAadhaar(s.aadhaarNumber),
+            panNumber: maskPan(s.panNumber)
+        }));
+
+        console.log(`✓ Retrieved ${masked.length}/${total} signups from MongoDB (page ${page})`);
+        res.json({ success: true, data: masked, page, limit, total });
     } catch (error) {
         console.error('Error fetching signups:', error);
         res.status(500).json({ message: 'Error fetching signups' });

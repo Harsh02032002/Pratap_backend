@@ -736,7 +736,7 @@ router.get('/superadmin/demand', protect, authorize('superadmin', 'areamanager',
  * GET /api/reports/locality-analytics
  * Fetch global locality-wise demand and metrics for Area Demand Heatmap
  */
-router.get('/locality-analytics', async (req, res) => {
+router.get('/locality-analytics', protect, authorize('superadmin', 'areamanager'), async (req, res) => {
     try {
         const Property = require('../models/Property');
         const Enquiry = require('../models/Enquiry');

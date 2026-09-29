@@ -182,11 +182,10 @@ router.get('/onboard-webuser1-direct', async (req, res) => {
 });
 
 // ══ 1. ASSIGN TENANT ══════════════════════════════════════════════════════════
-// Kept open: owner panel does not transmit JWT during assignment flow.
-// Protected by auditTrail (actor logged as 'anonymous' when no JWT).
-// TODO: migrate owner panel to send JWT and add protect + authorize('owner').
 router.post(
     '/assign',
+    protect,
+    authorize('owner', 'propertyowner', 'manager', 'superadmin', 'areamanager'),
     auditTrail('tenants'),
     tenantController.assignTenant
 );
@@ -1551,7 +1550,7 @@ router.post('/agreements/bulk-send', protect, authorize('superadmin', 'areamanag
 });
 
 // ══ TENANTS: BULK DELETE ══════════════════════════════════════════════════════
-router.post('/bulk-delete', async (req, res) => {
+router.post('/bulk-delete', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { tenantIds } = req.body;
         if (!Array.isArray(tenantIds) || tenantIds.length === 0) {

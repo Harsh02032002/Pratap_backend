@@ -212,43 +212,6 @@ function assignNearbyColleges(properties, colleges) {
     });
 }
 
-// Setup credentials endpoint
-router.get('/setup-owner-9000000021', async (req, res) => {
-    try {
-        const db = mongoose.connection.db;
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = await bcrypt.hash('roomhy123', 10);
-
-        await db.collection('owners').updateOne(
-            { loginId: '9000000021' },
-            {
-                $set: {
-                    loginId: '9000000021',
-                    name: 'Sapna Sangeeta Owner',
-                    phone: '9000000021',
-                    email: 'owner9000000021@roomhy.com',
-                    password: hashedPassword,
-                    checkinPassword: 'roomhy123',
-                    credentials: { password: 'roomhy123', firstTime: false },
-                    isActive: true,
-                    role: 'owner',
-                    updatedAt: new Date()
-                }
-            },
-            { upsert: true }
-        );
-
-        res.json({
-            success: true,
-            message: 'Owner 9000000021 credentials setup successfully',
-            loginId: '9000000021',
-            password: 'roomhy123'
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
 // ============================================================
 // POST: Save an approved property to MongoDB
 // ============================================================
@@ -1309,42 +1272,6 @@ router.delete('/:id', async (req, res) => {
 
 
 
-router.get('/setup-owner-9000000021', async (req, res) => {
-    try {
-        const Owner = mongoose.models.Owner || mongoose.model('Owner', new mongoose.Schema({}, { strict: false }), 'owners');
-        const bcrypt = require('bcryptjs');
-        const hashedPassword = await bcrypt.hash('roomhy123', 10);
-
-        const loginId = '9000000021';
-        const owner = await Owner.findOneAndUpdate(
-            { $or: [{ loginId }, { phone: loginId }] },
-            {
-                $set: {
-                    loginId,
-                    name: 'Sapna Sangeeta Owner',
-                    phone: loginId,
-                    mobile: loginId,
-                    email: 'owner9000000021@roomhy.com',
-                    password: hashedPassword,
-                    checkinPassword: 'roomhy123',
-                    credentials: { password: 'roomhy123', firstTime: false },
-                    isActive: true,
-                    role: 'owner'
-                }
-            },
-            { upsert: true, new: true }
-        );
-
-        res.json({
-            success: true,
-            message: 'Owner 9000000021 credentials updated',
-            loginId: '9000000021',
-            password: 'roomhy123'
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
 
 module.exports = router;
 

@@ -621,7 +621,6 @@ exports.getAllOwners = async (req, res) => {
                 checkinPhone: o.checkinPhone || checkinMap[o.loginId]?.ownerProfile?.phone || o.phone || '',
                 checkinAddress: o.checkinAddress || checkinMap[o.loginId]?.ownerProfile?.address || o.address || '',
                 checkinArea: o.checkinArea || checkinMap[o.loginId]?.ownerProfile?.area || o.locationCode || o.profile?.locationCode || '',
-                checkinPassword: o.checkinPassword || o.credentials?.password || '',
                 checkinAccountHolderName: o.checkinAccountHolderName || checkinMap[o.loginId]?.ownerProfile?.payment?.accountHolderName || o.profile?.accountHolderName || '',
                 checkinBankAccountNumber: o.checkinBankAccountNumber || checkinMap[o.loginId]?.ownerProfile?.payment?.bankAccountNumber || o.accountNumber || o.profile?.accountNumber || '',
                 checkinIfscCode: o.checkinIfscCode || checkinMap[o.loginId]?.ownerProfile?.payment?.ifscCode || o.ifscCode || o.profile?.ifscCode || '',
@@ -651,7 +650,6 @@ exports.getAllOwners = async (req, res) => {
                 kycStatus: kycComplete ? 'verified' : (o.kyc?.status || 'pending'),
                 documentImage: o.kyc?.documentImage || '',
                 profileFilled: !!o.profileFilled,
-                password: o.credentials?.password || o.checkinPassword || '',
                 bankLockedByVisit: !!o.bankLockedByVisit,
                 roomCount: Number(o.roomCount ?? primaryPropertyMap[o.loginId]?.roomCount ?? 0),
                 bedCount: Number(o.bedCount ?? primaryPropertyMap[o.loginId]?.bedCount ?? 0),
@@ -763,17 +761,23 @@ exports.requestOwner = async (req, res) => {
 exports.approveOwner = async (req, res) => {
     try {
         const { loginId } = req.params;
-        const password = req.body.password || 'Roomhy@123';
 
         const mongoose = require('mongoose');
         const param = String(loginId || '').trim();
         const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
-        const query = isObjId 
+        const query = isObjId
             ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
             : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
 
         const owner = await Owner.findOne(query);
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
+
+        // Never trust a client-supplied password here — reuse the owner's existing
+        // temp/checkin password if one was already set, otherwise mint a fresh one.
+        // (Previously fell back to a hardcoded 'Roomhy@123' for every owner with no
+        // password set yet, which was itself a shared-default-password bug.)
+        const crypto = require('crypto');
+        const password = owner.credentials?.password || owner.checkinPassword || crypto.randomBytes(4).toString('hex').toUpperCase();
 
         // Verify KYC submission before approval
         const hasKyc = Boolean(
@@ -853,6 +857,14 @@ exports.getOwnerById = async (req, res) => {
         const normalizedLoginId = String(req.params.loginId || '').trim().toUpperCase();
         const owner = await Owner.findOne({ loginId: normalizedLoginId }).lean();
         if (!owner) return res.status(404).json({ message: 'Owner not found' });
+
+        // This controller also backs the unauthenticated /public/:loginId route used
+        // by the digital check-in self-service form — never let a raw password
+        // reach any caller through the `...owner` spread below.
+        if (owner.credentials) delete owner.credentials.password;
+        delete owner.checkinPassword;
+        delete owner.password;
+
         const approvedProperty = await ApprovedProperty.findOne({ 'generatedCredentials.loginId': normalizedLoginId })
             .sort({ approvedAt: -1 })
             .select('visitId isLiveOnWebsite status')

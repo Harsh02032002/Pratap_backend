@@ -63,7 +63,7 @@ const rentSchema = new mongoose.Schema({
     cashRequestedAt: Date,
     cashApprovedAt: Date,
     cashReceivedAt: Date,
-    cashOtpHash: String,
+    cashOtpHash: { type: String, select: false },
     cashOtpExpiry: Date,
     cashOtpSentAt: Date,
     cashOtpVerifiedAt: Date,
@@ -74,7 +74,7 @@ const rentSchema = new mongoose.Schema({
     cashOtpMaxAttempts: { type: Number, default: 5 },
 
     // Onboarding Cash OTP fields (Phase 5 — for payment/gateway flow)
-    cashOtpCode: String,
+    cashOtpCode: { type: String, select: false },
     cashOtpExpiresAt: Date,
     cashOtpLastSentAt: Date,
 

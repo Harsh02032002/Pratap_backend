@@ -1161,7 +1161,7 @@ async function getTenantInvoiceSummary(req, res) {
     // We need to pull the cash state from Rent to show accurate status in tenant UI.
     const Rent = require('../models/Rent');
     const allRents = await Rent.find({ tenantLoginId: tenantLoginId })
-      .select('collectionMonth cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
+      .select('collectionMonth cashRequestStatus cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
       .lean();
 
     const rentMap = {};
@@ -1186,7 +1186,6 @@ async function getTenantInvoiceSummary(req, res) {
       const r = rentMap[inv.billingMonth];
       if (r) {
         inv.cashRequestStatus = r.cashRequestStatus || 'none';
-        inv.cashOtpHash = r.cashOtpHash;
         inv.cashOtpExpiry = r.cashOtpExpiry;
         inv.cashRejectedAt = r.cashRejectedAt;
         inv.cashRejectedReason = r.cashRejectedReason;
@@ -1203,7 +1202,6 @@ async function getTenantInvoiceSummary(req, res) {
       const lr = rentMap[liveInvoice.billingMonth];
       if (lr) {
         liveInvoice.cashRequestStatus = lr.cashRequestStatus || 'none';
-        liveInvoice.cashOtpHash = lr.cashOtpHash;
         liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
         liveInvoice.cashRejectedAt = lr.cashRejectedAt;
         liveInvoice.cashRejectedReason = lr.cashRejectedReason;

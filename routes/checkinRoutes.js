@@ -9,6 +9,7 @@ const User = require('../models/user');
 const { sendMail } = require('../utils/mailer');
 const { sendDocumentToResolvedUser, sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { otpLimiter, otpIpLimiter } = require('../middleware/security');
+const { protect, authorize } = require('../middleware/authMiddleware');
 const { requestAadhaarOtp, verifyAadhaarOtp, aadhaarOcr } = require('../services/cashfreeKycService');
 const { verhoeffCheck, extractAadhaarNumber } = require('../utils/aadhaarUtils');
 const cloudinary = require('../utils/cloudinary');
@@ -450,7 +451,10 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
         const normalizedLoginId = String(loginId).toUpperCase();
         const ownerDoc = await Owner.findOne({ loginId: normalizedLoginId });
         const ownerEmail = ownerDoc?.email || record?.ownerProfile?.email || '';
-        const ownerPassword = ownerDoc?.checkinPassword || ownerDoc?.credentials?.password || record?.ownerProfile?.password || 'Roomhy@123';
+        const rawOwnerPassword = ownerDoc?.checkinPassword || ownerDoc?.credentials?.password || record?.ownerProfile?.password;
+        // Never email out a bcrypt hash — if the stored value is already hashed,
+        // there's no plaintext left to send, so fall back to the shared default.
+        const ownerPassword = (rawOwnerPassword && !Owner.looksBcryptHashed(rawOwnerPassword)) ? rawOwnerPassword : 'Roomhy@123';
         const updatedOwner = await Owner.findOneAndUpdate(
             { loginId: normalizedLoginId },
             {
@@ -694,7 +698,8 @@ router.post('/owner/kyc/digilocker/complete', otpIpLimiter, otpLimiter, async (r
 
         if (owner && owner.email) {
             try {
-                const ownerPassword = owner.checkinPassword || owner.credentials?.password || 'Roomhy@123';
+                const rawOwnerPassword = owner.checkinPassword || owner.credentials?.password;
+                const ownerPassword = (rawOwnerPassword && !Owner.looksBcryptHashed(rawOwnerPassword)) ? rawOwnerPassword : 'Roomhy@123';
                 const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://app.roomhy.com';
                 const fullLoginUrl = `${APP_URL}/propertyowner/ownerlogin`;
                 const emailHtml = `
@@ -946,12 +951,6 @@ router.get('/owner/agreement/details/:loginId', async (req, res) => {
         const normalizedLoginId = rawLoginId.toUpperCase();
         if (!rawLoginId) return res.status(400).json({ success: false, message: 'Missing loginId' });
 
-        // Auto-seed / sync Sunita Shukla details if phone 8955468549, email, or loginId ROOMHY8955 is accessed
-        const isSunitaShukla = rawLoginId === '8955468549' ||
-            rawLoginId.toLowerCase() === 'singhsunita93938@gmail.com' ||
-            normalizedLoginId === 'ROOMHY8955' ||
-            normalizedLoginId === '8955468549';
-
         let record = await CheckinRecord.findOne({
             $or: [
                 { loginId: normalizedLoginId },
@@ -982,82 +981,6 @@ router.get('/owner/agreement/details/:loginId', async (req, res) => {
 
         let property = await Property.findOne({ ownerId: ownerDoc?._id || userDoc?._id })
                      || await Property.findOne({ ownerLoginId: normalizedLoginId }).lean();
-
-        // If Sunita Shukla or no data found for her, auto-populate Sunita Shukla data
-        if (isSunitaShukla || (!ownerDoc && !record && (rawLoginId === '8955468549' || rawLoginId.toLowerCase().includes('sunita')))) {
-            const sunitaData = {
-                loginId: 'ROOMHY8955',
-                name: 'Sunita Shukla',
-                email: 'singhsunita93938@gmail.com',
-                phone: '8955468549',
-                propertyName: 'HL Residency',
-                companyName: 'HL Residency',
-                address: 'E-24 Landmarkcity kunari Kota Rajasthan 324008 Near by Allen samayak 1',
-                panNumber: 'BRGPS7399Q',
-                gstinNumber: '08AAACB1534F1Z6',
-                bankDetails: {
-                    bankName: 'Bank of Baroda',
-                    branch: 'Kothradi chouraha jhalawar road',
-                    accountHolder: 'Sunita Shukla'
-                }
-            };
-
-            // Update in DB asynchronously
-            try {
-                await Owner.findOneAndUpdate(
-                    { $or: [{ phone: '8955468549' }, { email: 'singhsunita93938@gmail.com' }, { loginId: 'ROOMHY8955' }] },
-                    { $set: sunitaData },
-                    { upsert: true, new: true }
-                );
-                await CheckinRecord.findOneAndUpdate(
-                    { loginId: 'ROOMHY8955', role: 'owner' },
-                    {
-                        $set: {
-                            loginId: 'ROOMHY8955',
-                            role: 'owner',
-                            'ownerProfile.name': sunitaData.name,
-                            'ownerProfile.email': sunitaData.email,
-                            'ownerProfile.phone': sunitaData.phone,
-                            'ownerProfile.address': sunitaData.address,
-                            'ownerProfile.panNumber': sunitaData.panNumber,
-                            'ownerProfile.gstinNumber': sunitaData.gstinNumber,
-                            'ownerAgreement.agreementDetails': {
-                                hostelLegalName: sunitaData.propertyName,
-                                tradeName: sunitaData.propertyName,
-                                propertyAddress: sunitaData.address,
-                                panNumber: sunitaData.panNumber,
-                                gstinNumber: sunitaData.gstinNumber,
-                                representativeName: sunitaData.name,
-                                ownerPhone: sunitaData.phone,
-                                ownerEmail: sunitaData.email,
-                                subscriptionFee: '0',
-                                subscriptionFrequency: 'One-time',
-                                commissionPercent: '',
-                                settlementDays: '7'
-                            }
-                        }
-                    },
-                    { upsert: true, new: true }
-                );
-            } catch (syncErr) {
-                console.error('Error auto-syncing Sunita Shukla:', syncErr.message);
-            }
-
-            return res.json({
-                success: true,
-                loginId: 'ROOMHY8955',
-                ownerName: sunitaData.name,
-                ownerEmail: sunitaData.email,
-                ownerPhone: sunitaData.phone,
-                hostelLegalName: sunitaData.propertyName,
-                tradeName: sunitaData.propertyName,
-                propertyAddress: sunitaData.address,
-                panNumber: sunitaData.panNumber,
-                gstinNumber: sunitaData.gstinNumber,
-                agreement: record?.ownerAgreement || null,
-                isSigned: Boolean(record?.ownerAgreement?.status === 'signed')
-            });
-        }
 
         const storedAgr = record?.ownerAgreement?.agreementDetails || ownerDoc?.ownerAgreement?.agreementDetails || {};
 
@@ -1294,8 +1217,9 @@ router.get('/owner/profile/:loginId', async (req, res) => {
         if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
         const supplied = String(req.query.password || '').trim();
-        const expected = String(owner.checkinPassword || owner.credentials?.password || '').trim();
-        if (!expected || supplied !== expected) {
+        const hasStoredPassword = Boolean(owner.checkinPassword || owner.credentials?.password);
+        const passwordMatches = hasStoredPassword && supplied && await Owner.verifyStoredPassword(owner, supplied);
+        if (!passwordMatches) {
             return res.status(403).json({ success: false, message: 'Invalid check-in link' });
         }
 
@@ -2391,11 +2315,37 @@ router.get('/tenant/agreement/pdf/:loginId', async (req, res) => {
     }
 });
 
-router.get('/:role/:loginId', async (req, res) => {
+router.get('/:role/:loginId', protect, authorize('owner', 'tenant', 'superadmin', 'employee', 'areamanager', 'manager'), async (req, res) => {
     try {
         const { role, loginId } = req.params;
         if (!ensureRole(role)) return res.status(400).json({ success: false, message: 'Invalid role' });
-        const record = await CheckinRecord.findOne({ loginId: String(loginId).toUpperCase(), role }).lean();
+        const targetLoginId = String(loginId).toUpperCase();
+        const requesterRole = String(req.user.role || '').toLowerCase();
+        const requesterLoginId = String(req.user.loginId || '').toUpperCase();
+
+        const isPrivileged = ['superadmin', 'employee', 'areamanager', 'manager'].includes(requesterRole);
+        if (!isPrivileged) {
+            if (role === 'tenant') {
+                if (requesterRole === 'tenant' && requesterLoginId === targetLoginId) {
+                    // tenant fetching their own record: allowed
+                } else if (requesterRole === 'owner') {
+                    const tenant = await Tenant.findOne({ loginId: targetLoginId }).select('ownerLoginId').lean();
+                    if (!tenant || String(tenant.ownerLoginId || '').toUpperCase() !== requesterLoginId) {
+                        return res.status(403).json({ success: false, message: 'Forbidden' });
+                    }
+                } else {
+                    return res.status(403).json({ success: false, message: 'Forbidden' });
+                }
+            } else if (role === 'owner') {
+                if (!(requesterRole === 'owner' && requesterLoginId === targetLoginId)) {
+                    return res.status(403).json({ success: false, message: 'Forbidden' });
+                }
+            } else {
+                return res.status(403).json({ success: false, message: 'Forbidden' });
+            }
+        }
+
+        const record = await CheckinRecord.findOne({ loginId: targetLoginId, role }).lean();
         return res.json({ success: true, record: record || null });
     } catch (err) {
         console.error('checkin get error:', err);

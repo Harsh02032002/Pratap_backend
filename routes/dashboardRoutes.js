@@ -38,7 +38,8 @@ async function isStaffRequest(req) {
         const authHeader = req.headers.authorization || '';
         if (!authHeader.startsWith('Bearer ')) return false;
         const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
+        if (!process.env.JWT_SECRET) return false;
+        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
         const Employee = require('../models/Employee');
         const emp = await Employee.findById(decoded.id).select('_id');
         return !!emp;
@@ -175,7 +176,7 @@ function sumRent(enquiries, txTotal, rentPaymentsTotal) {
     return enquiriesTotal + txTotal + rentPaymentsTotal;
 }
 
-router.get('/:ownerId', async (req, res) => {
+router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, res) => {
     if (await isStaffRequest(req)) {
         return res.status(403).json({ success: false, message: 'Forbidden: the Owner Dashboard is not available to staff accounts' });
     }
@@ -300,6 +301,13 @@ router.get('/:ownerId', async (req, res) => {
         // Summed in MongoDB for the same reason as the transactions above.
         let rentPaymentsTotal = 0;
         const resolvedOwner = ownerDoc2 || ownerDoc;
+        // Defense in depth: this object is serialized straight into the dashboard
+        // response below — never let a raw password reach the client.
+        if (resolvedOwner) {
+            if (resolvedOwner.credentials) delete resolvedOwner.credentials.password;
+            delete resolvedOwner.checkinPassword;
+            delete resolvedOwner.password;
+        }
         if (resolvedOwner?._id) {
             rentPaymentsTotal = await sumRentPayments({
                 ownerId: resolvedOwner._id,

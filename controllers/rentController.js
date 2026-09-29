@@ -2014,7 +2014,7 @@ exports.verifyCashPaymentOtp = async (req, res) => {
 
     let rent;
     if (rentId) {
-      rent = await Rent.findById(rentId);
+      rent = await Rent.findById(rentId).select('+cashOtpHash');
       if (rent && !["owner_approved", "otp_sent"].includes(String(rent.cashRequestStatus).toLowerCase())) {
         rent = null;
       }
@@ -2022,7 +2022,7 @@ exports.verifyCashPaymentOtp = async (req, res) => {
       rent = await Rent.findOne({
         tenantLoginId: loginId,
         cashRequestStatus: { $in: ["owner_approved", "otp_sent"] },
-      }).sort({ updatedAt: -1 });
+      }).select('+cashOtpHash').sort({ updatedAt: -1 });
     }
 
     if (!rent)
@@ -3002,7 +3002,7 @@ exports.verifyAuthCashOtp = async (req, res) => {
       }
     }
     decoded.rentRecordId = fallbackRentId;
-    const rent = await Rent.findById(fallbackRentId);
+    const rent = await Rent.findById(fallbackRentId).select('+cashOtpCode');
     if (!rent) return res.status(404).json({ success: false, error: 'Rent record not found' });
 
     if (!rent.cashOtpCode) {

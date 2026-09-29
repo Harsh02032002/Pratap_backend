@@ -9,11 +9,18 @@ exports.getRequests = async (req, res) => {
         if (status && status !== 'All') {
             query.status = status;
         }
-        if (ownerLoginId) {
-            query.ownerLoginId = String(ownerLoginId).toUpperCase();
-        }
-        if (tenantId) {
-            query.tenantId = tenantId;
+
+        // Never trust the client-supplied ownerLoginId/tenantId for a scoped role —
+        // an owner or tenant could otherwise read another owner's/tenant's KYC data
+        // just by changing the query string. Superadmin may filter by either.
+        const requesterRole = String(req.user?.role || '').toLowerCase();
+        if (requesterRole === 'owner' || requesterRole === 'propertyowner') {
+            query.ownerLoginId = String(req.user.loginId || '').toUpperCase();
+        } else if (requesterRole === 'tenant') {
+            query.tenantId = req.user._id;
+        } else {
+            if (ownerLoginId) query.ownerLoginId = String(ownerLoginId).toUpperCase();
+            if (tenantId) query.tenantId = tenantId;
         }
 
         // Populate the full tenant record the owner filled in at Add Tenant time,
