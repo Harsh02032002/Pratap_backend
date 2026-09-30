@@ -264,7 +264,10 @@ exports.getRentsByOwner = async (req, res) => {
     if (month) query.collectionMonth = month;
     if (status) query.paymentStatus = status;
 
+    // Scoped to this same owner instead of every active tenant platform-wide
+    // — this function already has exactly one owner in scope via ownerLoginId.
     const activeTenants = await Tenant.find({
+      ownerLoginId,
       isDeleted: { $ne: true },
       status: { $nin: ["inactive", "suspended"] },
     }).select("_id loginId");
@@ -278,8 +281,13 @@ exports.getRentsByOwner = async (req, res) => {
       { tenantLoginId: { $in: activeTenantLoginIds } },
     ];
 
+    // Defensive cap, not real pagination — no current caller sends page/limit
+    // here and existing pages expect the full list back, so this only guards
+    // against an unbounded scan as data grows rather than truncating today's
+    // results.
     const rents = await Rent.find(query)
       .sort({ updatedAt: -1 })
+      .limit(2000)
       .populate("tenantId", "name email phone")
       .populate("propertyId", "title");
 
@@ -316,10 +324,18 @@ exports.getAllRents = async (req, res) => {
     if (ownerLoginId) query.ownerLoginId = ownerLoginId;
     if (paymentStatus) query.paymentStatus = paymentStatus;
 
-    const activeTenants = await Tenant.find({
+    // Scoped to the same owner when the caller asked for one — matches the
+    // Rent query's own optional ownerLoginId filter above. When no owner is
+    // requested (a superadmin/employee viewing everything applyBookingScope
+    // already restricts them to), this stays platform-wide rather than
+    // guessing at a scope shape that could hide legitimate rents.
+    const tenantFilter = {
       isDeleted: { $ne: true },
       status: { $nin: ["inactive", "suspended"] },
-    }).select("_id loginId");
+    };
+    if (ownerLoginId) tenantFilter.ownerLoginId = ownerLoginId;
+
+    const activeTenants = await Tenant.find(tenantFilter).select("_id loginId");
     const activeTenantIds = activeTenants.map((t) => t._id);
     const activeTenantLoginIds = activeTenants
       .map((t) => t.loginId)
@@ -330,8 +346,10 @@ exports.getAllRents = async (req, res) => {
       { tenantLoginId: { $in: activeTenantLoginIds } },
     ];
 
+    // Same defensive cap as getRentsByOwner — no current caller paginates this.
     const rents = await Rent.find(query)
       .sort({ createdAt: -1 })
+      .limit(2000)
       .populate("tenantId", "name email phone")
       .populate("propertyId", "title");
 
@@ -2491,33 +2509,46 @@ exports.processOwnerPayout = async (req, res) => {
 
 exports.getPlatformPayoutSummary = async (req, res) => {
   try {
-    const rents = await Rent.find({}).select(
-      "ownerPayoutStatus ownerPayoutAmount commissionAmount serviceFeeAmount paidAmount totalDue rentAmount",
-    );
-    const summary = {
-      totalPayoutTransferred: 0,
-      totalPendingPayout: 0,
-      totalRents: 0,
-      paidRows: 0,
-      pendingRows: 0,
-    };
+    // Was a full-collection Rent.find({}) loaded into Node just to add five
+    // numbers — replaced with a single $group so the database does the sum.
+    const [result] = await Rent.aggregate([
+      {
+        $project: {
+          rentAmountEffective: {
+            $let: {
+              vars: { ra: { $ifNull: ["$rentAmount", 0] }, td: { $ifNull: ["$totalDue", 0] } },
+              in: { $cond: [{ $ne: ["$$ra", 0] }, "$$ra", "$$td"] },
+            },
+          },
+          payoutAmount: { $ifNull: ["$ownerPayoutAmount", 0] },
+          isPaid: { $eq: ["$ownerPayoutStatus", "paid"] },
+          isPending: {
+            $in: [
+              { $ifNull: ["$ownerPayoutStatus", "MISSING"] },
+              ["pending", "processing", "failed", "MISSING"],
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalRents: { $sum: "$rentAmountEffective" },
+          totalPayoutTransferred: { $sum: { $cond: ["$isPaid", "$payoutAmount", 0] } },
+          paidRows: { $sum: { $cond: ["$isPaid", 1, 0] } },
+          totalPendingPayout: { $sum: { $cond: ["$isPending", "$payoutAmount", 0] } },
+          pendingRows: { $sum: { $cond: ["$isPending", 1, 0] } },
+        },
+      },
+    ]);
 
-    rents.forEach((rent) => {
-      summary.totalRents += Number(rent.rentAmount || rent.totalDue || 0);
-      const payoutAmount = Number(rent.ownerPayoutAmount || 0);
-      if (rent.ownerPayoutStatus === "paid") {
-        summary.totalPayoutTransferred += payoutAmount;
-        summary.paidRows += 1;
-      } else if (
-        rent.ownerPayoutStatus === "pending" ||
-        rent.ownerPayoutStatus === "processing" ||
-        rent.ownerPayoutStatus === "failed" ||
-        !rent.ownerPayoutStatus
-      ) {
-        summary.totalPendingPayout += payoutAmount;
-        summary.pendingRows += 1;
-      }
-    });
+    const summary = {
+      totalPayoutTransferred: result?.totalPayoutTransferred || 0,
+      totalPendingPayout: result?.totalPendingPayout || 0,
+      totalRents: result?.totalRents || 0,
+      paidRows: result?.paidRows || 0,
+      pendingRows: result?.pendingRows || 0,
+    };
 
     return res.json({ success: true, summary });
   } catch (err) {
