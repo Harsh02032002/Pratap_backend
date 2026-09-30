@@ -3,6 +3,7 @@ const Property = require('../models/Property');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { sendMail } = require('../utils/mailer');
+const { ALWAYS_EXCLUDED_PROJECTION } = require('../utils/tenantProjections');
 
 const getManagerLoginUrl = () => {
   const frontendBaseUrl = (
@@ -601,6 +602,7 @@ exports.getPropertyManagerTenants = async (req, res) => {
     // Get tenants for the assigned property
     const Tenant = require('../models/Tenant');
     const tenants = await Tenant.find({ property: manager.assignedProperty._id, isDeleted: { $ne: true } })
+      .select(ALWAYS_EXCLUDED_PROJECTION)
       .populate('property', 'title roomType locationCode ownerLoginId')
       .sort({ createdAt: -1 });
 

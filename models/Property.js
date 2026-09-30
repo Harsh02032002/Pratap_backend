@@ -260,5 +260,10 @@ PropertySchema.pre('save', async function(next) {
 });
 
 PropertySchema.index({ ownerLoginId: 1 });
+// Matches getAllProperties' actual filter+sort shape (controllers/propertyController.js)
+// — equality on ownerLoginId/isDeleted/status, then sorted by createdAt desc.
+// Additive only — the single-field index above and the other single-field
+// indexes on visitId/city/locality declared earlier in this schema stay as-is.
+PropertySchema.index({ ownerLoginId: 1, isDeleted: 1, status: 1, createdAt: -1 });
 
 module.exports = mongoose.models.Property || mongoose.model('Property', PropertySchema);

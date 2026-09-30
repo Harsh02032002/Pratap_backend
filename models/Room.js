@@ -56,5 +56,13 @@ const RoomSchema = new mongoose.Schema({
 });
 
 RoomSchema.index({ property: 1, isDeleted: 1 });
+// Matches getAllRooms' actual filter+sort shape (controllers/roomController.js)
+// — equality on property/isDeleted/sharingType, then sorted by createdAt desc.
+// This index's prefix also serves any query that only filters by
+// {property, isDeleted}, so the narrower index above stays as-is rather than
+// being removed here (additive only — not touching what's already indexed).
+RoomSchema.index({ property: 1, isDeleted: 1, sharingType: 1, createdAt: -1 });
+// Supports the T-17 fix in services/moveoutService.js (per-tenant bed lookup).
+RoomSchema.index({ 'bedAssignments.tenantId': 1 });
 
 module.exports = mongoose.model('Room', RoomSchema);

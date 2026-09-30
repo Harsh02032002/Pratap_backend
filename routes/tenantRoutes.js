@@ -18,22 +18,9 @@ const { nextBillingMonth } = require('../utils/istDate');
 // Sensitive fields are stripped at the DB query layer (defence-in-depth).
 // Even if an upstream auth check were accidentally omitted, these fields
 // structurally cannot appear in any response from this router.
-const ALWAYS_EXCLUDED =
-    '-tempPassword' +
-    ' -kyc.aadhaarNumber' +
-    ' -kyc.aadhar' +
-    ' -kyc.aadhaarLinkedPhone' +
-    ' -kyc.aadharFile' +
-    ' -kyc.aadhaarFront' +
-    ' -kyc.aadhaarBack' +
-    ' -kyc.idProofFile' +
-    ' -kyc.addressProofFile' +
-    ' -kyc.otpVerified' +
-    ' -kyc.otpVerifiedAt' +
-    ' -digitalCheckin.kyc' +
-    ' -digitalCheckin.agreement.signatureDataUrl' +
-    ' -agreementRequestId' +
-    ' -agreementESignName';
+// Shared with controllers/tenantController.js and propertyManagerController.js
+// via utils/tenantProjections.js so all three can't drift apart.
+const { ALWAYS_EXCLUDED_PROJECTION: ALWAYS_EXCLUDED } = require('../utils/tenantProjections');
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 

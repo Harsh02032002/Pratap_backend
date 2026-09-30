@@ -230,6 +230,10 @@ exports.addProperty = async (req, res) => {
     // 🤖 Auto-assign property verification to employee (with fallbacks)
     let autoAssignedTo = null;
     let autoAssignedToName = null;
+    // Captured alongside the two above so the later assignment-email block
+    // doesn't need a second Employee.findOne() just to fetch this same
+    // employee's address again (was T-9 in the audit).
+    let autoAssignedEmail = null;
     if (propertyData.status === 'pending_approval') {
       try {
         const Employee = require('../models/Employee');
@@ -248,26 +252,27 @@ exports.addProperty = async (req, res) => {
               { locationCode: new RegExp(pCity, 'i') },
               { area: new RegExp(pArea, 'i') }
             ]
-          }).select('name loginId role').lean();
+          }).select('name loginId role email').lean();
         }
 
         if (!areaEmployee) {
           areaEmployee = await Employee.findOne({
             isActive: { $ne: false },
             isDeleted: { $ne: true }
-          }).select('name loginId role').lean();
+          }).select('name loginId role email').lean();
         }
 
         if (!areaEmployee) {
           areaEmployee = await User.findOne({
             role: 'employee',
             isActive: { $ne: false }
-          }).select('name loginId role').lean();
+          }).select('name loginId role email').lean();
         }
 
         if (areaEmployee) {
           autoAssignedTo = areaEmployee.loginId || String(areaEmployee._id);
           autoAssignedToName = areaEmployee.name || areaEmployee.loginId;
+          autoAssignedEmail = areaEmployee.email || null;
         }
       } catch (autoErr) {
         console.warn('Auto-assign property verification warning:', autoErr.message);
@@ -358,11 +363,15 @@ exports.addProperty = async (req, res) => {
             area: property.area || ''
           }
         });
-        // Email to matched employee
+        // Email to matched employee — reuse the email already resolved above;
+        // only re-query if it wasn't captured there for some reason.
         const { sendMail } = require('../utils/mailer');
-        const Employee = require('../models/Employee');
-        const empDoc = await Employee.findOne({ loginId: autoAssignedTo }).select('email').lean();
-        const empEmail = empDoc?.email || '';
+        let empEmail = autoAssignedEmail || '';
+        if (!empEmail) {
+          const Employee = require('../models/Employee');
+          const empDoc = await Employee.findOne({ loginId: autoAssignedTo }).select('email').lean();
+          empEmail = empDoc?.email || '';
+        }
         if (empEmail) {
           const empHtml = `<div style="font-family:Arial,sans-serif;">
             <h3>New Property Assigned for Verification</h3>
@@ -472,32 +481,13 @@ exports.getAllProperties = async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    // Auto-assign any unassigned pending properties to active employee matching city/area
-    const Employee = require('../models/Employee');
-    for (let p of properties) {
-      if ((p.status === 'pending_approval' || p.status === 'pending') && !p.assignedToName) {
-        const c = (p.city || 'Jaipur').trim();
-        const a = (p.area || p.locality || '').trim();
-        let emp = null;
-        if (c) {
-          if (a) {
-            emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), area: new RegExp(`^${a}$`, 'i'), isActive: true });
-            if (!emp) emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), area: new RegExp(a, 'i'), isActive: true });
-          }
-          if (!emp) {
-            emp = await Employee.findOne({ city: new RegExp(`^${c}$`, 'i'), isActive: true });
-          }
-        }
-        if (emp) {
-          p.assignedTo = emp._id;
-          p.assignedToName = emp.name;
-          p.assignedToEmail = emp.email || '';
-          p.assignedToPhone = emp.phone || '';
-          p.assignedToLoginId = emp.loginId || '';
-          try { await p.save(); } catch (_) {}
-        }
-      }
-    }
+    // Auto-assignment of unassigned pending properties to an area employee used
+    // to run inline here — up to 3 Employee lookups + a write per unassigned
+    // property, on every GET. It now runs off the request path in
+    // jobs/ownerPropertyHealJob.js's healPendingPropertyAssignments(), batched
+    // and on a schedule (see that file for details). A newly-submitted pending
+    // property will show no assignee here until that job's next run rather
+    // than instantly — the read-only tradeoff is intentional.
 
     // Sanitize property images array to strictly exclude live camera photos
     const cleanedProperties = properties.map(p => {
@@ -922,21 +912,26 @@ exports.deleteProperty = async (req, res) => {
     const Tenant = require('../models/Tenant');
     const User = require('../models/user');
 
-    const propertyTenants = await Tenant.find({ property: propId });
-    for (const tenant of propertyTenants) {
-      // Soft delete user login credentials
-      if (tenant.user) {
-        await User.findByIdAndUpdate(tenant.user, { $set: { isDeleted: true, isActive: false } });
-      }
-      if (tenant.loginId) {
-        await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
-      }
+    // Batched: Tenant has no pre('save') hook and every tenant here gets the
+    // exact same fields set, so this no longer needs a per-tenant loop (was
+    // T-10 in the audit — an unselective fetch plus 2-3 writes per tenant).
+    const propertyTenants = await Tenant.find({ property: propId }).select('_id user loginId').lean();
 
-      // Set status to inactive, set isDeleted, and clear active mongoose room ref
-      tenant.status = 'inactive';
-      tenant.isDeleted = true;
-      tenant.room = undefined;
-      await tenant.save();
+    const tenantUserIds = propertyTenants.map(t => t.user).filter(Boolean);
+    const tenantLoginIds = propertyTenants.map(t => t.loginId).filter(Boolean);
+
+    if (tenantUserIds.length > 0) {
+      await User.updateMany({ _id: { $in: tenantUserIds } }, { $set: { isDeleted: true, isActive: false } });
+    }
+    if (tenantLoginIds.length > 0) {
+      await User.updateMany({ loginId: { $in: tenantLoginIds }, role: 'tenant' }, { $set: { isDeleted: true, isActive: false } });
+    }
+
+    if (propertyTenants.length > 0) {
+      await Tenant.updateMany(
+        { property: propId },
+        { $set: { status: 'inactive', isDeleted: true }, $unset: { room: '' } }
+      );
     }
 
     // Soft delete the property itself
