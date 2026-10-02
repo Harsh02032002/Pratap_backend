@@ -46,6 +46,7 @@ exports.getTenantHistory = async (req, res) => {
   try {
     const transactions = await PaymentTransaction.find({})
       .sort({ payment_date: -1 })
+      .limit(5000)
       .lean();
     res.json({ success: true, transactions });
   } catch (error) {
@@ -110,7 +111,7 @@ exports.getTenantTracking = async (req, res) => {
 exports.getOwnerReceipts = async (req, res) => {
   try {
     // Receipts represent payout-ready/processed transactions with gross, fee, net
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).limit(5000).lean();
     res.json({ success: true, receipts: txs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -119,7 +120,7 @@ exports.getOwnerReceipts = async (req, res) => {
 
 exports.getOwnerHistory = async (req, res) => {
   try {
-    const logs = await PayoutLog.find({}).sort({ created_at: -1 }).lean();
+    const logs = await PayoutLog.find({}).sort({ created_at: -1 }).limit(5000).lean();
     res.json({ success: true, history: logs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -128,7 +129,7 @@ exports.getOwnerHistory = async (req, res) => {
 
 exports.getOwnerServiceFees = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).limit(5000).lean();
     const serviceFees = txs.map(t => ({
       transaction_id: t._id,
       owner_id: t.owner_id,
@@ -366,7 +367,7 @@ exports.updateCommissionDetails = async (req, res) => {
 
 exports.getDiscounts = async (req, res) => {
   try {
-    const coupons = await Coupon.find({}).sort({ createdAt: -1 }).lean();
+    const coupons = await Coupon.find({}).sort({ createdAt: -1 }).limit(5000).lean();
     res.json({ success: true, discounts: coupons });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -391,17 +392,23 @@ exports.createDiscount = async (req, res) => {
 
 exports.getRevenueTracking = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    // Was a full-collection PaymentTransaction.find({}) loaded into Node just
+    // to add three numbers — replaced with a $group so the database sums them.
+    const [result] = await PaymentTransaction.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalCollected: { $sum: { $ifNull: ['$booking_amount', 0] } },
+          totalCommissions: { $sum: { $ifNull: ['$commission_amount', 0] } },
+          totalOwnerEarnings: { $sum: { $ifNull: ['$owner_amount', 0] } },
+        },
+      },
+    ]);
     const metrics = {
-      totalCollected: 0,
-      totalCommissions: 0,
-      totalOwnerEarnings: 0
+      totalCollected: result?.totalCollected || 0,
+      totalCommissions: result?.totalCommissions || 0,
+      totalOwnerEarnings: result?.totalOwnerEarnings || 0,
     };
-    txs.forEach(t => {
-      metrics.totalCollected += (t.booking_amount || 0);
-      metrics.totalCommissions += (t.commission_amount || 0);
-      metrics.totalOwnerEarnings += (t.owner_amount || 0);
-    });
     res.json({ success: true, metrics });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -464,7 +471,7 @@ exports.triggerInvoicesGeneration = async (req, res) => {
 
 exports.getInvoiceGstBreakdown = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).limit(5000).lean();
     const gstReport = txs.map(t => {
       const cgst = Math.round(t.commission_amount * 0.09 * 100) / 100;
       const sgst = Math.round(t.commission_amount * 0.09 * 100) / 100;
@@ -502,7 +509,7 @@ exports.updateInvoiceNumbering = async (req, res) => {
 
 exports.getInvoiceHistory = async (req, res) => {
   try {
-    const invoices = await RentInvoice.find({}).sort({ createdAt: -1 }).lean();
+    const invoices = await RentInvoice.find({}).sort({ createdAt: -1 }).limit(5000).lean();
     res.json({ success: true, invoices });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -513,7 +520,7 @@ exports.getInvoiceHistory = async (req, res) => {
 // ─── CATEGORY 6: REFUND MANAGEMENT ──────────────────────────────────────────────
 exports.getRefundHistory = async (req, res) => {
   try {
-    const refunds = await RefundRequest.find({}).sort({ created_at: -1 }).lean();
+    const refunds = await RefundRequest.find({}).sort({ created_at: -1 }).limit(5000).lean();
     res.json({ success: true, refunds });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -611,16 +618,32 @@ exports.updateAutomationSettings = async (req, res) => {
 // ─── CATEGORY 8: ANALYTICS & REPORTS ────────────────────────────────────────────
 exports.getRoomhyMonthlyRevenue = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
+    // Was a full-collection find({}) loaded into Node to bucket by month —
+    // replaced with a $group on Mongo's $month (1-12; JS getMonth() is 0-11,
+    // so the mapping below subtracts 1 to land on the same `months` index the
+    // original JS loop used, grouping by month-of-year across all years, same
+    // as before). Rows with no payment_date are excluded, matching the
+    // original `if (!t.payment_date) return`.
+    const grouped = await PaymentTransaction.aggregate([
+      { $match: { payment_date: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: { $month: '$payment_date' },
+          revenue: { $sum: { $ifNull: ['$booking_amount', 0] } },
+          commission: { $sum: { $ifNull: ['$commission_amount', 0] } },
+        },
+      },
+    ]);
+
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const data = months.map(m => ({ month: m, revenue: 0, commission: 0 }));
-    
-    txs.forEach(t => {
-      if (!t.payment_date) return;
-      const m = new Date(t.payment_date).getMonth();
-      data[m].revenue += (t.booking_amount || 0);
-      data[m].commission += (t.commission_amount || 0);
-    });
+    for (const row of grouped) {
+      const idx = row._id - 1;
+      if (idx >= 0 && idx < 12) {
+        data[idx].revenue = row.revenue;
+        data[idx].commission = row.commission;
+      }
+    }
 
     res.json({ success: true, roomhyRevenue: data });
   } catch (error) {
@@ -630,20 +653,33 @@ exports.getRoomhyMonthlyRevenue = async (req, res) => {
 
 exports.getOwnerMonthlyRevenue = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
-    const revenueMap = {};
+    // Was a full-collection find({}) loaded into Node to bucket by owner —
+    // replaced with a $group, same grouping key precedence as the original
+    // (owner_name, else owner_id, else 'Unknown Owner').
+    const grouped = await PaymentTransaction.aggregate([
+      {
+        $group: {
+          _id: {
+            $let: {
+              vars: { name: { $ifNull: ['$owner_name', null] }, id: { $ifNull: ['$owner_id', null] } },
+              in: {
+                $cond: [
+                  { $and: [{ $ne: ['$$name', null] }, { $ne: ['$$name', ''] }] },
+                  '$$name',
+                  { $cond: [{ $and: [{ $ne: ['$$id', null] }, { $ne: ['$$id', ''] }] }, '$$id', 'Unknown Owner'] },
+                ],
+              },
+            },
+          },
+          gross: { $sum: { $ifNull: ['$booking_amount', 0] } },
+          commission: { $sum: { $ifNull: ['$commission_amount', 0] } },
+          net: { $sum: { $ifNull: ['$owner_amount', 0] } },
+        },
+      },
+    ]);
 
-    txs.forEach(t => {
-      const key = t.owner_name || t.owner_id || 'Unknown Owner';
-      if (!revenueMap[key]) {
-        revenueMap[key] = { owner: key, gross: 0, commission: 0, net: 0 };
-      }
-      revenueMap[key].gross += (t.booking_amount || 0);
-      revenueMap[key].commission += (t.commission_amount || 0);
-      revenueMap[key].net += (t.owner_amount || 0);
-    });
-
-    res.json({ success: true, ownerRevenue: Object.values(revenueMap) });
+    const ownerRevenue = grouped.map(row => ({ owner: row._id, gross: row.gross, commission: row.commission, net: row.net }));
+    res.json({ success: true, ownerRevenue });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -714,21 +750,27 @@ exports.getDueRentReports = async (req, res) => {
 
 exports.getProfitLoss = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
-    const refunds = await RefundRequest.find({ refund_status: 'processed' }).lean();
+    // Was two full-collection find()s loaded into Node just to add a few
+    // numbers — replaced with one $group per collection.
+    const [[txResult], [refundResult]] = await Promise.all([
+      PaymentTransaction.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: { $ifNull: ['$booking_amount', 0] } },
+            netCommission: { $sum: { $ifNull: ['$commission_amount', 0] } },
+          },
+        },
+      ]),
+      RefundRequest.aggregate([
+        { $match: { refund_status: 'processed' } },
+        { $group: { _id: null, totalRefunds: { $sum: { $ifNull: ['$refund_amount', 0] } } } },
+      ]),
+    ]);
 
-    let totalRevenue = 0;
-    let netCommission = 0;
-    txs.forEach(t => {
-      totalRevenue += (t.booking_amount || 0);
-      netCommission += (t.commission_amount || 0);
-    });
-
-    let totalRefunds = 0;
-    refunds.forEach(r => {
-      totalRefunds += (r.refund_amount || 0);
-    });
-
+    const totalRevenue = txResult?.totalRevenue || 0;
+    const netCommission = txResult?.netCommission || 0;
+    const totalRefunds = refundResult?.totalRefunds || 0;
     const netProfit = netCommission - totalRefunds;
 
     res.json({
@@ -747,30 +789,38 @@ exports.getProfitLoss = async (req, res) => {
 
 exports.getCashflowDashboard = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).lean();
-    const payouts = await PayoutLog.find({ status: 'sandbox_success' }).lean();
-    const refunds = await RefundRequest.find({ refund_status: 'processed' }).lean();
+    // Was three full-collection find()s loaded into Node to bucket by month —
+    // replaced with one $group per collection, same month-of-year-across-all-years
+    // bucketing and same "no date = excluded" behavior as the original.
+    const [inflowRows, payoutRows, refundRows] = await Promise.all([
+      PaymentTransaction.aggregate([
+        { $match: { payment_date: { $exists: true, $ne: null } } },
+        { $group: { _id: { $month: '$payment_date' }, inflow: { $sum: { $ifNull: ['$booking_amount', 0] } } } },
+      ]),
+      PayoutLog.aggregate([
+        { $match: { status: 'sandbox_success', created_at: { $exists: true, $ne: null } } },
+        { $group: { _id: { $month: '$created_at' }, outflow: { $sum: { $ifNull: ['$amount', 0] } } } },
+      ]),
+      RefundRequest.aggregate([
+        { $match: { refund_status: 'processed', refund_date: { $exists: true, $ne: null } } },
+        { $group: { _id: { $month: '$refund_date' }, outflow: { $sum: { $ifNull: ['$refund_amount', 0] } } } },
+      ]),
+    ]);
 
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const data = months.map(m => ({ month: m, inflow: 0, outflow: 0 }));
-
-    txs.forEach(t => {
-      if (!t.payment_date) return;
-      const m = new Date(t.payment_date).getMonth();
-      data[m].inflow += (t.booking_amount || 0);
-    });
-
-    payouts.forEach(p => {
-      if (!p.created_at) return;
-      const m = new Date(p.created_at).getMonth();
-      data[m].outflow += (p.amount || 0);
-    });
-
-    refunds.forEach(r => {
-      if (!r.refund_date) return;
-      const m = new Date(r.refund_date).getMonth();
-      data[m].outflow += (r.refund_amount || 0);
-    });
+    for (const row of inflowRows) {
+      const idx = row._id - 1;
+      if (idx >= 0 && idx < 12) data[idx].inflow += row.inflow;
+    }
+    for (const row of payoutRows) {
+      const idx = row._id - 1;
+      if (idx >= 0 && idx < 12) data[idx].outflow += row.outflow;
+    }
+    for (const row of refundRows) {
+      const idx = row._id - 1;
+      if (idx >= 0 && idx < 12) data[idx].outflow += row.outflow;
+    }
 
     res.json({ success: true, cashflow: data });
   } catch (error) {
@@ -780,7 +830,7 @@ exports.getCashflowDashboard = async (req, res) => {
 
 exports.getTransactionsReport = async (req, res) => {
   try {
-    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).lean();
+    const txs = await PaymentTransaction.find({}).sort({ payment_date: -1 }).limit(5000).lean();
     res.json({ success: true, transactions: txs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const mailer = require('../utils/mailer');
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { enrichTenantsWithDues } = require('../services/tenantDuesService');
+const roomAssignmentService = require('../services/roomAssignmentService');
 const { validateDocumentType } = require('../utils/documentValidator');
 
 /**
@@ -514,6 +515,24 @@ exports.assignTenant = async (req, res) => {
             roomObj.isAvailable = occupiedCount < totalBeds;
             await roomObj.save();
 
+            // First assignment-history row, so billing can resolve "which
+            // room/rent applied this month" from day one instead of only
+            // starting from this tenant's first transfer.
+            try {
+                await roomAssignmentService.recordOnboarding({
+                    tenantId: tenant._id,
+                    propertyId: property._id,
+                    roomId: roomObj._id,
+                    roomNo: roomObj.title,
+                    bedNo: normalizedBedNo,
+                    agreedRent: tenant.agreedRent,
+                    effectiveFrom: tenant.moveInDate || new Date(),
+                    performedBy: req.user ? req.user.id : 'system',
+                });
+            } catch (histErr) {
+                console.error('[assignTenant] Failed to record initial assignment history:', histErr.message);
+            }
+
             // Recalculate and sync property bed/room counters
             try {
                 const Room = require('../models/Room');
@@ -849,36 +868,20 @@ exports.assignTenant = async (req, res) => {
 };
 
 // ─── Field-level security projections ────────────────────────────────────────
-// Defence-in-depth: sensitive PII is stripped at the database query layer so it
-// can never appear in a response even if a future auth check is accidentally
-// skipped or bypassed upstream.
-//
-// ALWAYS_EXCLUDED — never sent to any caller regardless of role
-const ALWAYS_EXCLUDED_PROJECTION =
-    '-tempPassword' +
-    ' -kyc.aadhaarNumber' +
-    ' -kyc.aadhar' +
-    ' -kyc.aadhaarLinkedPhone' +
-    ' -kyc.aadharFile' +
-    ' -kyc.aadhaarFront' +
-    ' -kyc.aadhaarBack' +
-    ' -kyc.idProofFile' +
-    ' -kyc.addressProofFile' +
-    ' -kyc.otpVerified' +
-    ' -kyc.otpVerifiedAt' +
-    ' -digitalCheckin.kyc' +
-    ' -digitalCheckin.agreement.signatureDataUrl' +
-    ' -agreementRequestId' +
-    ' -agreementESignName';
+// ALWAYS_EXCLUDED_PROJECTION now lives in utils/tenantProjections.js so other
+// controllers (e.g. propertyManagerController.js) and routes/tenantRoutes.js's
+// own copy can share one definition instead of drifting apart.
+const { ALWAYS_EXCLUDED_PROJECTION } = require('../utils/tenantProjections');
 
 // ME_PROJECTION — whitelist for the tenant self-service /me endpoint.
 // Uses explicit inclusion so adding fields to the Tenant schema never
 // accidentally exposes them; they must be consciously added here.
+// (policeVerification.* and digitalCheckin.agreement.pdfUrl/pdfUploadedAt were
+// removed — neither path exists in models/Tenant.js, so they were silent no-ops.)
 const ME_PROJECTION =
     'name email phone status roomNo bedNo building floor moveInDate agreedRent' +
     ' kycStatus loginId propertyTitle ownerLoginId property occupation company' +
     ' gender dob guardianNumber emergencyContact' +
-    ' policeVerification.status policeVerification.submittedAt' +
     ' moveoutRequest.status moveoutRequest.requestedDate moveoutRequest.reason moveoutRequest.submittedAt' +
     ' moveoutRequest.approvedAt moveoutRequest.noticeEndDate moveoutRequest.completedAt' +
     ' moveoutRequest.cancelledAt moveoutRequest.cancelReason' +
@@ -886,7 +889,6 @@ const ME_PROJECTION =
     ' securityDepositTotal securityDepositPaid securityDepositBalance' +
     ' electricityCharge maintenanceCharge' +
     ' agreementSigned agreementSignedAt agreementESignName' +
-    ' digitalCheckin.agreement.pdfUrl digitalCheckin.agreement.pdfUploadedAt' +
     ' digitalCheckin.agreementDetails' +
     ' kyc.idProof kyc.uploadedAt' +
     ' createdAt';
@@ -1029,6 +1031,7 @@ exports.getTenant = async (req, res) => {
         const { tenantId } = req.params;
 
         const tenant = await Tenant.findById(tenantId)
+            .select(ALWAYS_EXCLUDED_PROJECTION)
             .populate('property', 'title roomType locationCode owner')
             .populate('user', 'name email phone')
             .populate('assignedBy', 'name')
@@ -1056,7 +1059,7 @@ exports.verifyTenant = async (req, res) => {
         const { tenantId } = req.params;
         const { kycApproved } = req.body;
 
-        const tenant = await Tenant.findById(tenantId);
+        const tenant = await Tenant.findById(tenantId).select(ALWAYS_EXCLUDED_PROJECTION);
         if (!tenant) {
             return res.status(404).json({ success: false, message: 'Tenant not found' });
         }
@@ -1127,7 +1130,7 @@ exports.updateTenantKyc = async (req, res) => {
  */
 exports.generateTenantCredentials = async (tenantId, fallbackLocationCode = '', opts = {}) => {
     const { session } = opts;
-    const tenant = await Tenant.findById(tenantId).populate('property').session(session || null);
+    const tenant = await Tenant.findById(tenantId).populate('property', 'locationCode').session(session || null);
     if (!tenant) throw new Error('Tenant not found');
 
     const loginId = tenant.loginId || await generateTenantId();

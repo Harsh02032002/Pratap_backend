@@ -834,49 +834,6 @@ if (adminDistPath) {
     console.log('ℹ️  Admin panel build not found.');
 }
 
-// ── Fallback bulk room endpoints (guarantee these always work) ─────────────
-const Room = require('./models/Room');
-const Tenant = require('./models/Tenant');
-
-app.post('/api/rooms/bulk-clear-tenants', async (req, res) => {
-    try {
-        const { roomIds } = req.body;
-        if (!Array.isArray(roomIds) || roomIds.length === 0) {
-            return res.status(400).json({ success: false, message: 'roomIds[] required' });
-        }
-        await Room.updateMany({ _id: { $in: roomIds } }, { $set: { bedAssignments: [], bedsInfo: [] } });
-        return res.json({ success: true, message: `Tenant assignments cleared from ${roomIds.length} room(s)` });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-app.post('/api/rooms/bulk-delete', async (req, res) => {
-    try {
-        const { roomIds } = req.body;
-        if (!Array.isArray(roomIds) || roomIds.length === 0) {
-            return res.status(400).json({ success: false, message: 'roomIds[] required' });
-        }
-        const result = await Room.deleteMany({ _id: { $in: roomIds } });
-        return res.json({ success: true, deleted: result.deletedCount, message: `${result.deletedCount} room(s) deleted` });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-app.post('/api/tenants/bulk-delete', async (req, res) => {
-    try {
-        const { tenantIds } = req.body;
-        if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
-            return res.status(400).json({ success: false, message: 'tenantIds[] required' });
-        }
-        const result = await Tenant.deleteMany({ _id: { $in: tenantIds } });
-        return res.json({ success: true, deleted: result.deletedCount, message: `${result.deletedCount} tenant(s) deleted` });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: err.message });
-    }
-});
-
 // 404 handler for unmatched routes
 app.use((req, res) => {
     if (req.path.startsWith('/api/')) {

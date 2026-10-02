@@ -1,4 +1,8 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const BCRYPT_HASH_RE = /^\$2[aby]\$\d{2}\$/;
+const looksBcryptHashed = (v) => typeof v === 'string' && BCRYPT_HASH_RE.test(v);
 
 const parseArrayInput = (value) => {
     // If already an array, return as-is
@@ -198,6 +202,86 @@ const ownerSchema = new mongoose.Schema({
     staffId: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
+
+// Owner passwords were historically stored as plain text (see security audit,
+// 2026-09-29). Rather than a one-shot migration script touching every existing
+// record, this hashes lazily: any password written from here on gets hashed on
+// save, and verifyStoredPassword() below upgrades a legacy plain-text password
+// to a hash the moment it's next used successfully — so the DB converges to
+// fully-hashed passwords over normal usage with no separate migration to run.
+ownerSchema.pre('save', async function (next) {
+    try {
+        if (this.isModified('credentials.password') && this.credentials?.password && !looksBcryptHashed(this.credentials.password)) {
+            this.credentials.password = await bcrypt.hash(this.credentials.password, 10);
+        }
+        if (this.isModified('checkinPassword') && this.checkinPassword && !looksBcryptHashed(this.checkinPassword)) {
+            this.checkinPassword = await bcrypt.hash(this.checkinPassword, 10);
+        }
+        next();
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Verifies `candidate` against whichever of credentials.password / checkinPassword
+// is set, transparently handling both already-hashed and legacy plain-text values.
+// On a legacy plain-text match, re-saves the owner with the hash so the same
+// record never compares in plain text again.
+ownerSchema.statics.verifyStoredPassword = async function (ownerDoc, candidate) {
+    if (!ownerDoc || !candidate) return false;
+    const stored = ownerDoc.credentials?.password || ownerDoc.checkinPassword || '';
+    if (!stored) return false;
+
+    if (looksBcryptHashed(stored)) {
+        return bcrypt.compare(String(candidate), stored);
+    }
+
+    const matches = String(stored) === String(candidate);
+    if (matches) {
+        try {
+            const Owner = mongoose.models.Owner || mongoose.model('Owner');
+            const doc = typeof ownerDoc.save === 'function' ? ownerDoc : await Owner.findById(ownerDoc._id);
+            if (doc) {
+                if (doc.credentials?.password) doc.credentials.password = candidate;
+                if (doc.checkinPassword) doc.checkinPassword = candidate;
+                await doc.save();
+            }
+        } catch (_) {
+            // Best-effort upgrade only — a failed re-hash must never fail the login.
+        }
+    }
+    return matches;
+};
+
+ownerSchema.statics.looksBcryptHashed = looksBcryptHashed;
+
+// `pre('save')` above only fires on .save() — a LOT of code in this codebase
+// writes passwords via findOneAndUpdate/updateOne instead (e.g. the digital
+// check-in profile submission), which bypasses it entirely. Cover those too,
+// so no write path can leave a plain-text password at rest.
+async function hashUpdatePasswords(next) {
+    try {
+        const update = this.getUpdate ? this.getUpdate() : null;
+        if (!update) return next();
+        const setBlock = update.$set || update;
+
+        if (setBlock.checkinPassword && !looksBcryptHashed(setBlock.checkinPassword)) {
+            setBlock.checkinPassword = await bcrypt.hash(setBlock.checkinPassword, 10);
+        }
+        if (setBlock['credentials.password'] && !looksBcryptHashed(setBlock['credentials.password'])) {
+            setBlock['credentials.password'] = await bcrypt.hash(setBlock['credentials.password'], 10);
+        }
+        if (setBlock.credentials?.password && !looksBcryptHashed(setBlock.credentials.password)) {
+            setBlock.credentials.password = await bcrypt.hash(setBlock.credentials.password, 10);
+        }
+        next();
+    } catch (err) {
+        next(err);
+    }
+}
+ownerSchema.pre('findOneAndUpdate', hashUpdatePasswords);
+ownerSchema.pre('updateOne', hashUpdatePasswords);
+ownerSchema.pre('updateMany', hashUpdatePasswords);
 
 // Pre-save hook to ensure roomInventory is properly formatted
 ownerSchema.pre('save', function(next) {

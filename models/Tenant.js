@@ -18,7 +18,8 @@ const TenantSchema = new mongoose.Schema({
     bedNo: { type: String }, // Specific bed in room (e.g., "A", "B")
     
     // Rental Details
-    moveInDate: { type: Date },
+    moveInDate: { type: Date }, // original move-in — never overwritten by a room transfer
+    roomTransferDate: { type: Date }, // date of the most recent room transfer, if any
     baseRoomRent: { type: Number },
     agreedRent: { type: Number },
     rentAgreementType: { type: String },

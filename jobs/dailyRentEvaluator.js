@@ -13,6 +13,7 @@ const Tenant = require('../models/Tenant');
 const Owner  = require('../models/Owner');
 const User   = require('../models/user');
 const CheckinRecord = require('../models/CheckinRecord');
+const { getISTBillingMonth } = require('../utils/istDate');
 
 // ─── Date helpers for WhatsApp template variables ────────────────────────────
 
@@ -324,8 +325,11 @@ async function queueNotificationsForInvoice(invoice, penalties, config) {
 async function runMonthlyInvoiceGenerator() {
   if (mongoose.connection.readyState !== 1) return;
 
-  const now          = new Date();
-  const billingMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // IST-anchored, not process-local time — the cron itself fires on an IST
+  // clock (see registerAllCronJobs below); the billing-month string it
+  // computes must agree, or a schedule/server-timezone change could generate
+  // a month's invoices under the wrong month label.
+  const billingMonth = getISTBillingMonth(new Date());
 
   console.log(`[InvoiceGenerator] Generating invoices for ${billingMonth}...`);
 

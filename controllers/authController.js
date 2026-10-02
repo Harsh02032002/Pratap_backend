@@ -858,11 +858,17 @@ exports.login = async (req, res) => {
                 });
                 if (!user && ownerDoc.isActive !== false) {
                     try {
+                        // Never seed the new User doc with an already-hashed Owner
+                        // password — User's own pre-save hook would hash it again.
+                        const ownerStoredPass = ownerDoc.credentials?.password || ownerDoc.checkinPassword;
+                        const seedPassword = (ownerStoredPass && !Owner.looksBcryptHashed(ownerStoredPass))
+                            ? ownerStoredPass
+                            : password;
                         user = await User.create({
                             name: ownerDoc.name || ownerDoc.profile?.name || 'Property Owner',
                             email: ownerDoc.email || ownerDoc.profile?.email || `${ownerDoc.loginId.toLowerCase()}@roomhy.com`,
                             phone: ownerDoc.phone || ownerDoc.profile?.phone || phone10,
-                            password: ownerDoc.credentials?.password || ownerDoc.checkinPassword || password,
+                            password: seedPassword,
                             role: 'owner',
                             loginId: ownerDoc.loginId,
                             isActive: ownerDoc.isActive !== false,
@@ -1009,8 +1015,8 @@ exports.login = async (req, res) => {
             if (user.role === 'owner') {
                 ownerDocForPass = await Owner.findOne({ loginId: user.loginId }).lean();
                 if (!isMatch && ownerDocForPass) {
-                    const ownerPass = ownerDocForPass.credentials?.password || ownerDocForPass.checkinPassword;
-                    if (ownerPass && String(ownerPass).trim() === String(password).trim()) {
+                    const ownerPassMatches = await Owner.verifyStoredPassword(ownerDocForPass, password);
+                    if (ownerPassMatches) {
                         isMatch = true;
                         user.password = password;
                         await user.save().catch(() => { });
@@ -1062,7 +1068,7 @@ exports.login = async (req, res) => {
                     const owner = await Owner.findOne({ loginId: user.loginId });
                     if (owner?.credentials?.firstTime) {
                         // If password is already bcrypt-hashed, owner already set their password — clear firstTime
-                        const isTemp = owner.credentials.password && String(owner.credentials.password) === String(password);
+                        const isTemp = owner.credentials.password ? await Owner.verifyStoredPassword(owner, password) : false;
                         if (isTemp) {
                             reqReset = true;
                         } else {
@@ -1266,7 +1272,8 @@ exports.verifyOwnerTemp = async (req, res) => {
             if (!ownerTempPassword) {
                 return res.status(404).json({ message: 'Owner credentials not initialized' });
             }
-            if (String(ownerTempPassword) !== String(tempPassword)) {
+            const tempMatches = await Owner.verifyStoredPassword(owner, tempPassword);
+            if (!tempMatches) {
                 return res.status(401).json({ message: 'Invalid temporary password' });
             }
 
@@ -1279,7 +1286,10 @@ exports.verifyOwnerTemp = async (req, res) => {
                     name: seedName,
                     email: seedEmail,
                     phone: seedPhone,
-                    password: ownerTempPassword,
+                    // tempPassword is the plaintext value just verified above — safe
+                    // to hand to User's own hashing hook even if ownerTempPassword
+                    // itself was already a bcrypt hash.
+                    password: tempPassword,
                     role: 'owner',
                     loginId: normalizedLoginId
                 });
@@ -1324,7 +1334,8 @@ exports.setOwnerPassword = async (req, res) => {
             if (!ownerTempPassword) {
                 return res.status(404).json({ message: 'Owner credentials not initialized' });
             }
-            if (String(ownerTempPassword) !== String(tempPassword)) {
+            const tempMatches = await Owner.verifyStoredPassword(owner, tempPassword);
+            if (!tempMatches) {
                 return res.status(401).json({ message: 'Invalid temporary password' });
             }
 
@@ -1337,7 +1348,10 @@ exports.setOwnerPassword = async (req, res) => {
                     name: seedName,
                     email: seedEmail,
                     phone: seedPhone,
-                    password: ownerTempPassword,
+                    // tempPassword is the plaintext value just verified above — safe
+                    // to hand to User's own hashing hook even if ownerTempPassword
+                    // itself was already a bcrypt hash.
+                    password: tempPassword,
                     role: 'owner',
                     loginId: normalizedLoginId
                 });

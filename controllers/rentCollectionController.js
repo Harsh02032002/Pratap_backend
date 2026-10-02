@@ -475,22 +475,46 @@ async function listInvoices(req, res) {
     if (billingMonth) filter.billingMonth = billingMonth;
     // Scope to the active property when given — an owner with multiple properties must
     // only see dues/invoices for the property currently selected, not all of them merged.
-    if (propertyId && propertyId !== 'all') filter.propertyId = propertyId;
+    // Cast explicitly: unlike .find(), an aggregate() $match does not auto-cast
+    // query values against the schema, so a raw string here would silently
+    // match nothing against the ObjectId-typed propertyId field.
+    if (propertyId && propertyId !== 'all' && mongoose.Types.ObjectId.isValid(propertyId)) {
+      filter.propertyId = new mongoose.Types.ObjectId(propertyId);
+    }
 
     const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
     const parsedLimit = parseInt(limit, 10);
 
-    // Fetch all matching invoices to actively verify tenant deletion status
-    let allInvoices = await RentInvoice.find(filter)
-      .populate('tenantId', 'name email phone roomNo bedNo isDeleted')
-      .sort({ dueDate: -1 })
-      .lean();
+    // Was: fetch every matching invoice + populate every tenant, then
+    // .slice() in JS — response time and memory scaled with an owner's total
+    // invoice count instead of the page size. The deleted-tenant exclusion
+    // has to happen at the same Mongo-level stage the pagination does, or
+    // the page contents and `total` would both be wrong (an excluded zombie
+    // invoice earlier in the sort order would shift later pages).
+    const [result] = await RentInvoice.aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'tenants',
+          localField: 'tenantId',
+          foreignField: '_id',
+          as: 'tenantId',
+          pipeline: [{ $project: { name: 1, email: 1, phone: 1, roomNo: 1, bedNo: 1, isDeleted: 1 } }],
+        },
+      },
+      { $unwind: '$tenantId' },
+      { $match: { 'tenantId.isDeleted': { $ne: true } } },
+      { $sort: { dueDate: -1 } },
+      {
+        $facet: {
+          data: [{ $skip: skip }, { $limit: parsedLimit }],
+          totalCount: [{ $count: 'count' }],
+        },
+      },
+    ]);
 
-    // Remove zombie invoices corresponding to deleted/removed tenants
-    allInvoices = allInvoices.filter(inv => inv.tenantId && !inv.tenantId.isDeleted);
-
-    const total = allInvoices.length;
-    const paginatedInvoices = allInvoices.slice(skip, skip + parsedLimit);
+    const paginatedInvoices = result?.data || [];
+    const total = result?.totalCount?.[0]?.count || 0;
 
     res.json({ success: true, invoices: paginatedInvoices, total, page: parseInt(page, 10), pages: Math.ceil(total / parsedLimit) });
   } catch (err) {
@@ -540,7 +564,6 @@ async function savePenaltyConfig(req, res) {
 // ─── GET /api/rent-collection/invoices/:id ────────────────────────────────────
 async function getInvoiceById(req, res) {
   try {
-    console.log('getInvoiceById invoiceId:', req.params.id);
     const invoice = await RentInvoice.findById(req.params.id).lean();
     await assertOwnership(invoice, req.user);
 
@@ -560,17 +583,9 @@ async function getInvoiceById(req, res) {
       };
     }
 
-    console.log('Searching RentPayment with invoiceId:', req.params.id);
     const payments = await RentPayment.find({ invoiceId: req.params.id })
       .sort({ paymentDate: -1 })
       .lean();
-
-    console.log('Found', Array.isArray(payments) ? payments.length : 0, 'payment records for invoiceId:', req.params.id);
-    if (!payments || !payments.length) {
-      const allPayments = await RentPayment.find().lean();
-      console.log('No payments found for invoiceId. All RentPayment records count:', Array.isArray(allPayments) ? allPayments.length : 'unknown');
-      console.log('All RentPayment records sample:', allPayments.slice(0, 20));
-    }
 
     res.json({ success: true, invoice, live, config, payments });
   } catch (err) {
@@ -670,7 +685,7 @@ async function listPaymentsHandler(req, res) {
       .sort({ paymentDate: -1 })
       .limit(limit)
       .populate('tenantId', 'name roomNo phone email propertyId digitalCheckin')
-      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
+      .populate('invoiceId', 'billingMonth invoiceNumber rentAmount roomNo advanceChargeAmount electricityBill totalPenalty totalDue status paidAmount')
       .lean();
 
     const shaped = payments.map(p => ({
@@ -678,7 +693,12 @@ async function listPaymentsHandler(req, res) {
       tenantId: p.tenantId?._id || null,
       transactionId: p.transactionId || p._id.toString().slice(-8).toUpperCase(),
       tenantName: p.tenantId?.name || '—',
-      roomNo: p.tenantId?.roomNo || '—',
+      // Historical room for THIS invoice, not the tenant's current room — a
+      // tenant who has since transferred must not have old receipts silently
+      // relabeled with their new room. Invoices generated before this field
+      // existed have no stored value; showing that honestly beats guessing
+      // via the tenant's current room, which is exactly the bug this fixes.
+      roomNo: p.invoiceId?.roomNo || 'Room info unavailable',
       tenantPhone: p.tenantId?.phone || '',
       tenantEmail: p.tenantId?.email || '',
       propertyId: p.tenantId?.propertyId || '',
@@ -761,7 +781,10 @@ async function listPaymentsHandler(req, res) {
         remainingAfter: 0,
         notes: t.notes || 'Booking Payment',
         invoiceId: null,
-        billingMonth: t.payment_date ? new Date(t.payment_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : '',
+        // "YYYY-MM", matching every RentPayment-based row's billingMonth — a
+        // localized "Sep 2026" string here made these rows unmatchable by the
+        // frontend's month filter, which compares raw billingMonth values.
+        billingMonth: t.payment_date ? new Date(t.payment_date).toISOString().slice(0, 7) : '',
         invoiceNumber: t.razorpay_payment_id || '—',
         rentAmount: t.owner_amount,
         electricityBill: 0,
@@ -1153,7 +1176,7 @@ async function getTenantInvoiceSummary(req, res) {
     // We need to pull the cash state from Rent to show accurate status in tenant UI.
     const Rent = require('../models/Rent');
     const allRents = await Rent.find({ tenantLoginId: tenantLoginId })
-      .select('collectionMonth cashRequestStatus cashOtpHash cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
+      .select('collectionMonth cashRequestStatus cashOtpExpiry cashRejectedAt cashRejectedReason paymentStatus')
       .lean();
 
     const rentMap = {};
@@ -1178,7 +1201,6 @@ async function getTenantInvoiceSummary(req, res) {
       const r = rentMap[inv.billingMonth];
       if (r) {
         inv.cashRequestStatus = r.cashRequestStatus || 'none';
-        inv.cashOtpHash = r.cashOtpHash;
         inv.cashOtpExpiry = r.cashOtpExpiry;
         inv.cashRejectedAt = r.cashRejectedAt;
         inv.cashRejectedReason = r.cashRejectedReason;
@@ -1195,7 +1217,6 @@ async function getTenantInvoiceSummary(req, res) {
       const lr = rentMap[liveInvoice.billingMonth];
       if (lr) {
         liveInvoice.cashRequestStatus = lr.cashRequestStatus || 'none';
-        liveInvoice.cashOtpHash = lr.cashOtpHash;
         liveInvoice.cashOtpExpiry = lr.cashOtpExpiry;
         liveInvoice.cashRejectedAt = lr.cashRejectedAt;
         liveInvoice.cashRejectedReason = lr.cashRejectedReason;
@@ -1222,7 +1243,18 @@ async function getTenantInvoiceSummary(req, res) {
 // creates the missing entries. Safe to call multiple times (idempotent).
 async function repairMissingPayments(req, res) {
   try {
-    const paidInvoices = await RentInvoice.find({ status: 'PAID' }).lean();
+    // The route allows the 'owner' role too, but the query below had no
+    // owner filter at all — any authenticated owner could trigger a repair
+    // scan (and writes) across every OTHER owner's invoices. Superadmin/
+    // areamanager keep the platform-wide behavior this endpoint needs for them.
+    const repairFilter = { status: 'PAID' };
+    if (req.user?.role === 'owner') {
+      const ownerIds = [req.user._id];
+      const ownerDoc = req.user.loginId ? await Owner.findOne({ loginId: req.user.loginId }).select('_id').lean() : null;
+      if (ownerDoc?._id) ownerIds.push(ownerDoc._id);
+      repairFilter.ownerId = { $in: ownerIds };
+    }
+    const paidInvoices = await RentInvoice.find(repairFilter).lean();
     const Rent = require('../models/Rent');
 
     let repaired = 0;

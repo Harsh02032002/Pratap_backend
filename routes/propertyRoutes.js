@@ -27,10 +27,10 @@ router.get('/:id', optionalProtect, applyEmployeeScope, requirePropertyInScope('
 router.put('/:id', protect, authorize('superadmin'), formLimiter, auditTrail('properties'), propertyController.updateProperty);
 
 // Delete property
-router.delete('/:id', auditTrail('properties'), propertyController.deleteProperty);
+router.delete('/:id', protect, authorize('superadmin'), auditTrail('properties'), propertyController.deleteProperty);
 
 // Superadmin publishes property
-router.post('/:id/publish', formLimiter, propertyController.publishProperty);
+router.post('/:id/publish', protect, authorize('superadmin'), formLimiter, propertyController.publishProperty);
 
 // Submit property enquiry (from list.html)
 router.post('/property-enquiry/submit', formLimiter, auditTrail('properties'), propertyController.submitEnquiry);

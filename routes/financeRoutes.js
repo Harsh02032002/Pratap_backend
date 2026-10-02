@@ -2,6 +2,16 @@
 const express = require('express');
 const router = express.Router();
 const financeController = require('../controllers/financeController');
+const { protect, authorize } = require('../middleware/authMiddleware');
+
+// This entire router was previously reachable with zero authentication.
+// Confirmed only superadmin/employee/areamanager pages call it (no owner-facing
+// page uses /api/finance or /api/superadmin/finance) — gate the whole router here
+// rather than adding auth to 30 routes individually.
+// NOTE: none of the controllers below scope their queries by req.user yet (every
+// handler does an unscoped Model.find()) — that is a separate, larger follow-up
+// that needs endpoint-by-endpoint review before changing what data each role sees.
+router.use(protect, authorize('superadmin', 'areamanager', 'employee'));
 
 // Tenant routes
 router.get('/tenant/receipts', financeController.getTenantReceipts);

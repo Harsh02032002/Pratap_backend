@@ -1,7 +1,12 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 
-const getJwtSecret = () => process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026';
+const getJwtSecret = () => {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET environment variable is not set. Refusing to start with an insecure default.');
+    }
+    return process.env.JWT_SECRET;
+};
 
 exports.protect = async (req, res, next) => {
     let token = null;
@@ -9,19 +14,6 @@ exports.protect = async (req, res, next) => {
         token = req.headers.authorization.split(' ')[1];
     }
     if (!token) return res.status(401).json({ message: 'Not authorized, token missing' });
-
-    if (token.startsWith('owner_token_') || token.startsWith('demo_token_')) {
-        const loginId = req.query.ownerId || req.query.ownerLoginId || req.query.loginId || req.query.owner || 'ROOMHY3227';
-        const Owner = require('../models/Owner');
-        try {
-            const ownerDoc = await Owner.findOne({ loginId: String(loginId).toUpperCase() }).select('-password').lean();
-            req.user = ownerDoc || { loginId: String(loginId).toUpperCase(), role: 'owner' };
-            return next();
-        } catch (_) {
-            req.user = { loginId: String(loginId).toUpperCase(), role: 'owner' };
-            return next();
-        }
-    }
 
     try {
         const decoded = jwt.verify(token, getJwtSecret());

@@ -8,6 +8,7 @@ const Tenant = require('../models/Tenant');
 const ElectricityMeter = require('../models/ElectricityMeter');
 const globalConfig = require('../config/rentCollectionConfig');
 const { calculatePenalties, determinePhase, calcDaysSinceDue } = require('../engine/penaltyEngine');
+const { getAssignmentsForBillingMonthBatch } = require('./roomAssignmentService');
 
 // ─── Config priority: unit → property → owner-default → .env global ──────────
 
@@ -72,13 +73,13 @@ function escapeRegex(str) {
  *   generateMonthlyInvoices, which fetches every tenant up front — without it
  *   this re-queried the SAME tenant the caller had just read, once per invoice.
  */
-/** Does this meter reading belong to this tenant's room? Mirrors the $or below. */
-function meterMatchesTenant(meter, tenant) {
-  if (String(meter.property) !== String(tenant.property)) return false;
+/** Does this meter reading belong to this room descriptor? Mirrors the $or below. */
+function meterMatchesTenant(meter, room) {
+  if (String(meter.property) !== String(room.property)) return false;
   if (!(meter.totalBill > 0)) return false;
-  if (tenant.roomNo && meter.roomNo &&
-      String(meter.roomNo).toLowerCase() === String(tenant.roomNo).toLowerCase()) return true;
-  if (tenant.room && meter.room && String(meter.room) === String(tenant.room)) return true;
+  if (room.roomNo && meter.roomNo &&
+      String(meter.roomNo).toLowerCase() === String(room.roomNo).toLowerCase()) return true;
+  if (room.room && meter.room && String(meter.room) === String(room.room)) return true;
   return false;
 }
 
@@ -87,18 +88,27 @@ async function attachPendingElectricity(invoice, tenantId, prefetched, meterPool
     || await Tenant.findById(tenantId).select('property roomNo room').lean();
   if (!tenant?.property) return;
 
+  // Match against the room already resolved onto the invoice (historical,
+  // from RoomAssignmentHistory when available) rather than the tenant's live
+  // room — the two can differ if the tenant has since transferred again.
+  const room = {
+    property: tenant.property,
+    roomNo: invoice.roomNo || tenant.roomNo,
+    room: invoice.unitId || tenant.room,
+  };
+
   const orClause = [];
-  if (tenant.roomNo) orClause.push({ roomNo: { $regex: new RegExp(`^${escapeRegex(tenant.roomNo)}$`, 'i') } });
-  if (tenant.room) orClause.push({ room: tenant.room });
+  if (room.roomNo) orClause.push({ roomNo: { $regex: new RegExp(`^${escapeRegex(room.roomNo)}$`, 'i') } });
+  if (room.room) orClause.push({ room: room.room });
   if (!orClause.length) return;
 
   // A caller generating many invoices hands over every meter reading for the
   // month in one go, so this matches in memory rather than issuing a query per
   // tenant. Falls back to the single lookup for any other caller.
   const meter = meterPool
-    ? meterPool.find(mtr => meterMatchesTenant(mtr, tenant))
+    ? meterPool.find(mtr => meterMatchesTenant(mtr, room))
     : await ElectricityMeter.findOne({
-        property: tenant.property,
+        property: room.property,
         billingMonth: invoice.billingMonth,
         totalBill: { $gt: 0 },
         $or: orClause,
@@ -137,12 +147,17 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
   // in practice that is the difference between 90 queries and 3.
   const tenantIds = tenants.map(t => t.tenantId);
 
-  const [tenantDocs, existingInvoices] = await Promise.all([
+  const [tenantDocs, existingInvoices, assignmentByTenant] = await Promise.all([
     // property/roomNo/room are here for attachPendingElectricity, which used to
     // fetch the same tenant again for them.
     Tenant.find({ _id: { $in: tenantIds } })
       .select('name email phone moveInDate property roomNo room digitalCheckin.agreementDetails.lateFee').lean(),
     RentInvoice.find({ ownerId, billingMonth, tenantId: { $in: tenantIds } }).select('tenantId').lean(),
+    // Historical room/rent for this billing month, where a RoomAssignmentHistory
+    // row exists. A tenant absent from this map has no history yet (pre-dates
+    // the feature, or has never transferred) — fall back to their live
+    // room/rent below, which is exactly what generation already did before.
+    getAssignmentsForBillingMonthBatch(tenantIds, billingMonth),
   ]);
 
   // Every meter reading these tenants could match, in one query instead of one
@@ -179,6 +194,15 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
       const tenantDoc = tenantById.get(String(tenant.tenantId)) || null;
       const config = await configFor(tenant.propertyId, tenant.unitId);
 
+      // Historical assignment wins when one covers this billing month;
+      // otherwise fall back to whatever the caller resolved live (today's
+      // tenant.agreedRent/room) — unchanged behavior for tenants with no
+      // assignment-history rows yet.
+      const assignment = assignmentByTenant.get(String(tenant.tenantId));
+      const resolvedRentAmount = assignment ? assignment.agreedRent : tenant.rentAmount;
+      const resolvedUnitId = assignment ? assignment.roomId : tenant.unitId;
+      const resolvedRoomNo = assignment ? assignment.roomNo : (tenantDoc?.roomNo || '');
+
       const dueYear = parseInt(billingMonth.split('-')[0], 10);
       const dueMonth = parseInt(billingMonth.split('-')[1], 10) - 1; // 0-indexed
       const dueDay = config.rentDueDay || 1;
@@ -190,16 +214,17 @@ async function generateMonthlyInvoices(ownerId, billingMonth, tenants) {
         invoiceNumber,
         ownerId,
         propertyId: tenant.propertyId,
-        unitId: tenant.unitId,
+        unitId: resolvedUnitId,
+        roomNo: resolvedRoomNo,
         tenantId: tenant.tenantId,
         tenantName: tenantDoc?.name || '',
         tenantEmail: tenantDoc?.email || '',
         tenantPhone: tenantDoc?.phone || '',
         billingMonth,
-        rentAmount: tenant.rentAmount,
+        rentAmount: resolvedRentAmount,
         dueDate,
-        totalDue: tenant.rentAmount,
-        outstandingAmount: tenant.rentAmount,
+        totalDue: resolvedRentAmount,
+        outstandingAmount: resolvedRentAmount,
         penaltyConfigSnapshot: config,
       });
 

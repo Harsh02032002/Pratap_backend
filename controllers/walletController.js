@@ -201,59 +201,63 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
 };
 
 /**
+ * Shared by GET /api/wallet/admin/balance and the instant-withdraw endpoint,
+ * so there is exactly one implementation of "what is the admin's available
+ * balance" — previously withdrawAdminEarningsInstant called the route handler
+ * below through a fake req/res shim just to read one field back out of it.
+ */
+async function computeAdminBalanceMetrics() {
+  const [txTotals, bookingRequests, adminWithdrawnTotal] = await Promise.all([
+    // One $group replaces loading every PaymentTransaction into memory and
+    // running four separate reduce() passes over the array.
+    getAdminTransactionTotals(),
+    BookingRequest.find({
+      $or: [
+        { payment_status: 'completed' },
+        { paymentStatus: 'PAID' },
+        { booking_status: 'confirmed' },
+        { status: 'completed' }
+      ]
+    }).lean(),
+    sumField(PayoutRequest, { user_type: 'admin', status: 'SUCCESS' }, 'amount')
+  ]);
+
+  let totalRevenue = txTotals.totalRevenue;
+  let totalCommission = txTotals.totalCommission;
+
+  // Fallback when PaymentTransaction rows are sparse: derive revenue from
+  // booking requests instead. Deliberately still summed in JS — the
+  // `|| 2500` chain treats 0 as absent, which $ifNull does not, so an
+  // aggregation would not be exactly equivalent. This branch only runs when
+  // it beats the transaction total, and BookingRequest volume is far smaller.
+  if (bookingRequests.length > 0) {
+    const bRevenue = bookingRequests.reduce((acc, b) => acc + (b.total_amount || b.rent_amount || b.bid_amount || 2500), 0);
+    const bCommission = Math.round(bRevenue * 0.05);
+    if (bRevenue > totalRevenue) totalRevenue = bRevenue;
+    if (bCommission > totalCommission) totalCommission = bCommission;
+  }
+
+  const totalOwnerHeld = txTotals.totalOwnerHeld;
+  const totalOwnerAvailable = txTotals.totalOwnerAvailable;
+
+  const totalAdminWithdrawn = adminWithdrawnTotal;
+  const availableAdminBalance = Math.max(0, totalCommission - totalAdminWithdrawn);
+
+  return { totalRevenue, totalCommission, totalOwnerHeld, totalOwnerAvailable, totalAdminWithdrawn, availableAdminBalance };
+}
+
+/**
  * GET /api/wallet/admin/balance
  * Returns total platform commission collected, total admin withdrawn, and available admin earnings.
  */
 exports.getAdminWalletBalance = async (req, res) => {
   try {
-    const [txTotals, bookingRequests, adminWithdrawnTotal] = await Promise.all([
-      // One $group replaces loading every PaymentTransaction into memory and
-      // running four separate reduce() passes over the array.
-      getAdminTransactionTotals(),
-      BookingRequest.find({
-        $or: [
-          { payment_status: 'completed' },
-          { paymentStatus: 'PAID' },
-          { booking_status: 'confirmed' },
-          { status: 'completed' }
-        ]
-      }).lean(),
-      sumField(PayoutRequest, { user_type: 'admin', status: 'SUCCESS' }, 'amount')
-    ]);
-
-    let totalRevenue = txTotals.totalRevenue;
-    let totalCommission = txTotals.totalCommission;
-
-    // Fallback when PaymentTransaction rows are sparse: derive revenue from
-    // booking requests instead. Deliberately still summed in JS — the
-    // `|| 2500` chain treats 0 as absent, which $ifNull does not, so an
-    // aggregation would not be exactly equivalent. This branch only runs when
-    // it beats the transaction total, and BookingRequest volume is far smaller.
-    if (bookingRequests.length > 0) {
-      const bRevenue = bookingRequests.reduce((acc, b) => acc + (b.total_amount || b.rent_amount || b.bid_amount || 2500), 0);
-      const bCommission = Math.round(bRevenue * 0.05);
-      if (bRevenue > totalRevenue) totalRevenue = bRevenue;
-      if (bCommission > totalCommission) totalCommission = bCommission;
-    }
-
-    const totalOwnerHeld = txTotals.totalOwnerHeld;
-    const totalOwnerAvailable = txTotals.totalOwnerAvailable;
-
-    const totalAdminWithdrawn = adminWithdrawnTotal;
-    const availableAdminBalance = Math.max(0, totalCommission - totalAdminWithdrawn);
-
+    const metrics = await computeAdminBalanceMetrics();
     const history = await PayoutRequest.find({ user_type: 'admin' }).sort({ createdAt: -1 }).lean();
 
     return res.json({
       success: true,
-      metrics: {
-        totalRevenue,
-        totalCommission,
-        totalOwnerHeld,
-        totalOwnerAvailable,
-        totalAdminWithdrawn,
-        availableAdminBalance
-      },
+      metrics,
       payoutHistory: history
     });
   } catch (err) {
@@ -275,12 +279,12 @@ exports.withdrawAdminEarningsInstant = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter a valid withdrawal amount' });
     }
 
-    const balanceRes = await exports.getAdminWalletBalance(req, {
-      json: (data) => data,
-      status: () => ({ json: (data) => data })
-    });
-
-    const availableAdmin = balanceRes?.metrics?.availableAdminBalance || 0;
+    // Was: re-running the whole getAdminWalletBalance route handler through a
+    // fake req/res shim just to read one field back — which also redid a
+    // PayoutRequest history fetch this withdrawal never needed. Call the
+    // shared computation directly (same booking-fallback logic included, so
+    // this stays exactly the same number getAdminWalletBalance would show).
+    const { availableAdminBalance: availableAdmin } = await computeAdminBalanceMetrics();
     if (numAmount > availableAdmin) {
       return res.status(400).json({
         success: false,

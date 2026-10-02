@@ -51,6 +51,7 @@ const mongoose = require('mongoose');
 const Owner = require('../models/Owner');
 const Property = require('../models/Property');
 const User = require('../models/user');
+const Employee = require('../models/Employee');
 const CronHealth = require('../models/CronHealth');
 const { acquireLock, releaseLock } = require('../services/cronLockService');
 const { normalizeLoginId } = require('../utils/normalizeId');
@@ -69,6 +70,9 @@ const OWNER_PAGE_SIZE = 200;
 // Ceiling on tenants pulled per owner for the electricity backfill, so one
 // very large owner cannot dominate a run.
 const TENANTS_PER_OWNER_CAP = 2000;
+// Ceiling on unassigned pending properties resolved per run of the
+// employee-assignment heal below.
+const MAX_PENDING_ASSIGNMENTS_PER_RUN = 5000;
 
 /** Placeholder values that mean "this property has no real owner link yet". */
 const UNLINKED_SELECTOR = {
@@ -236,6 +240,116 @@ async function healOwnerProperties(loginId, opts = {}) {
 }
 
 /**
+ * Auto-assign unassigned pending/pending_approval properties to an active
+ * Employee matching their city/area.
+ *
+ * This used to run inline inside GET /api/properties (getAllProperties),
+ * looping over the current page and issuing up to 3 Employee lookups plus a
+ * `property.save()` per unassigned property — a write, inside a GET, capable
+ * of ~4,000 extra queries on a single request when the page was large. It now
+ * runs here instead: batched, off the request path, with one Employee
+ * resolution per unique (city, area) pair rather than one per property.
+ *
+ * @returns {Promise<{scanned: number, assigned: number, failed: number}>}
+ */
+async function healPendingPropertyAssignments() {
+  const stats = { scanned: 0, assigned: 0, failed: 0 };
+
+  if (mongoose.connection.readyState !== 1) {
+    console.warn(`[${JOB_NAME}] DB not connected — skipping employee-assignment heal`);
+    return stats;
+  }
+
+  const query = {
+    isDeleted: { $ne: true },
+    status: { $in: ['pending_approval', 'pending'] },
+    $or: [{ assignedToName: { $exists: false } }, { assignedToName: '' }, { assignedToName: null }],
+  };
+
+  // Cache resolved employees per (city, area) pair so properties sharing a
+  // pair only trigger one set of Employee lookups, not one each.
+  const employeeCache = new Map();
+  const resolveEmployee = async (city, area) => {
+    const cacheKey = `${city}\u0000${area}`;
+    if (employeeCache.has(cacheKey)) return employeeCache.get(cacheKey);
+
+    let emp = null;
+    if (city) {
+      if (area) {
+        emp = await Employee.findOne({ city: new RegExp(`^${city}$`, 'i'), area: new RegExp(`^${area}$`, 'i'), isActive: true }).select('_id name email phone loginId').lean();
+        if (!emp) emp = await Employee.findOne({ city: new RegExp(`^${city}$`, 'i'), area: new RegExp(area, 'i'), isActive: true }).select('_id name email phone loginId').lean();
+      }
+      if (!emp) {
+        emp = await Employee.findOne({ city: new RegExp(`^${city}$`, 'i'), isActive: true }).select('_id name email phone loginId').lean();
+      }
+    }
+    employeeCache.set(cacheKey, emp);
+    return emp;
+  };
+
+  const cursor = withReadDeadline(
+    Property.find(query)
+      .select('_id city area locality')
+      .limit(MAX_PENDING_ASSIGNMENTS_PER_RUN),
+    'job',
+  )
+    .lean()
+    .cursor({ batchSize: BATCH_SIZE });
+
+  let ops = [];
+  const flush = async () => {
+    if (ops.length === 0) return;
+    const pending = ops;
+    ops = [];
+    try {
+      const result = await Property.bulkWrite(pending, { ordered: false });
+      stats.assigned += result.modifiedCount || 0;
+    } catch (err) {
+      const applied = err.result?.nModified ?? err.result?.result?.nModified ?? 0;
+      stats.assigned += applied;
+      stats.failed += pending.length - applied;
+      console.error(`[${JOB_NAME}] employee-assignment bulkWrite partial failure: ${err.message}`);
+    }
+  };
+
+  try {
+    for (let prop = await cursor.next(); prop != null; prop = await cursor.next()) {
+      stats.scanned += 1;
+      const city = (prop.city || 'Jaipur').trim();
+      const area = (prop.area || prop.locality || '').trim();
+      const emp = await resolveEmployee(city, area);
+      if (!emp) continue;
+
+      ops.push({
+        updateOne: {
+          filter: { _id: prop._id },
+          update: {
+            $set: {
+              assignedTo: emp._id,
+              assignedToName: emp.name,
+              assignedToEmail: emp.email || '',
+              assignedToPhone: emp.phone || '',
+              assignedToLoginId: emp.loginId || '',
+              updatedAt: new Date(),
+            },
+          },
+        },
+      });
+      if (ops.length >= BATCH_SIZE) await flush();
+    }
+    await flush();
+  } finally {
+    await cursor.close().catch(() => { });
+  }
+
+  if (stats.assigned > 0 || stats.failed > 0) {
+    console.log(`[${JOB_NAME}] employee-assignment heal: scanned=${stats.scanned} assigned=${stats.assigned} failed=${stats.failed}`);
+  }
+
+  return stats;
+}
+
+/**
  * Sweep every owner. Lock-guarded so only one instance runs it, and paged so
  * the owner list is never loaded whole.
  */
@@ -259,10 +373,19 @@ async function runOwnerPropertyHealJob() {
     // Health tracking is best-effort — never let it stop the actual repair.
   }
 
-  const totals = { owners: 0, scanned: 0, repaired: 0, skipped: 0, failed: 0, ownersFailed: 0, invoiceHealFailed: 0, moveInHealFailed: 0, electricityHealFailed: 0 };
+  const totals = { owners: 0, scanned: 0, repaired: 0, skipped: 0, failed: 0, ownersFailed: 0, invoiceHealFailed: 0, moveInHealFailed: 0, electricityHealFailed: 0, employeeAssignmentFailed: 0 };
 
   try {
     console.log(`[${JOB_NAME}] Job started at ${startedAt.toISOString()}`);
+
+    // Not owner-specific, so it runs once per sweep rather than once per
+    // owner. Isolated so a failure here can't abort the owner-linkage repair.
+    try {
+      await healPendingPropertyAssignments();
+    } catch (err) {
+      totals.employeeAssignmentFailed += 1;
+      console.error(`[${JOB_NAME}] employee-assignment heal failed: ${err.message}`);
+    }
 
     let skip = 0;
     let budget = MAX_PROPERTIES_PER_RUN;
@@ -357,7 +480,7 @@ async function runOwnerPropertyHealJob() {
       `owners=${totals.owners} scanned=${totals.scanned} repaired=${totals.repaired} ` +
       `skipped=${totals.skipped} failed=${totals.failed} ownersFailed=${totals.ownersFailed} ` +
       `invoiceHealFailed=${totals.invoiceHealFailed} moveInHealFailed=${totals.moveInHealFailed} ` +
-      `electricityHealFailed=${totals.electricityHealFailed}`
+      `electricityHealFailed=${totals.electricityHealFailed} employeeAssignmentFailed=${totals.employeeAssignmentFailed}`
     );
 
     if (health) {
@@ -430,6 +553,7 @@ function registerOwnerPropertyHealJob() {
 module.exports = {
   JOB_NAME,
   healOwnerProperties,
+  healPendingPropertyAssignments,
   runOwnerPropertyHealJob,
   ensureDailyOwnerPropertyHeal,
   registerOwnerPropertyHealJob,

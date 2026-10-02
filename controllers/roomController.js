@@ -501,23 +501,46 @@ exports.getRoomsByOwner = async (req, res) => {
 
         const propertyFilter = { ownerLoginId: normalizedOwnerId, isDeleted: { $ne: true } };
         if (propertyId) propertyFilter._id = propertyId;
-        const properties = await Property.find(propertyFilter).lean();
+        // Only the _id is used below to build propertyIds — no need to pull
+        // every field of every matching Property document (was T-5).
+        const properties = await Property.find(propertyFilter).select('_id').lean();
 
         const propertyIds = properties.map(p => p._id);
-        
+
         let rooms = [];
         const propertyTotals = {};
 
         if (limit > 0) {
-            // Fetch limited rooms per property
+            // Single aggregation instead of the old per-property find+count loop
+            // (was T-6 — 2 queries × N properties; an owner with 50 properties
+            // meant 100 queries here alone). `limit` still caps rooms PER
+            // property, matching the previous behavior exactly, since callers
+            // (e.g. website room-fallback lookups) rely on getting every room
+            // of the property they actually care about even when the owner has
+            // many other properties ahead of it.
+            const grouped = await Room.aggregate([
+                { $match: { property: { $in: propertyIds }, isDeleted: { $ne: true } } },
+                { $group: { _id: '$property', rooms: { $push: '$$ROOT' }, total: { $sum: 1 } } },
+                { $project: { rooms: { $slice: ['$rooms', limit] }, total: 1 } }
+            ]);
+
+            const propsForTitles = await Property.find({ _id: { $in: propertyIds } }).select('title').lean();
+            const propertyTitleMap = {};
+            for (const p of propsForTitles) propertyTitleMap[p._id.toString()] = p.title;
+
+            for (const group of grouped) {
+                const propIdStr = group._id.toString();
+                for (const r of group.rooms) {
+                    r.property = { _id: group._id, title: propertyTitleMap[propIdStr] || '' };
+                }
+                rooms.push(...group.rooms);
+                propertyTotals[propIdStr] = group.total;
+            }
+            // A property with zero matching rooms never appears in `grouped` —
+            // still report total: 0 for it, matching the old countDocuments result.
             for (const propId of propertyIds) {
-                const propRooms = await Room.find({ property: propId, isDeleted: { $ne: true } })
-                                            .populate('property', 'title')
-                                            .limit(limit)
-                                            .lean();
-                const total = await Room.countDocuments({ property: propId, isDeleted: { $ne: true } });
-                rooms.push(...propRooms);
-                propertyTotals[propId.toString()] = total;
+                const key = propId.toString();
+                if (!(key in propertyTotals)) propertyTotals[key] = 0;
             }
         } else {
             // Fetch all rooms
@@ -838,9 +861,34 @@ exports.getAllRooms = async (req, res) => {
             .sort({ createdAt: -1 })
             .lean();
 
+        // Scoped by the same employee/owner property-scope as the room stats
+        // below (was T-7 — this used to be a bare, unscoped Tenant.find()
+        // covering every active/pending tenant on the entire platform, on
+        // every paginated request, regardless of how narrow the caller's own
+        // scope actually is).
+        const activeRoomQuery = applyRoomScope(req, { isDeleted: { $ne: true } });
+        const allActiveRooms = await Room.find(activeRoomQuery)
+            .select('_id beds capacity totalBeds bedAssignments property title number roomNo status')
+            .lean();
+        const scopedPropertyIds = [...new Set(
+            allActiveRooms
+                .map(r => String(r.property?._id || r.property || ''))
+                .filter(Boolean)
+        )];
+
         const activeTenantsAll = await Tenant.find({
             status: { $in: ['active', 'pending'] },
-            isDeleted: { $ne: true }
+            isDeleted: { $ne: true },
+            // A tenant with no `property` set is never excluded by the
+            // per-room property check below (it falls through to the roomNo
+            // fallback match regardless of property) — keep those in the pool
+            // so this scoping only ever removes tenants confirmed to belong
+            // to a property outside the caller's scope, never ambiguous ones.
+            $or: [
+                { property: { $in: scopedPropertyIds } },
+                { property: { $exists: false } },
+                { property: null }
+            ]
         }).select('_id name loginId property room roomNo bedNo createdAt').lean();
 
         // Helper to populate room bedAssignments
@@ -881,9 +929,8 @@ exports.getAllRooms = async (req, res) => {
 
         populateRoomAssignments(rooms);
 
-        // Calculate statistics across active rooms (scoped for employees)
-        const activeRoomQuery = applyRoomScope(req, { isDeleted: { $ne: true } });
-        const allActiveRooms = await Room.find(activeRoomQuery).lean();
+        // Calculate statistics across active rooms (scoped for employees) —
+        // allActiveRooms was already fetched above, alongside activeTenantsAll.
         populateRoomAssignments(allActiveRooms);
         
         let totalRoomsCount = allActiveRooms.length;
@@ -931,35 +978,7 @@ exports.getAllRooms = async (req, res) => {
     }
 };
 
-exports.bulkDeleteRooms = async (req, res) => {
-  try {
-    const { roomIds } = req.body;
-    if (!Array.isArray(roomIds) || roomIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'roomIds array is required' });
-    }
-    await Room.deleteMany({ _id: { $in: roomIds } });
-    return res.json({ success: true, message: `${roomIds.length} rooms deleted successfully` });
-  } catch (err) {
-    console.error('bulkDeleteRooms error:', err);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
 
-exports.bulkToggleRoomStatus = async (req, res) => {
-  try {
-    const { roomIds, status } = req.body;
-    if (!Array.isArray(roomIds) || roomIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'roomIds array is required' });
-    }
-    await Room.updateMany({ _id: { $in: roomIds } }, { $set: { status: status || 'inactive' } });
-    return res.json({ success: true, message: `${roomIds.length} rooms updated to status '${status || 'inactive'}'` });
-  } catch (err) {
-    console.error('bulkToggleRoomStatus error:', err);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// ══ BULK: CREATE ROOMS ════════════════════════════════════════════════════════
 exports.bulkCreateRooms = async (req, res) => {
   try {
     const { propertyId, rooms: roomItems, ownerLoginId } = req.body;
@@ -1072,4 +1091,4 @@ exports.bulkToggleRoomStatus = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
-
+

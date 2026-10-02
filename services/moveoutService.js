@@ -44,13 +44,19 @@ function isOnNotice(tenant) {
  * re-run or a manual trigger racing the job cannot double-release a bed that
  * has since been assigned to somebody new.
  */
-async function completeMoveout(tenant) {
+async function completeMoveout(tenant, opts = {}) {
     if (!tenant || tenant.moveoutRequest?.completedAt) return false;
 
     // Release the bed so the room shows as vacant again. Mirrors the cleanup
     // that DELETE /api/tenants/:id already performs.
     const tenantId = String(tenant._id);
-    const rooms = await Room.find({ 'bedAssignments.tenantId': tenant._id });
+    // completeElapsedNotices batch-fetches rooms for every due tenant in one
+    // query and passes them in via opts.rooms — avoids the N+1 of this
+    // function querying Room per tenant when called from a sweep (was T-17).
+    // Falls back to the original per-call query for any other caller.
+    const rooms = opts.rooms
+        ? opts.rooms.filter((r) => Array.isArray(r.bedAssignments) && r.bedAssignments.some((a) => a?.tenantId && String(a.tenantId) === tenantId))
+        : await Room.find({ 'bedAssignments.tenantId': tenant._id });
     for (const room of rooms) {
         room.bedAssignments = room.bedAssignments.map((assignment) => {
             if (assignment?.tenantId && String(assignment.tenantId) === tenantId) return {};
@@ -89,10 +95,18 @@ async function completeElapsedNotices(now = new Date()) {
         isDeleted: { $ne: true }
     });
 
+    if (due.length === 0) return [];
+
+    // One query for every due tenant's rooms instead of completeMoveout
+    // running Room.find() per tenant (was T-17).
+    const relevantRooms = await Room.find({
+        'bedAssignments.tenantId': { $in: due.map((t) => t._id) }
+    });
+
     const completed = [];
     for (const tenant of due) {
         try {
-            if (await completeMoveout(tenant)) completed.push(tenant);
+            if (await completeMoveout(tenant, { rooms: relevantRooms })) completed.push(tenant);
         } catch (err) {
             console.error(`❌ Move-out completion failed for ${tenant.loginId}:`, err.message);
         }
