@@ -729,6 +729,20 @@ exports.sendMessage = async (req, res) => {
 
     // Run AI & Regex moderation on all non-system 1:1 messages
     if (from_login_id !== 'system') {
+      try {
+        const fcmService = require('../services/fcmService');
+        fcmService.sendToUser(to_login_id, {
+          title: `💬 New message from ${senderName || 'Roomhy User'}`,
+          body: String(maskedText || '').substring(0, 150),
+          icon: '/pwa-192x192.png',
+          clickAction: '/website/chat',
+          data: {
+            type: 'chat_message',
+            senderId: from_login_id
+          }
+        }).catch(() => {});
+      } catch (_) {}
+
       const { moderateChatMessageAsync } = require('../utils/moderationHelper');
       moderateChatMessageAsync(msg, to_login_id).catch(err => {
         console.error('Error running async moderation (REST):', err.message);

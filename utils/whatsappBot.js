@@ -222,7 +222,8 @@ async function sendWhatsAppPayload(payload) {
         body: JSON.stringify({
             messaging_product: 'whatsapp',
             ...payload
-        })
+        }),
+        signal: AbortSignal.timeout(10000)
     });
 
     if (!response.ok) {

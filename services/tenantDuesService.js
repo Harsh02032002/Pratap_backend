@@ -263,7 +263,7 @@ function isEligibleForBillingMonth(tenant, billingMonth) {
  * both the split and the count for that month — see isEligibleForBillingMonth.
  * They become eligible starting the month after they moved in.
  */
-async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord) {
+async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord, options = {}) {
   const allTenants = await findAllTenantsInRoom(propertyId, roomNo);
   if (!allTenants.length) return { synced: false, reason: 'no_tenant' };
 
@@ -279,7 +279,7 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
     let invoice = await RentInvoice.findOne({
       tenantId: tenant._id,
       billingMonth,
-    });
+    }, null, options);
 
     if (!invoice) {
       const ownerUserId = await resolveOwnerUserId(tenant);

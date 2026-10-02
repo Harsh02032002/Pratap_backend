@@ -167,12 +167,25 @@ function detectViolation(text, settings = {}) {
 
   // Exemption for short conversational chatter (< 6 words) without explicit phone/email/links/digits
   const trimmed = text.trim();
-  const words = trimmed.split(/\s+/);
-  const isShortChatter = words.length <= 6;
-  const shortExemptPattern = /^\s*"?\s*(de|naa|na|paise|paisa|yahan|yaan|ha|haa|haan|thik|theek|bhej|bhejo|dena|karo|kro|hi|hello|ok|okay|aata|aaya|bhai|sir|mam|rent|room|ac|non ac|single|double|sharing|mil|baat|kaise|ho|acha|achha|batao|chahiye|mileyga|milraha|kab|kitna|haan|ji|yes|no|theek|hai|hain|karta|karti|kar|kri|lega|lenge|di|dunga|deta|deti|please|thanks|thank|you|welcome|bye|goodbye|morning|evening|night|afternoon|suno|sunna|bol|bolo|sunai|sunao|acha|achhi|badhi|badi|chota|choti|kam|zyada|kam|kum|jaldi|deri|abhi|ab|kal|parso|aaj|kal|pehle|baad|mein|mere|tumhare|uski|unki|sab|kuch|koi|kuch|bhi|nahi|na|to|fir|phir|lekin|magar|ya|aur|ki|ka|ke|ko|se|pe|par|mein|tum|main|hum|aap|tu|tera|mera|tumhara|hamara|uska|unki|unke|in|is|it|us|un|ye|wo|vah|ve|yeh|woh|kya|kyun|kaise|kahan|kidhar|kab|kaun|kaunsi|kaunse|kitna|kitne|kitni|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi|kaisa|kaise|kaisi)\s*"?\s*$/i;
+  // Strip emojis, pipes, and special symbols for clean pattern evaluation
+  const cleanWordsText = trimmed
+    .replace(/[\u{1F300}-\u{1F9FF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, '')
+    .replace(/[|\\/._\-#@!$%^&*()+=~`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
+  const words = (cleanWordsText || trimmed).split(/\s+/).filter(Boolean);
+  const isShortChatter = words.length <= 6;
   const hasDigitsOrUrl = /\d{5,}|http|www|\.com|@/.test(trimmed);
-  if (isShortChatter && !hasDigitsOrUrl && shortExemptPattern.test(trimmed)) {
+
+  // If text contains ONLY emojis or symbols, it is 100% safe chatter
+  if (!cleanWordsText && !hasDigitsOrUrl) {
+    return { violation: null, maskedText: text };
+  }
+
+  const shortExemptPattern = /^(de|naa|na|paise|paisa|yahan|yaan|ha|haa|haan|thik|theek|bhej|bhejo|dena|karo|kro|hi|hello|ok|okay|aata|aaya|bhai|sir|mam|maam|madam|rent|room|ac|non ac|single|double|sharing|mil|baat|kaise|ho|acha|achha|batao|chahiye|mileyga|milraha|kab|kitna|haan|ji|yes|no|theek|hai|hain|karta|karti|kar|kri|lega|lenge|di|dunga|deta|deti|please|thanks|thank|you|welcome|bye|goodbye|morning|evening|night|afternoon|suno|sunna|bol|bolo|sunai|sunao|acha|achhi|badhi|badi|chota|choti|kam|zyada|kam|kum|jaldi|deri|abhi|ab|kal|parso|aaj|kal|pehle|baad|mein|mere|tumhare|uski|unki|sab|kuch|koi|kuch|bhi|nahi|na|to|fir|phir|lekin|magar|ya|aur|ki|ka|ke|ko|se|pe|par|mein|tum|main|hum|aap|tu|tera|mera|tumhara|hamara|uska|unki|unke|in|is|it|us|un|ye|wo|vah|ve|yeh|woh|kya|kyun|kaise|kahan|kidhar|kab|kaun|kaunsi|kaunse|kitna|kitne|kitni|kaise|kaisi|kaisa|\s)+$/i;
+
+  if (isShortChatter && !hasDigitsOrUrl && shortExemptPattern.test(cleanWordsText)) {
     return { violation: null, maskedText: text };
   }
 

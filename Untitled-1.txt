@@ -1,0 +1,3 @@
+# 
+
+{"success":true,"service":"roomhy-backend","env":"production","timestamp":"2026-09-28T20:01:49.337Z","database":"connected","cache":{"total":0,"byCategory":{}},"timeouts":{"requestsDeadlineExceeded":0,"poolWaitTimeouts":0,"serverSelectionTimeouts":0,"queryTimeouts":0,"clientAborted":0},"pool":{"created":16,"closed":0,"checkedOut":0,"checkOutFailed":0,"poolCleared":0,"peakCheckedOut":10,"lastCheckOutFailureAt":null,"maxPoolSize":10,"saturated":false}}

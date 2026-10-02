@@ -43,7 +43,8 @@ async function sendOTP_MSG91(phone, otp) {
             headers: {
                 'authkey': MSG91_AUTH_KEY,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 10000
         });
 
         console.log('MSG91 Response:', response.data);
@@ -75,7 +76,8 @@ async function sendOTP_Fast2SMS(phone, otp) {
             headers: {
                 'authorization': FAST2SMS_API_KEY,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 10000
         });
 
         console.log('Fast2SMS Response:', response.data);
@@ -120,7 +122,8 @@ async function sendOTP_Twilio(phone, otp, purpose = 'verification') {
             },
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
-            }
+            },
+            timeout: 10000
         });
 
         console.log(`Twilio ${channel} OTP sent:`, response.data?.sid || 'ok');

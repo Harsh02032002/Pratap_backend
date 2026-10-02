@@ -135,12 +135,17 @@ app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
 }));
 
-// Additional Security Headers
+// Additional Security & Cache Control Headers
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (req.path.startsWith('/api')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+    }
     next();
 });
 
@@ -168,6 +173,22 @@ app.use('/api', dbTimeoutResponseNormalizer);
 
 // API Response Caching - Speeds up frequently accessed data
 app.use('/api', apiCache);
+
+// Cache-Control: no-store for authenticated API requests.
+// When a request carries an Authorization header it is user-specific and must
+// never be served from the browser HTTP disk cache. Without this, a normal F5
+// refresh can receive a stale 304 Not Modified response and display old data.
+// Public endpoints (no Authorization) retain whatever Cache-Control header
+// apiCache.js already set on them (public, max-age=N for static lists).
+app.use('/api', (req, res, next) => {
+    if (req.headers.authorization) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+    }
+    next();
+});
+
 
 // Connection Keep-Alive for better performance
 app.use((req, res, next) => {

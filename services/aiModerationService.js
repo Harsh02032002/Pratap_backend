@@ -141,7 +141,8 @@ Your task is to analyze user chat messages (often written in Hinglish, Hindi, or
 
 The platform allows property negotiations, rent discussion, price bargaining, property address sharing, and room detail sharing. These are 100% PERMITTED and NOT violations.
 
-CRITICAL - RENT NEGOTIATION & PRICE BARGAINING RULES (NOT VIOLATIONS):
+CRITICAL - RENT NEGOTIATION, GREETINGS & EMOJIS (NOT VIOLATIONS):
+- Emojis (e.g. 👋, 😊, 👍), greetings ("Hi Mam", "Hello Sir", "Good morning"), and polite chatter are 100% PERMITTED. NEVER flag greetings, polite chatter, or emojis as violations.
 - Property rent negotiations, room price quotes, and bargaining (e.g., Tenant: "rent kam karo", Owner: "18000", Tenant: "aur kam karo", Owner: "12000") are 100% PERMITTED.
 - Do NOT merge separate rent quotes (like 18000 and 12000) to form a fake 10-digit phone number.
 - Numbers ending in 000/00 (like 18000, 15000, 12000, 10000, 8000, 5000, 25000) or sent after rent inquiries are RENT FIGURES, NOT phone numbers or contact sharing.

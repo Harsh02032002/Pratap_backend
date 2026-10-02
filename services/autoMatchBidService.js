@@ -133,6 +133,21 @@ async function notifyMatchingBidsForNewProperty(propertyDoc) {
                         console.warn('Failed auto-match WhatsApp:', wErr.message);
                     }
                 }
+
+                // 4. FCM Push Notification to Tenant
+                try {
+                    const fcmService = require('./fcmService');
+                    await fcmService.sendToUser(bid.user_id, {
+                        title: '🔔 New Matching Property Found!',
+                        body: `${propertyName} in ${area || city} (Rent: ₹${rent.toLocaleString('en-IN')}) matches your bid requirement!`,
+                        icon: '/pwa-192x192.png',
+                        clickAction: '/website/ourproperty',
+                        data: {
+                            type: 'bid_auto_match',
+                            propertyName
+                        }
+                    });
+                } catch (_) {}
             }
         }
 
