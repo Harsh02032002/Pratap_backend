@@ -42,7 +42,14 @@ const resetTimeoutCounters = () => {
   for (const k of Object.keys(counters)) counters[k] = 0;
 };
 
-const isExempt = (path) => DEADLINE_EXEMPT_PREFIXES.some((p) => path.startsWith(p));
+// Per-owner SSE streams live at /api/owners/:loginId/stream — a prefix list
+// cannot express that, and '/api/sse' never matched them. Without this every
+// stream tripped the deadline after 10s (harmlessly, headers were already sent,
+// but each one counted as a requestsDeadlineExceeded and logged a warning).
+const SSE_STREAM_SUFFIX = /\/stream\/?$/;
+
+const isExempt = (path) =>
+  DEADLINE_EXEMPT_PREFIXES.some((p) => path.startsWith(p)) || SSE_STREAM_SUFFIX.test(path);
 
 /**
  * The path the exemption list is written against.

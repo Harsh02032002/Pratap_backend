@@ -10,7 +10,14 @@ function requestHardening(req, res, next) {
 }
 
 module.exports = {
-    compressionMiddleware: compression(),
+    compressionMiddleware: compression({
+        filter: (req, res) => {
+            if (req.headers['accept'] === 'text/event-stream' || (req.path && req.path.endsWith('/stream'))) {
+                return false;
+            }
+            return compression.filter(req, res);
+        }
+    }),
     hppMiddleware: hpp(),
     mongoSanitizeMiddleware: (req, res, next) => {
         const options = { replaceWith: '_' };

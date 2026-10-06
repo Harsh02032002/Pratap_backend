@@ -132,7 +132,8 @@ router.post('/signup/request-otp', otpIpLimiter, otpLimiter, captchaProtection({
             renderOtpHtml(firstName, otp)
         );
 
-        // Send WhatsApp OTP
+        /*
+        // ─── WHATSAPP & SMS OTP (DISABLED - UNCOMMENT TO REACTIVATE) ──────────────
         const formattedPhone = formatPhoneNumber(phone);
         try {
             const whatsappSent = await mailer.sendDirectWhatsAppOtp(formattedPhone, otp);
@@ -153,18 +154,16 @@ router.post('/signup/request-otp', otpIpLimiter, otpLimiter, captchaProtection({
         }).catch(err => {
             console.error('SMS OTP error:', err.message);
         });
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         return res.json({
             success: true,
-            message: delivery.email && (delivery.whatsapp || delivery.sms)
-                ? 'Verification code sent to your email and mobile'
-                : delivery.email
-                ? 'Verification code sent to your email. Mobile OTP may take a moment.'
-                : (delivery.whatsapp || delivery.sms)
-                ? 'Verification code sent to your mobile'
-                : 'Verification code generated, but email/mobile delivery failed. Please check server config.',
+            message: delivery.email
+                ? 'Verification code sent to your email. Please check your inbox and spam folder.'
+                : 'Verification code generated, but email delivery failed. Please check server config.',
             channels: delivery,
-            ...(process.env.NODE_ENV === 'development' && { demoOtp: otp })
+            ...(process.env.NODE_ENV === 'development' && { demoOtp: otp, demo_otp: otp })
         });
     } catch (error) {
         console.error('signup/request-otp error:', error);
@@ -348,7 +347,8 @@ router.post('/login/request-otp', otpIpLimiter, otpLimiter, captchaProtection({ 
             renderLoginOtpHtml(signup.firstName || user.name, otp)
         );
 
-        // Send WhatsApp OTP
+        /*
+        // ─── WHATSAPP & SMS OTP (DISABLED - UNCOMMENT TO REACTIVATE) ──────────────
         if (user.phone) {
             const formattedPhone = formatPhoneNumber(user.phone);
             try {
@@ -371,18 +371,16 @@ router.post('/login/request-otp', otpIpLimiter, otpLimiter, captchaProtection({ 
                 console.error('Login SMS OTP error:', err.message);
             });
         }
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         return res.json({
             success: true,
-            message: delivery.email && (delivery.whatsapp || delivery.sms)
-                ? 'Login verification code sent to your email and mobile'
-                : delivery.email
-                ? 'Login verification code sent to your email. Mobile OTP may take a moment.'
-                : (delivery.whatsapp || delivery.sms)
-                ? 'Login verification code sent to your mobile'
-                : 'Verification code generated, but email/mobile delivery failed. Please check server config.',
+            message: delivery.email
+                ? 'Login verification code sent to your email. Please check your inbox and spam folder.'
+                : 'Login verification code generated, but email delivery failed. Please check server config.',
             channels: delivery,
-            ...(process.env.NODE_ENV === 'development' && { demoOtp: otp })
+            ...(process.env.NODE_ENV === 'development' && { demoOtp: otp, demo_otp: otp })
         });
     } catch (error) {
         console.error('login/request-otp error:', error);

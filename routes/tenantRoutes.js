@@ -572,6 +572,30 @@ router.post(
                 submittedAt: new Date()
             };
             await tenant.save();
+
+            // Notify owner about tenant move-out notice via In-App + FCM Push
+            if (tenant.ownerLoginId) {
+                try {
+                    const Notification = require('../models/Notification');
+                    await Notification.create({
+                        toLoginId: tenant.ownerLoginId,
+                        toRole: 'owner',
+                        from: tenant.name || 'Tenant',
+                        title: '🚨 Tenant Move-Out Notice Submitted',
+                        message: `Tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) has submitted a move-out notice for ${new Date(requestedDate).toLocaleDateString('en-IN')}.`,
+                        type: 'moveout_notice',
+                        read: false
+                    }).catch(() => {});
+
+                    const fcmService = require('../services/fcmService');
+                    fcmService.sendToUser(tenant.ownerLoginId, {
+                        title: '🚨 Move-Out Notice Received',
+                        body: `Tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) has submitted a notice to vacate on ${new Date(requestedDate).toLocaleDateString('en-IN')}.`,
+                        data: { type: 'moveout_notice', tenantId: String(tenant._id) }
+                    }).catch(() => {});
+                } catch (_) {}
+            }
+
             res.json({ success: true, moveoutRequest: tenant.moveoutRequest });
         } catch (err) {
             res.status(500).json({ message: err.message });

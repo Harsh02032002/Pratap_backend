@@ -383,6 +383,15 @@ const agreementRenewalSchedule = cron.schedule('0 9 * * *', async () => {
                         meta: { title: `🚨 Tenant ${tenant.name} — Agreement Expired`, message: `Tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) agreement has expired and grace period is over. They have been marked inactive. Please renew or process moveout.` },
                         read: false
                     });
+
+                    try {
+                        const fcmService = require('./fcmService');
+                        await fcmService.sendToUser(tenant.ownerLoginId, {
+                            title: `🚨 Tenant ${tenant.name} — Agreement Expired`,
+                            body: `Tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) agreement has expired and grace period is over. Tap to review.`,
+                            data: { type: 'agreement_expired', tenantId: String(tenant._id) }
+                        }).catch(() => {});
+                    } catch (_) {}
                 }
 
                 // Send email to tenant

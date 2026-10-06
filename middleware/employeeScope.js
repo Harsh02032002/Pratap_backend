@@ -73,13 +73,15 @@ function _isEmployee(req) {
  *                      permissions, restrictedModules, employeeType }
  */
 async function applyEmployeeScope(req, res, next) {
-  // If req.user is missing but Authorization header exists, attempt auto-resolution
-  if (!req.user && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+  // If req.user is missing but Authorization header exists, attempt auto-resolution.
+  // Never fall back to a hardcoded secret — with JWT_SECRET unset that default
+  // would let anyone forge a token. protect() refuses to run without it too.
+  if (!req.user && process.env.JWT_SECRET && req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     try {
       const jwt = require('jsonwebtoken');
       const User = require('../models/user');
       const token = req.headers.authorization.split(' ')[1];
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
       
       let user = null;
       try { user = await User.findById(decoded.id).select('-password'); } catch (_) {}

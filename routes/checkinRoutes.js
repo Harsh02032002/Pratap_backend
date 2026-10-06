@@ -393,10 +393,24 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
         otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
         console.log('[CHECKIN KYC] Owner OTP generated for', loginId);
 
-        // Send OTP via WhatsApp first, fall back to email
-        let whatsappOtpSent = false;
+        // Send OTP via Email directly
+        if (owner.email) {
+            try {
+                await sendMail(
+                    owner.email,
+                    'RoomHy Owner KYC — OTP Verification',
+                    `Your OTP is: ${otp}. Valid for 10 minutes.`,
+                    buildOtpEmail({ otp, name: owner.name, loginId: String(loginId).toUpperCase(), role: 'Owner' })
+                );
+            } catch (mailErr) {
+                console.warn('[CHECKIN KYC] Owner OTP email failed:', mailErr.message);
+            }
+        }
+
+        /*
+        // ─── WHATSAPP OTP (DISABLED - UNCOMMENT TO REACTIVATE) ───────────────────
         try {
-            whatsappOtpSent = await sendTemplateToResolvedUser({
+            await sendTemplateToResolvedUser({
                 phone: aadhaarLinkedPhone,
                 email: owner.email || '',
                 userId: String(loginId).toUpperCase(),
@@ -407,19 +421,8 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
         } catch (whatsAppErr) {
             console.warn('[CHECKIN KYC] Owner WhatsApp OTP failed:', whatsAppErr.message);
         }
-
-        if (!whatsappOtpSent && owner.email) {
-            try {
-                await sendMail(
-                    owner.email,
-                    'RoomHy Owner KYC — OTP Verification',
-                    `Your OTP is: ${otp}. Valid for 10 minutes.`,
-                    buildOtpEmail({ otp, name: owner.name, loginId: String(loginId).toUpperCase(), role: 'Owner' })
-                );
-            } catch (mailErr) {
-                console.warn('[CHECKIN KYC] Owner OTP email fallback failed:', mailErr.message);
-            }
-        }
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         return res.json({
             success: true,
@@ -1499,10 +1502,24 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
         otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
         console.log('[CHECKIN OTP] tenant', normalizedLoginId, aadhaarNumber, 'internal OTP generated');
 
-        // Send OTP via WhatsApp first, fall back to email
-        let whatsappOtpSent = false;
+        // Send OTP via Email directly
+        if (tenant.email) {
+            try {
+                await sendMail(
+                    tenant.email,
+                    'RoomHy Tenant KYC — OTP Verification',
+                    `Your OTP is: ${otp}. Valid for 10 minutes.`,
+                    buildOtpEmail({ otp, name: tenant.name, loginId: normalizedLoginId, role: 'Tenant' })
+                );
+            } catch (mailErr) {
+                console.warn('tenant kyc send otp email failed:', mailErr.message);
+            }
+        }
+
+        /*
+        // ─── WHATSAPP OTP (DISABLED - UNCOMMENT TO REACTIVATE) ───────────────────
         try {
-            whatsappOtpSent = await sendTemplateToResolvedUser({
+            await sendTemplateToResolvedUser({
                 phone: aadhaarLinkedPhone,
                 email: tenant.email || '',
                 userId: normalizedLoginId,
@@ -1513,19 +1530,8 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
         } catch (whatsAppErr) {
             console.warn('tenant kyc send otp whatsapp failed:', whatsAppErr.message);
         }
-
-        if (!whatsappOtpSent && tenant.email) {
-            try {
-                await sendMail(
-                    tenant.email,
-                    'RoomHy Tenant KYC — OTP Verification',
-                    `Your OTP is: ${otp}. Valid for 10 minutes.`,
-                    buildOtpEmail({ otp, name: tenant.name, loginId: normalizedLoginId, role: 'Tenant' })
-                );
-            } catch (mailErr) {
-                console.warn('tenant kyc send otp email fallback failed:', mailErr.message);
-            }
-        }
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         // First-time KYC submission: send pending notification via WhatsApp
         if (isFirstKycSubmission) {

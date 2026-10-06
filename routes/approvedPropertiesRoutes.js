@@ -716,6 +716,58 @@ router.get('/colleges/all', async (req, res) => {
 // GET: Fetch a specific approved property by visitId
 // ============================================================
 
+// Slug-fallback index.
+//
+// When the direct query misses, the route below matches the URL slug against
+// every property's name. It used to do that by loading EVERY full document
+// (ApprovedProperty, then Property, then VisitReport — images, rooms, the
+// lot) on every such request. Now it matches against a small cached list of
+// just the name/id fields, then loads the single matching document by _id.
+//
+// Correctness is kept without relying on the cache being fresh:
+//   - no match in the cached list  -> reload the list once and retry
+//   - the matched doc was deleted or no longer matches (renamed) -> same
+const SLUG_INDEX_TTL_MS = 5 * 60 * 1000;
+const slugIndexCache = new Map(); // key -> { at, rows, inflight }
+
+async function getSlugIndex(key, loader, forceFresh) {
+    let entry = slugIndexCache.get(key);
+    if (!entry) {
+        entry = { at: 0, rows: null, inflight: null };
+        slugIndexCache.set(key, entry);
+    }
+    if (!forceFresh && entry.rows && Date.now() - entry.at < SLUG_INDEX_TTL_MS) {
+        return { rows: entry.rows, cached: true };
+    }
+    if (!entry.inflight) {
+        entry.inflight = (async () => {
+            try {
+                const rows = await loader();
+                entry.rows = rows;
+                entry.at = Date.now();
+                return rows;
+            } finally {
+                entry.inflight = null;
+            }
+        })();
+    }
+    return { rows: await entry.inflight, cached: false };
+}
+
+async function findBySlugFallback(key, loader, matches, loadFull) {
+    let { rows, cached } = await getSlugIndex(key, loader, false);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const hit = rows.find(matches);
+        if (hit) {
+            const full = await loadFull(hit._id);
+            if (full && matches(full)) return full;
+        }
+        if (!cached) return null; // the list was just loaded — nothing newer to try
+        ({ rows, cached } = await getSlugIndex(key, loader, true));
+    }
+    return null;
+}
+
 router.get('/:visitId', async (req, res) => {
 
     try {
@@ -758,62 +810,75 @@ router.get('/:visitId', async (req, res) => {
         let property = await ApprovedProperty.findOne(query).select(selectFields);
 
         // Fallback: match by slugified title/name/composedName across all approved properties
+        // (same predicate as before — see findBySlugFallback for how the scan is kept cheap)
         if (!property) {
-            const allProps = await ApprovedProperty.find({}).select(selectFields).lean();
-            property = allProps.find(p => {
-                const rawName = p.propertyInfo?.name || p.title || '';
-                const tier = (p.tier || '').toLowerCase();
-                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
-                const nameSlug = slugify(rawName);
-                const composedSlug = slugify(composedName);
+            property = await findBySlugFallback(
+                'approved',
+                () => ApprovedProperty.find({}).select('visitId propertyId title propertyInfo.name tier').lean(),
+                (p) => {
+                    const rawName = p.propertyInfo?.name || p.title || '';
+                    const tier = (p.tier || '').toLowerCase();
+                    const composedName = `ROOMHYPROP ${tier} ${rawName}`;
+                    const nameSlug = slugify(rawName);
+                    const composedSlug = slugify(composedName);
 
-                return (
-                    nameSlug === rawTargetSlug ||
-                    nameSlug === cleanTargetSlug ||
-                    composedSlug === rawTargetSlug ||
-                    p.visitId === visitId ||
-                    p.propertyId === visitId ||
-                    String(p._id) === visitId
-                );
-            });
+                    return (
+                        nameSlug === rawTargetSlug ||
+                        nameSlug === cleanTargetSlug ||
+                        composedSlug === rawTargetSlug ||
+                        p.visitId === visitId ||
+                        p.propertyId === visitId ||
+                        String(p._id) === visitId
+                    );
+                },
+                (id) => ApprovedProperty.findById(id).select(selectFields).lean()
+            );
         }
 
         if (!property) {
             const Property = require('../models/Property');
-            const allProps = await Property.find({}).lean();
-            property = allProps.find(p => {
-                const rawName = p.title || p.name || p.propertyName || p.propertyInfo?.name || '';
-                const tier = (p.tier || p.propertyCategory || '').toLowerCase();
-                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
-                const nameSlug = slugify(rawName);
-                const composedSlug = slugify(composedName);
-                return (
-                    nameSlug === rawTargetSlug ||
-                    nameSlug === cleanTargetSlug ||
-                    composedSlug === rawTargetSlug ||
-                    p.visitId === visitId ||
-                    String(p._id) === visitId
-                );
-            });
+            property = await findBySlugFallback(
+                'property',
+                () => Property.find({}).select('title name propertyName propertyInfo.name tier propertyCategory visitId').lean(),
+                (p) => {
+                    const rawName = p.title || p.name || p.propertyName || p.propertyInfo?.name || '';
+                    const tier = (p.tier || p.propertyCategory || '').toLowerCase();
+                    const composedName = `ROOMHYPROP ${tier} ${rawName}`;
+                    const nameSlug = slugify(rawName);
+                    const composedSlug = slugify(composedName);
+                    return (
+                        nameSlug === rawTargetSlug ||
+                        nameSlug === cleanTargetSlug ||
+                        composedSlug === rawTargetSlug ||
+                        p.visitId === visitId ||
+                        String(p._id) === visitId
+                    );
+                },
+                (id) => Property.findById(id).lean()
+            );
         }
 
         if (!property) {
             const VisitReport = require('../models/VisitReport');
-            const allVisits = await VisitReport.find({}).lean();
-            property = allVisits.find(p => {
-                const rawName = p.propertyInfo?.name || p.propertyName || p.title || '';
-                const tier = (p.tier || '').toLowerCase();
-                const composedName = `ROOMHYPROP ${tier} ${rawName}`;
-                const nameSlug = slugify(rawName);
-                const composedSlug = slugify(composedName);
-                return (
-                    nameSlug === rawTargetSlug ||
-                    nameSlug === cleanTargetSlug ||
-                    composedSlug === rawTargetSlug ||
-                    p.visitId === visitId ||
-                    String(p._id) === visitId
-                );
-            });
+            property = await findBySlugFallback(
+                'visit',
+                () => VisitReport.find({}).select('propertyInfo.name propertyName title tier visitId').lean(),
+                (p) => {
+                    const rawName = p.propertyInfo?.name || p.propertyName || p.title || '';
+                    const tier = (p.tier || '').toLowerCase();
+                    const composedName = `ROOMHYPROP ${tier} ${rawName}`;
+                    const nameSlug = slugify(rawName);
+                    const composedSlug = slugify(composedName);
+                    return (
+                        nameSlug === rawTargetSlug ||
+                        nameSlug === cleanTargetSlug ||
+                        composedSlug === rawTargetSlug ||
+                        p.visitId === visitId ||
+                        String(p._id) === visitId
+                    );
+                },
+                (id) => VisitReport.findById(id).lean()
+            );
         }
 
         if (!property) {

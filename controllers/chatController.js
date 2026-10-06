@@ -7,6 +7,7 @@ const User = require('../models/user');
 const BookingRequest = require('../models/BookingRequest');
 const jwt = require('jsonwebtoken');
 const { generateWebsiteUserIdFromEmail, buildChatLookupVariants, canonicalChatId } = require('../utils/chatIdentity');
+const { getChatDirectory } = require('../utils/chatDirectoryCache');
 
 const normalizeLoginId = (value) => String(value || '').trim();
 
@@ -147,6 +148,13 @@ exports.getInbox = async (req, res) => {
     }
     const loginVariants = Array.from(loginVariantsSet);
 
+    // Name/phone lookup sources. Started now so the (cached) load overlaps the
+    // messages query instead of running after it. See utils/chatDirectoryCache.
+    const directoryPromise = getChatDirectory();
+    // Never left unobserved: if the messages query below throws first, the
+    // rejection must not surface as an unhandledRejection.
+    directoryPromise.catch(() => {});
+
     const messages = await ChatMessage.find({
       $or: [
         { room_id: { $in: loginVariants } },
@@ -154,6 +162,8 @@ exports.getInbox = async (req, res) => {
       ],
       is_blocked: { $ne: true }
     })
+      // Only the fields the summary below reads.
+      .select('room_id sender_login_id conversation_id message sender_name is_read created_at')
       .sort({ created_at: -1 })
       .limit(1000)
       .lean();
@@ -237,11 +247,9 @@ exports.getInbox = async (req, res) => {
       summaryMap.set(partnerId, existing);
     }
 
-    // Enhance participants with real details from multiple sources
-    const websiteEnquiries = await WebsiteEnquiry.find({}).lean();
-    const owners = await Owner.find({}).lean();
-    const bookings = await BookingRequest.find({}).lean();
-    const users = await User.find({}).lean();
+    // Enhance participants with real details from multiple sources.
+    // Shared, projected, 60s-cached copy — treat as read-only.
+    const { websiteEnquiries, owners, bookings, users } = await directoryPromise;
 
     // Include new property enquiries for property owner in chat inbox
     try {
@@ -309,8 +317,10 @@ exports.getInbox = async (req, res) => {
         const currentName = item.participant_name || "";
         
         // 1. Try matching by Email Hash (Strongest)
+        // `_hash` is generateWebsiteUserIdFromEmail(owner_email), precomputed
+        // once per document by chatDirectoryCache.
         let match = websiteEnquiries.find(enq => 
-            enq.owner_email && generateWebsiteUserIdFromEmail(enq.owner_email) === pid
+            enq.owner_email && enq._hash === pid
         );
 
         // 2. Try matching by Login ID directly
@@ -322,7 +332,7 @@ exports.getInbox = async (req, res) => {
         let bookingMatch = null;
         if (!match) {
             bookingMatch = bookings.find(b => {
-                const genId = generateWebsiteUserIdFromEmail(b.email);
+                const genId = b._hash;
                 return (genId && genId === pid) || b.user_id === pid || b.email === pid;
             });
         }
@@ -331,7 +341,7 @@ exports.getInbox = async (req, res) => {
         let userMatch = null;
         if (!match && !bookingMatch) {
             userMatch = users.find(u => {
-                const genId = generateWebsiteUserIdFromEmail(u.email);
+                const genId = u._hash;
                 return (genId && genId === pid) || u.loginId === pid || u.email === pid;
             });
         }
@@ -855,14 +865,26 @@ exports.getAllChats = async (req, res) => {
         }
     }
 
-    // 3. Enhance names & participant details with all possible sources
+    // 3. Enhance names & participant details with all possible sources.
+    // Loaded fresh on every call (not from chatDirectoryCache) because this
+    // view derives open/closed status from isActive / payment state, which
+    // must be current. Only the fields read below are fetched.
     const [websiteEnquiries, owners, users, bookingRequests, chatViolations] = await Promise.all([
-        WebsiteEnquiry.find({}).lean(),
-        Owner.find({}).lean(),
-        User.find({}).lean(),
-        BookingRequest.find({}).lean(),
-        require('../models/ChatViolation').find({}).lean()
+        WebsiteEnquiry.find({}).select('owner_email owner_phone owner_name property_name').lean(),
+        Owner.find({}).select('loginId name owner_name phone owner_phone email owner_email propertyName propertyTitle city isActive').lean(),
+        User.find({}).select('loginId name fullName firstName lastName phone email role status isActive').lean(),
+        BookingRequest.find({}).select('user_id email phone name userName property_name booking_status payment_status').lean(),
+        require('../models/ChatViolation').find({}).select('ownerId participantLoginId').lean()
     ]);
+
+    // Email hash computed once per document instead of once per document per
+    // participant lookup (getParticipantDetails runs twice per conversation).
+    for (const br of bookingRequests) {
+        br._hashUpper = br.email ? generateWebsiteUserIdFromEmail(br.email).toUpperCase() : '';
+    }
+    for (const enq of websiteEnquiries) {
+        enq._hashUpper = enq.owner_email ? generateWebsiteUserIdFromEmail(enq.owner_email).toUpperCase() : '';
+    }
 
     const getParticipantDetails = (id) => {
         if (!id) return { isOwner: false, loginId: 'N/A', name: 'Unknown', phone: 'N/A', email: 'N/A', propertyTitle: 'Property Enquiry' };
@@ -900,7 +922,7 @@ exports.getAllChats = async (req, res) => {
         // Try matching by Email Hash for website users (roomhywebXXXXXX)
         const bookingMatch = bookingRequests.find(br => 
             String(br.user_id || '').toUpperCase() === cleanId || 
-            (br.email && generateWebsiteUserIdFromEmail(br.email).toUpperCase() === cleanId) ||
+            (br.email && br._hashUpper === cleanId) ||
             String(br.phone || '').toUpperCase() === cleanId
         );
         if (bookingMatch) {
@@ -916,7 +938,7 @@ exports.getAllChats = async (req, res) => {
         }
 
         const websiteMatch = websiteEnquiries.find(enq => 
-            (enq.owner_email && generateWebsiteUserIdFromEmail(enq.owner_email).toUpperCase() === cleanId) ||
+            (enq.owner_email && enq._hashUpper === cleanId) ||
             String(enq.owner_phone || '').toUpperCase() === cleanId
         );
         if (websiteMatch) {

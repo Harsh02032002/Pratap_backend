@@ -12,6 +12,7 @@ const CheckinRecord = require('../models/CheckinRecord');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { requireOwnerInScope } = require('../utils/scopeHelpers');
+const { requireOwnerAccess, sseTokenFromQuery } = require('../middleware/ownerAccess');
 const { auditTrail } = require('../middleware/auditTrail');
 const { normalizeLoginId } = require('../utils/normalizeId');
 const { sumPaymentTransactions, sumRentPayments, sumEnquiryPaidAmounts } = require('../services/paymentTotalsService');
@@ -42,11 +43,11 @@ async function getStaffPropertyScope(req) {
 }
 
 // --- SSE Endpoint ---
-router.get('/:loginId/stream', sseStream);
+router.get('/:loginId/stream', sseTokenFromQuery, ...requireOwnerAccess('loginId'), sseStream);
 
 // Enquiry API: create, list for owner, update status
-router.post('/:ownerLoginId/enquiries', enquiryController.createEnquiry); // create
-router.get('/:ownerLoginId/enquiries', enquiryController.listEnquiries); // list for owner
+router.post('/:ownerLoginId/enquiries', ...requireOwnerAccess('ownerLoginId'), enquiryController.createEnquiry); // create
+router.get('/:ownerLoginId/enquiries', ...requireOwnerAccess('ownerLoginId'), enquiryController.listEnquiries); // list for owner
 router.patch('/enquiries/:id', enquiryController.updateEnquiry); // update status
 
 
@@ -131,7 +132,7 @@ router.post('/request', auditTrail('owners'), ownerController.requestOwner);
 
 // Owner subscription / trial status check (placed before /:loginId to prevent route collision)
 // GET /api/owners/subscription-status?loginId=OWN001
-router.get('/subscription-status', async (req, res) => {
+router.get('/subscription-status', ...requireOwnerAccess((req) => req.query.loginId, { matchContact: true }), async (req, res) => {
     try {
         const loginId = String(req.query.loginId || '').trim();
         if (!loginId) return res.status(400).json({ success: false, message: 'loginId required' });
@@ -328,6 +329,18 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
 
         let updatePayload = { ...req.body };
 
+        // 🔒 SECURITY GUARD: Non-superadmin users cannot update sensitive system fields
+        const isSuperadmin = req.user?.role === 'superadmin' || req.user?.role === 'admin';
+        if (!isSuperadmin) {
+            delete updatePayload.role;
+            delete updatePayload.status;
+            delete updatePayload.isDeleted;
+            delete updatePayload.subscription;
+            delete updatePayload.isActive;
+            delete updatePayload.loginId;
+            delete updatePayload._id;
+        }
+
         if (updatePayload.credentials && updatePayload.credentials.password) {
             updatePayload.credentials.firstTime = false;
             updatePayload.passwordSet = true;
@@ -340,9 +353,13 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
 
         const owner = await Owner.findOneAndUpdate(
             query,
-            { $set: updatePayload, $setOnInsert: { createdAt: new Date() } },
-            { new: true, upsert: true, setDefaultsOnInsert: true }
+            { $set: updatePayload },
+            { new: true }
         );
+
+        if (!owner) {
+            return res.status(404).json({ error: 'Owner not found' });
+        }
 
         res.json(owner);
     } catch (err) {
@@ -352,7 +369,7 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
 });
 
 // 6. Get rooms for owner by loginId (Preserved - Used by Dashboard)
-router.get('/:loginId/rooms', protect, applyEmployeeScope, requireOwnerInScope('loginId'), async (req, res) => {
+router.get('/:loginId/rooms', ...requireOwnerAccess('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -373,15 +390,18 @@ router.get('/:loginId/rooms', protect, applyEmployeeScope, requireOwnerInScope('
         const propertyTotals = {};
 
         if (limit > 0) {
-            // Only fetch 'limit' rooms per property for paginated initial load
-            for (const propId of propertyIds) {
+            // Fetch 'limit' rooms per property concurrently
+            const roomResults = await Promise.all(propertyIds.map(async (propId) => {
                 const propRooms = await Room.find({ property: propId, isDeleted: { $ne: true } })
                     .populate('property', 'title ownerLoginId')
                     .limit(limit)
                     .lean();
                 const total = await Room.countDocuments({ property: propId, isDeleted: { $ne: true } });
-                rooms.push(...propRooms);
-                propertyTotals[propId.toString()] = total;
+                return { propIdStr: propId.toString(), propRooms, total };
+            }));
+            for (const item of roomResults) {
+                rooms.push(...item.propRooms);
+                propertyTotals[item.propIdStr] = item.total;
             }
         } else {
             // Fallback to all rooms if no limit
@@ -401,7 +421,7 @@ router.get('/:loginId/rooms', protect, applyEmployeeScope, requireOwnerInScope('
 });
 
 // 7. Get properties for owner by loginId
-router.get('/:loginId/properties', protect, applyEmployeeScope, requireOwnerInScope('loginId'), async (req, res) => {
+router.get('/:loginId/properties', ...requireOwnerAccess('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -409,7 +429,7 @@ router.get('/:loginId/properties', protect, applyEmployeeScope, requireOwnerInSc
         const propertyFilter = { ownerLoginId: loginId, isDeleted: { $ne: true } };
         const staffScope = await getStaffPropertyScope(req);
         if (staffScope) propertyFilter._id = { $in: staffScope };
-        const properties = await Property.find(propertyFilter);
+        const properties = await Property.find(propertyFilter).lean();
 
         // Occupancy counters are refreshed by the scheduled job and by room
         // mutations — a read must not trigger N background writes.
@@ -421,7 +441,7 @@ router.get('/:loginId/properties', protect, applyEmployeeScope, requireOwnerInSc
 });
 
 // 7b. Create property for owner by loginId (used by owner panel rooms/properties sync)
-router.post('/:loginId/properties', auditTrail('owners'), async (req, res) => {
+router.post('/:loginId/properties', ...requireOwnerAccess('loginId'), auditTrail('owners'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').toUpperCase();
         const { title, address, locationCode, city, area, description } = req.body || {};
@@ -458,7 +478,7 @@ router.post('/:loginId/properties', auditTrail('owners'), async (req, res) => {
 });
 
 // 8. Get rent collected for owner by loginId
-router.get('/:loginId/rent', async (req, res) => {
+router.get('/:loginId/rent', ...requireOwnerAccess('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -503,7 +523,7 @@ router.get('/:loginId/rent', async (req, res) => {
     }
 });
 
-router.get('/:loginId/revenue-dashboard', async (req, res) => {
+router.get('/:loginId/revenue-dashboard', ...requireOwnerAccess('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -528,7 +548,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             : null;
         // ─────────────────────────────────────────────────────────────────────────
 
-        const allProperties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title');
+        const allProperties = await Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } }).select('_id title').lean();
         // Scope to the single selected property when provided — still resolved
         // against this owner's own properties list, so the query param can never
         // reach another owner's data.
@@ -537,91 +557,69 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
             : allProperties;
         const propertyIds = properties.map(p => p._id);
 
-        // 1. Fetch Tenant Payments (gross) — scoped to selected month
-        // a. From PaymentTransaction
         const PaymentTransaction = require('../models/PaymentTransaction');
-        const transactions = await PaymentTransaction.find({
-            owner_id: loginId,
-            ...(propertyId ? { property_id: propertyId } : {}),
-            payment_date: { $gte: monthStart, $lte: monthEnd }
-        }).sort({ payment_date: -1 }).lean();
-        const txTotal = transactions.reduce((sum, t) => sum + (t.booking_amount || t.owner_amount || 0), 0);
-
-        // b. From RentPayment — scoped to selected month via billingMonth on invoice
         const Tenant = require('../models/Tenant');
-        // name/roomNo/bedNo are needed further down: RentPayment stores only
-        // tenantId (no denormalised tenantName/roomNumber), so without this the
-        // Recent Transactions table fell back to the literal "Tenant"/"TBD".
-        const tenants = await Tenant.find({ property: { $in: propertyIds } }).select('_id name roomNo bedNo').lean();
+        const Enquiry = require('../models/Enquiry');
+        const PayoutLog = require('../models/PayoutLog');
+
+        // Independent reads run together (was 4 sequential round-trips):
+        //  - PaymentTransaction: gross tenant payments for the month
+        //  - Tenant: name/roomNo/bedNo are needed further down — RentPayment stores
+        //    only tenantId, so without this Recent Transactions fell back to "Tenant"/"TBD"
+        //  - Enquiry: the ownerLoginId branch matches every property, so it is dropped
+        //    when a single property is selected (otherwise other properties' money leaks in)
+        //  - PayoutLog: has no property reference (a payout settles to the owner's bank
+        //    account), so payouts stay account-wide; the response flags it (payoutsScope)
+        const [transactions, tenants, enquiries, payouts] = await Promise.all([
+            PaymentTransaction.find({
+                owner_id: loginId,
+                ...(propertyId ? { property_id: propertyId } : {}),
+                payment_date: { $gte: monthStart, $lte: monthEnd }
+            }).sort({ payment_date: -1 }).lean(),
+            Tenant.find({ property: { $in: propertyIds } }).select('_id name roomNo bedNo').lean(),
+            Enquiry.find({
+                $or: propertyId
+                    ? [{ propertyId: { $in: propertyIds } }]
+                    : [
+                        { propertyId: { $in: propertyIds } },
+                        { ownerLoginId: loginId }
+                    ],
+                status: { $in: ['accepted', 'approved', 'active'] },
+                createdAt: { $gte: monthStart, $lte: monthEnd }
+            }).sort({ createdAt: -1 }).lean(),
+            PayoutLog.find({
+                owner_id: loginId,
+                created_at: { $gte: monthStart, $lte: monthEnd }
+            }).sort({ created_at: -1 }).lean()
+        ]);
+
+        const txTotal = transactions.reduce((sum, t) => sum + (t.booking_amount || t.owner_amount || 0), 0);
         const tenantById = new Map(tenants.map(t => [String(t._id), t]));
-        const RentInvoice = require('../models/RentInvoice');
 
         let rentPaymentsTotal = 0;
         let rentPayments = [];
+        let tenantDues = 0;
 
         if (tenants.length > 0) {
-            // Get invoices for this specific billing month only
+            const RentInvoice = require('../models/RentInvoice');
+            const RentPayment = require('../models/RentPayment');
+
+            // One read of this month's invoices serves both the rent-payment
+            // lookup and Tenant Dues (PENDING/PARTIAL filtered in memory) —
+            // previously the same invoices were fetched twice.
             const monthInvoices = await RentInvoice.find({
                 tenantId: { $in: tenants.map(t => t._id) },
                 billingMonth
-            }).select('_id').lean();
-            const RentPayment = require('../models/RentPayment');
+            }).select('_id status outstandingAmount rentAmount rentPaidAmount paidAmount totalPenalty electricityBill').lean();
 
-            rentPayments = await RentPayment.find({
-                invoiceId: { $in: monthInvoices.map(i => i._id) }
-            }).sort({ createdAt: -1 }).lean();
-            rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
-        }
+            if (monthInvoices.length > 0) {
+                rentPayments = await RentPayment.find({
+                    invoiceId: { $in: monthInvoices.map(i => i._id) }
+                }).sort({ createdAt: -1 }).lean();
+                rentPaymentsTotal = rentPayments.reduce((sum, r) => sum + (r.amount || 0), 0);
+            }
 
-        // c. From Enquiry — scoped to selected month
-        const Enquiry = require('../models/Enquiry');
-        // The ownerLoginId branch matches enquiries across every property, so it
-        // has to go when a single property is selected — otherwise the other
-        // properties' booking money leaks back into this property's totals.
-        const enquiries = await Enquiry.find({
-            $or: propertyId
-                ? [{ propertyId: { $in: propertyIds } }]
-                : [
-                    { propertyId: { $in: propertyIds } },
-                    { ownerLoginId: loginId }
-                ],
-            status: { $in: ['accepted', 'approved', 'active'] },
-            createdAt: { $gte: monthStart, $lte: monthEnd }
-        }).sort({ createdAt: -1 }).lean();
-        const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
-
-        const tenantCollected = txTotal + rentPaymentsTotal + enquiriesTotal;
-
-        // 2. Fetch Payouts — scoped to selected month.
-        // NOTE: PayoutLog has no property reference — a payout is a settlement to
-        // the owner's bank account, not to a property — so these two figures stay
-        // account-wide even when a single property is selected. The response flags
-        // that (payoutsScope) so the UI can label them instead of implying they
-        // belong to the selected property.
-        const PayoutLog = require('../models/PayoutLog');
-        const payouts = await PayoutLog.find({
-            owner_id: loginId,
-            created_at: { $gte: monthStart, $lte: monthEnd }
-        }).sort({ created_at: -1 }).lean();
-
-        const ownerPayouts = payouts
-            .filter(p => ['processed', 'sandbox_success'].includes(p.status))
-            .reduce((sum, p) => sum + (p.amount || 0), 0);
-
-        const pendingPayouts = payouts
-            .filter(p => ['initiated', 'contact_created', 'fund_account_created', 'queued', 'processing'].includes(p.status))
-            .reduce((sum, p) => sum + (p.amount || 0), 0);
-
-        // 3. Tenant Dues — always live (current outstanding, not month-filtered)
-        let tenantDues = 0;
-        if (tenants.length > 0) {
-            const unpaidInvoices = await RentInvoice.find({
-                tenantId: { $in: tenants.map(t => t._id) },
-                billingMonth,
-                status: { $in: ['PENDING', 'PARTIAL'] }
-            }).select('outstandingAmount rentAmount rentPaidAmount paidAmount totalPenalty electricityBill').lean();
-
-            unpaidInvoices.forEach(inv => {
+            monthInvoices.filter(inv => ['PENDING', 'PARTIAL'].includes(inv.status)).forEach(inv => {
                 const rentPaid = inv.rentPaidAmount ?? inv.paidAmount ?? 0;
                 const rentDue = Math.max(0, (inv.rentAmount || 0) - rentPaid);
                 const penalty = inv.totalPenalty || 0;
@@ -635,6 +633,17 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
                 tenantDues += Math.round(invOutstanding);
             });
         }
+
+        const enquiriesTotal = enquiries.reduce((sum, e) => sum + (e.paidAmount || 0), 0);
+        const tenantCollected = txTotal + rentPaymentsTotal + enquiriesTotal;
+
+        const ownerPayouts = payouts
+            .filter(p => ['processed', 'sandbox_success'].includes(p.status))
+            .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+        const pendingPayouts = payouts
+            .filter(p => ['initiated', 'contact_created', 'fund_account_created', 'queued', 'processing'].includes(p.status))
+            .reduce((sum, p) => sum + (p.amount || 0), 0);
 
         // 4. Format Recent Payments
         const formattedPayments = [];
@@ -818,7 +827,7 @@ router.get('/:loginId/revenue-dashboard', async (req, res) => {
     }
 });
 
-router.get('/:loginId/tenants', async (req, res) => {
+router.get('/:loginId/tenants', ...requireOwnerAccess('loginId'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').trim().toUpperCase();
         // Read-only path: owner↔property link repair runs in the scheduled
@@ -836,10 +845,19 @@ router.get('/:loginId/tenants', async (req, res) => {
             ? { property: { $in: propertyIds } }
             : { $or: [{ property: { $in: propertyIds } }, { ownerLoginId: loginId }] };
 
-        const tenants = await Tenant.find({
+        // ?lite=1 — opt-in for screens that never render tenant images (payment,
+        // dashboard widgets). Default stays the full document: tenants.jsx,
+        // tenant-docs.jsx and kyc-verification.jsx read photo/KYC from this list.
+        const lite = req.query.lite === '1' || req.query.lite === 'true';
+        let tenantQuery = Tenant.find({
             ...tenantMatch,
             isDeleted: { $ne: true }
-        }).lean();
+        });
+        if (lite) {
+            const { TENANT_LIST_LITE_EXCLUDE } = require('../utils/listProjections');
+            tenantQuery = tenantQuery.select(TENANT_LIST_LITE_EXCLUDE);
+        }
+        const tenants = await tenantQuery.lean();
 
 
         let tenantsWithDues = tenants;
@@ -887,10 +905,10 @@ router.post('/:loginId/request-head', protect, auditTrail('owners'), async (req,
 });
 
 // Add tenant to property (Owner)
-router.post('/:ownerLoginId/properties/:propertyId/tenants', auditTrail('tenants'), ownerController.addTenantToProperty);
+router.post('/:ownerLoginId/properties/:propertyId/tenants', ...requireOwnerAccess('ownerLoginId'), auditTrail('tenants'), ownerController.addTenantToProperty);
 
 // Get tenants for owner's property
-router.get('/:ownerLoginId/properties/:propertyId/tenants', ownerController.getPropertyTenants);
+router.get('/:ownerLoginId/properties/:propertyId/tenants', ...requireOwnerAccess('ownerLoginId'), ownerController.getPropertyTenants);
 
 // Deactivate owner
 router.post('/:loginId/deactivate', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {

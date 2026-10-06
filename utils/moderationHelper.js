@@ -903,16 +903,51 @@ async function moderateChatMessageAsync(messageDoc, receiverLoginId) {
   }
 }
 
-// Cleanup task to consolidate past duplicate single-word violations into 1 attempt and heal false blocks
+// Cleanup task to consolidate past duplicate single-word violations into 1 attempt and heal false blocks.
+//
+// Same two jobs and the same 15s cadence as before, with the same end state.
+// What changed is how much work each tick does:
+//
+//  1. Dedupe — the first run after boot scans every violation (exactly as the
+//     old loop did on every tick). After that only violations created since
+//     `lastRun - DEDUPE_LOOKBACK_MS` are scanned. That is equivalent: every
+//     earlier run already deleted the duplicates among older rows, so what is
+//     left before the window are the "kept" rows, and a kept row more than 10
+//     minutes older than a new one can never be within the 5-minute duplicate
+//     window of it.
+//  2. Counting — an aggregate returns one {offender, count} row per offender
+//     instead of loading every violation document.
+//  3. Unblock — the old loop issued two updateMany calls for every offender
+//     with < 2 strikes on every tick, rewriting accounts that were already
+//     active. The filter now also requires the account to still be blocked,
+//     so the resulting state is identical but there is nothing to write once
+//     an account is healed. All updates go out as one bulkWrite per model.
+const MODERATION_HEAL_INTERVAL_MS = 15000;
+const DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
+const DEDUPE_LOOKBACK_MS = 10 * 60 * 1000;
+let lastModerationHealAt = null; // null → next run does a full scan
+let moderationHealRunning = false;
+
 setInterval(async () => {
+  // A slow tick must not overlap the next one.
+  if (moderationHealRunning) return;
+  moderationHealRunning = true;
+  const runStartedAt = Date.now();
   try {
     const ChatViolation = mongoose.model('ChatViolation');
-    // Group multiple violations from same user created within 5 mins of each other into 1
-    const allViolations = await ChatViolation.find({}).sort({ createdAt: 1 }).lean();
+
+    // ── 1. Group multiple violations from same user created within 5 mins of each other into 1
+    const dedupeFilter = lastModerationHealAt == null
+      ? {}
+      : { createdAt: { $gte: new Date(lastModerationHealAt - DEDUPE_LOOKBACK_MS) } };
+    const candidateViolations = await ChatViolation.find(dedupeFilter)
+      .select('_id participantLoginId createdAt')
+      .sort({ createdAt: 1 })
+      .lean();
     const userGroups = new Map();
     const toDeleteIds = [];
 
-    for (const v of allViolations) {
+    for (const v of candidateViolations) {
       // Group by the OFFENDER, matching what checkUserBlockStatus() counts.
       // Keying on ownerId first bucketed a tenant's violation under the owner,
       // so an owner with one real strike looked like two and this loop —
@@ -926,7 +961,7 @@ setInterval(async () => {
         const list = userGroups.get(key);
         const last = list[list.length - 1];
         const diffMs = new Date(v.createdAt).getTime() - new Date(last.createdAt).getTime();
-        if (diffMs < 5 * 60 * 1000) {
+        if (diffMs < DUPLICATE_WINDOW_MS) {
           // Duplicate within 5 mins — mark for deletion
           toDeleteIds.push(v._id);
         } else {
@@ -940,21 +975,53 @@ setInterval(async () => {
       console.log(`✅ Consolidated ${toDeleteIds.length} duplicate single-message violation records into 1 attempt`);
     }
 
-    // Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
-    for (const [offenderKey, list] of userGroups.entries()) {
-      if (list.length < 2) {
-        const isKeyObjId = mongoose.Types.ObjectId.isValid(offenderKey) && String(offenderKey).match(/^[0-9a-fA-F]{24}$/);
-        const offenderConds = [{ loginId: offenderKey }, { loginId: String(offenderKey).toUpperCase() }];
-        if (isKeyObjId) offenderConds.push({ _id: offenderKey });
-        await Owner.updateMany({ $or: offenderConds }, { $set: { isActive: true, chatRestrictedUntil: null } });
-        // Matched on the exact-case loginId only, so a stored id whose case
-        // differed from the violation's stayed blocked forever while the Owner
-        // record beside it was healed.
-        await User.updateMany({ $or: offenderConds }, { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } });
-      }
+    // ── 2. Auto-unblock only accounts that have LESS than 2 genuine attempts (heals false positive single strikes)
+    // Counted after the delete above, over ALL violations — the same set the
+    // old in-memory groups represented.
+    const singleStrikeOffenders = await ChatViolation.aggregate([
+      { $match: { participantLoginId: { $nin: [null, ''] } } },
+      { $group: { _id: '$participantLoginId', count: { $sum: 1 } } },
+      { $match: { count: { $lt: 2 } } }
+    ]);
+
+    // Only rows that would actually change. Field values set are unchanged.
+    const ownerStillBlocked = { $or: [{ isActive: { $ne: true } }, { chatRestrictedUntil: { $ne: null } }] };
+    const userStillBlocked = { $or: [{ status: { $ne: 'active' } }, { isActive: { $ne: true } }, { chatRestrictedUntil: { $ne: null } }] };
+    const ownerOps = [];
+    const userOps = [];
+
+    for (const { _id: offenderKey } of singleStrikeOffenders) {
+      const isKeyObjId = mongoose.Types.ObjectId.isValid(offenderKey) && String(offenderKey).match(/^[0-9a-fA-F]{24}$/);
+      const offenderConds = [{ loginId: offenderKey }, { loginId: String(offenderKey).toUpperCase() }];
+      if (isKeyObjId) offenderConds.push({ _id: offenderKey });
+      ownerOps.push({
+        updateMany: {
+          filter: { $and: [{ $or: offenderConds }, ownerStillBlocked] },
+          update: { $set: { isActive: true, chatRestrictedUntil: null } }
+        }
+      });
+      // Matched on the exact-case loginId only, so a stored id whose case
+      // differed from the violation's stayed blocked forever while the Owner
+      // record beside it was healed.
+      userOps.push({
+        updateMany: {
+          filter: { $and: [{ $or: offenderConds }, userStillBlocked] },
+          update: { $set: { status: 'active', isActive: true, chatRestrictedUntil: null } }
+        }
+      });
     }
-  } catch (_) {}
-}, 15000);
+
+    if (ownerOps.length > 0) await Owner.bulkWrite(ownerOps, { ordered: false });
+    if (userOps.length > 0) await User.bulkWrite(userOps, { ordered: false });
+
+    // Only advance the window after a fully successful run, so a failed tick
+    // is retried over the same range instead of skipping it.
+    lastModerationHealAt = runStartedAt;
+  } catch (_) {
+  } finally {
+    moderationHealRunning = false;
+  }
+}, MODERATION_HEAL_INTERVAL_MS);
 
 async function healChatModerationAndUnblockAccounts() {
   try {

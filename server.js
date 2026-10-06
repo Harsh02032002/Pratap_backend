@@ -19,6 +19,7 @@ const { globalApiLimiter } = require('./middleware/security');
 const { apiCache, getCacheStats, clearCache } = require('./middleware/apiCache');
 const { MONGO, MONGOOSE_BUFFER_TIMEOUT_MS, HTTP } = require('./config/timeouts');
 const { installGlobalQueryDeadline } = require('./utils/queryDeadline');
+const { isAllowedOrigin } = require('./utils/corsOrigin');
 
 // Installed before any route or model require below, so every schema compiled
 // from here on carries a default operation deadline. Without it the request
@@ -68,13 +69,8 @@ const server = http.createServer(app);
 // 1. Robust CORS Middleware - Handles preflight and credentials for all our environments
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    const isAllowedOrigin = !origin ||
-        origin.includes('localhost') ||
-        origin.includes('127.0.0.1') ||
-        origin.includes('roomhy.com') ||
-        origin === 'https://roohmy-frontend-ux44.vercel.app';
 
-    if (isAllowedOrigin && origin) {
+    if (origin && isAllowedOrigin(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
@@ -92,12 +88,7 @@ app.use((req, res, next) => {
 const io = new Server(server, {
     cors: {
         origin: (origin, callback) => {
-            const allowed = !origin ||
-                origin.includes('localhost') ||
-                origin.includes('127.0.0.1') ||
-                origin.includes('roomhy.com') ||
-                origin === 'https://roohmy-frontend-ux44.vercel.app';
-            if (allowed) callback(null, true);
+            if (isAllowedOrigin(origin)) callback(null, true);
             else callback(new Error('Socket.io: origin not allowed'));
         },
         credentials: true,
@@ -204,7 +195,9 @@ console.log('✅ Middleware configured');
 
 // Request logging middleware
 app.use((req, res, next) => {
-    console.log(`📨 ${req.method} ${req.path}`);
+    if (process.env.DEBUG_REQUESTS === 'true') {
+        console.log(`📨 ${req.method} ${req.path}`);
+    }
     next();
 });
 
@@ -631,8 +624,19 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Strict superadmin gate for the maintenance/test endpoints below. These were
+// mounted with no auth at all, so anyone who knew a tenant loginId could flip
+// that tenant's status in production. authorize('superadmin') is NOT used
+// because it deliberately expands to employee/manager roles as well.
+const { protect: requireAuth } = require('./middleware/authMiddleware');
+const requireSuperadmin = [requireAuth, (req, res, next) => {
+    const role = String(req.user?.role || '').toLowerCase();
+    if (role === 'superadmin' || role === 'admin') return next();
+    return res.status(403).json({ success: false, message: 'Superadmin access required' });
+}];
+
 // ── TEST ENDPOINT: Trigger agreement expiry for a tenant (remove in production) ──
-app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
+app.get('/api/test/agreement-expiry/:loginId', requireSuperadmin, async (req, res) => {
     try {
         const Tenant = require('./models/Tenant');
         const Notification = require('./models/Notification');
@@ -699,7 +703,7 @@ app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
 });
 
 // ── TEST ENDPOINT: Reactivate move-out / inactive tenant for testing ──
-app.get('/api/test/reactivate-tenant/:loginId', async (req, res) => {
+app.get('/api/test/reactivate-tenant/:loginId', requireSuperadmin, async (req, res) => {
     try {
         const Tenant = require('./models/Tenant');
         const User = require('./models/user');
@@ -733,15 +737,15 @@ app.get('/api/test/reactivate-tenant/:loginId', async (req, res) => {
     }
 });
 
-// Cache management endpoints (admin only - add auth later)
-app.get('/api/admin/cache-stats', (req, res) => {
+// Cache management endpoints (superadmin only)
+app.get('/api/admin/cache-stats', requireSuperadmin, (req, res) => {
     res.json({
         success: true,
         cache: getCacheStats()
     });
 });
 
-app.post('/api/admin/clear-cache', (req, res) => {
+app.post('/api/admin/clear-cache', requireSuperadmin, (req, res) => {
     const { path } = req.body || {};
     clearCache(path);
     res.json({
