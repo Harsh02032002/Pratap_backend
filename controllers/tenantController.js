@@ -890,6 +890,8 @@ const ME_PROJECTION =
     ' electricityCharge maintenanceCharge' +
     ' agreementSigned agreementSignedAt agreementESignName' +
     ' digitalCheckin.agreementDetails' +
+    ' agreementExtensions.number agreementExtensions.status agreementExtensions.months' +
+    ' agreementExtensions.newStartDate agreementExtensions.newEndDate agreementExtensions.pdfUrl' +
     ' kyc.idProof kyc.uploadedAt' +
     ' createdAt';
 

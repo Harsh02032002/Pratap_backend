@@ -4,6 +4,7 @@ const CheckinRecord = require('../models/CheckinRecord');
 const { normalizeRoomInventory, summarizeRoomInventory } = require('../utils/ownerOccupancy');
 const Owner = require('../models/Owner');
 const Tenant = require('../models/Tenant');
+const { resolveExtensionToken, publicExtensionView, signExtension } = require('../services/agreementExtensionService');
 const Property = require('../models/Property');
 const User = require('../models/user');
 const { sendMail } = require('../utils/mailer');
@@ -1514,7 +1515,10 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
             console.warn('tenant kyc send otp whatsapp failed:', whatsAppErr.message);
         }
 
-        if (!whatsappOtpSent && tenant.email) {
+        // TEMPORARY: always email the OTP too. Meta accepts the WhatsApp OTP
+        // template but it is not reaching tenants, so "sent" can't be trusted.
+        // Restore `!whatsappOtpSent && tenant.email` once WhatsApp delivery is fixed.
+        if (tenant.email) {
             try {
                 await sendMail(
                     tenant.email,
@@ -1549,7 +1553,9 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
 
         return res.json({
             success: true,
-            message: 'OTP sent to Aadhaar linked mobile number',
+            message: tenant.email
+                ? 'OTP sent to your Aadhaar linked mobile number and email'
+                : 'OTP sent to Aadhaar linked mobile number',
             provider: 'internal'
         });
     } catch (err) {
@@ -1560,7 +1566,7 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
 
 router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) => {
     try {
-        const { loginId, aadhaarNumber, otp, aadhaarFront, aadhaarBack, tenantPhoto, kycStatus, mismatchReasons: clientMismatch } = req.body || {};
+        const { loginId, aadhaarNumber, otp, aadhaarFront, aadhaarBack, tenantPhoto, kycStatus, mismatchReasons: clientMismatch, extensionToken } = req.body || {};
         const normalizedLoginId = String(loginId || '').toUpperCase();
         const k = keyFor('tenant', normalizedLoginId, aadhaarNumber);
         const entry = otpStore.get(k);
@@ -1613,7 +1619,17 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
         }
 
         const isMismatch = mismatchReasons.length > 0;
-        const targetKycStatus = isMismatch ? 'mismatch_review' : 'audit_pending';
+        // Agreement-extension re-verification of an already verified tenant must
+        // not send them back into the superadmin audit queue. A mismatch still
+        // flags them exactly as in the normal flow.
+        let keepVerified = false;
+        if (extensionToken && !isMismatch && tenant.kycStatus === 'verified') {
+            try {
+                await resolveExtensionToken(extensionToken, { loginId: normalizedLoginId });
+                keepVerified = true;
+            } catch (_) { /* invalid link → normal behaviour */ }
+        }
+        const targetKycStatus = isMismatch ? 'mismatch_review' : (keepVerified ? 'verified' : 'audit_pending');
 
         tenant.kyc = tenant.kyc || {};
         tenant.kyc.otpVerified = true;
@@ -1931,6 +1947,39 @@ router.post('/tenant/agreement', async (req, res) => {
             message: err?.data?.message || err?.data?.error || err.message || 'Tenant agreement request failed',
             details: err?.data || null
         });
+    }
+});
+
+// ── Agreement extension (services/agreementExtensionService.js) ──────────────
+// The extension link carries a signed token (?ext=…); the tenant re-verifies
+// Aadhaar through the normal KYC page, then signs here. The original agreement
+// is never touched.
+router.get('/tenant/extension', async (req, res) => {
+    try {
+        const { tenant, ext } = await resolveExtensionToken(req.query.token, { loginId: req.query.loginId });
+        return res.json({
+            success: true,
+            extension: publicExtensionView(tenant, ext),
+            agreementDetails: tenant.digitalCheckin?.agreementDetails || {},
+            tenant: { name: tenant.name, email: tenant.email, phone: tenant.phone, propertyTitle: tenant.propertyTitle, roomNo: tenant.roomNo, kycStatus: tenant.kycStatus }
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ success: false, message: err.message });
+    }
+});
+
+router.post('/tenant/extension/sign', async (req, res) => {
+    try {
+        const { token, loginId, eSignName, accepted, signatureDataUrl } = req.body || {};
+        const extension = await signExtension({ token, loginId, eSignName, accepted, signatureDataUrl });
+        return res.json({
+            success: true,
+            message: `Agreement Extension #${extension.number} signed.`,
+            extension,
+            nextUrl: `${DIGITAL_CHECKIN_URL}/digital-checkin/tenant-confirmation?loginId=${encodeURIComponent(extension.loginId)}&extension=${extension.number}`
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ success: false, message: err.message });
     }
 });
 

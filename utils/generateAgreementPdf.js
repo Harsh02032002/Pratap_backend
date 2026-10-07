@@ -63,7 +63,11 @@ function generateAgreementPdfBuffer({
     gstCharges        = '0',
     signatureDataUrl  = '',
     eSignName         = '',
-    signedDate        = ''
+    signedDate        = '',
+    // Agreement extension: { number, previousStartDate, previousEndDate, months }.
+    // When set, the document is headed AGREEMENT EXTENSION #n and states the
+    // previous period, so it can never be mistaken for the original agreement.
+    extension         = null
 } = {}) {
     return new Promise((resolve, reject) => {
         try {
@@ -144,6 +148,14 @@ function generateAgreementPdfBuffer({
             // ====================================================
             // TITLE
             // ====================================================
+            if (extension) {
+                doc.font('Helvetica-Bold').fontSize(16).fillColor('#000000')
+                   .text(`AGREEMENT EXTENSION #${extension.number || 1}`, { align: 'center' });
+                doc.moveDown(0.3);
+                doc.font('Helvetica').fontSize(10)
+                   .text(`This document extends the original agreement. Previous agreement period: ${v(extension.previousStartDate)} to ${v(extension.previousEndDate)}. Extension of ${v(extension.months)} month(s): ${v(licenseStartDate)} to ${v(licenseEndDate)}.`, { align: 'center' });
+                doc.moveDown(0.6);
+            }
             doc.font('Helvetica-Bold').fontSize(14).fillColor('#000000')
                .text('ROOMHY ACCOMODATION  AGREEMENT', { align: 'center' });
             doc.moveDown(0.8);

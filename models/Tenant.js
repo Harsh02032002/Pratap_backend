@@ -157,6 +157,50 @@ const TenantSchema = new mongoose.Schema({
         cancelledBy: { type: String, default: '' }
     },
 
+    // ── Agreement expiry / extension workflow (services/agreementExtensionService.js)
+    // The original agreement (digitalCheckin.agreement + agreementDetails) is
+    // never modified by an extension. Each extension is appended here, and the
+    // current period is resolved by utils/agreementDates.resolveCurrentAgreementPeriod.
+    // All dates are IST "YYYY-MM-DD" strings so calendar maths never drifts.
+    agreementLifecycle: {
+        // End date the daily job saw while it was still in the future. Auto-exit
+        // at expiry only happens when this matches the expiring end date, so
+        // tenants already past expiry when the workflow went live are never
+        // exited by surprise.
+        watchedEndDate: { type: String },
+        // Automatic one-month reminder — one per agreement cycle (keyed by end date).
+        reminderSentForEndDate: { type: String },
+        reminderSentAt: { type: Date },
+        // Set when the job exits the tenant because the agreement expired un-extended.
+        expiredExitForEndDate: { type: String },
+        expiredExitAt: { type: Date }
+    },
+    agreementExtensions: [{
+        number: { type: Number, required: true }, // Agreement Extension #1, #2, …
+        status: { type: String, enum: ['requested', 'completed', 'expired'], default: 'requested' },
+        months: { type: Number, required: true },
+        previousStartDate: { type: String },
+        previousEndDate: { type: String },
+        newStartDate: { type: String },
+        newEndDate: { type: String },
+        requestedAt: { type: Date },
+        requestedBy: { type: String },     // loginId of the owner / staff who initiated
+        requestedByRole: { type: String },
+        requestEmailSentAt: { type: Date },
+        // Owner's "Extend Agreement" click is the owner's consent (agreed rule).
+        ownerConfirmedAt: { type: Date },
+        tenantSignedAt: { type: Date },
+        tenantESignName: { type: String },
+        tenantSignatureDataUrl: { type: String },
+        completedAt: { type: Date },
+        completionEmailSentAt: { type: Date },
+        pdfUrl: { type: String },
+        expiredAt: { type: Date },
+        // Raised for an agreement that had already expired before this workflow
+        // went live — exempt from the "link dies at expiry" rule.
+        legacy: { type: Boolean, default: false }
+    }],
+
     // Onboarding Payment Tracking (Phase 4–6.5)
     paymentLinkStatus: {
         type: String,

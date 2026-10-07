@@ -321,186 +321,20 @@ const autoReminderSchedule = cron.schedule('30 10 * * *', async () => {
     }
 });
 
-// Daily agreement renewal checks (11-month rule)
-// Runs daily at 9 AM — handles missed dates, grace period, and auto ex-tenant
+// Daily agreement expiry / extension job — see services/agreementExtensionService.js.
+// Replaces the old fixed 11-month rule: uses each tenant's real agreement end
+// date, sends one reminder exactly one calendar month before it, expires open
+// extension requests and fully exits the tenant on the expiry day. Idempotent.
 const agreementRenewalSchedule = cron.schedule('0 9 * * *', async () => {
-    if (!Tenant || !Notification) {
-        console.warn('⚠️  Skipping agreement renewal job - dependencies not loaded');
-        return;
-    }
-    console.log('🔔 Running agreement renewal check job...');
+    console.log('🔔 Running agreement expiry job...');
     try {
-        const activeTenants = await Tenant.find({ status: { $in: ['active', 'inactive'] } });
-        const now = new Date();
-        now.setHours(0, 0, 0, 0); // normalize to midnight
-
-        let notifsSent = 0;
-        let exTenantCount = 0;
-
-        for (const tenant of activeTenants) {
-            const startDate = tenant.moveInDate || tenant.agreementSignedAt || tenant.createdAt;
-            if (!startDate) continue;
-
-            const start = new Date(startDate);
-            start.setHours(0, 0, 0, 0);
-
-            // Total days since move-in
-            const daysSince = Math.floor((now - start) / (1000 * 60 * 60 * 24));
-
-            // Calculate months diff more accurately
-            const monthDiff = (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
-
-            // Day of month difference within current month
-            const dayInMonthDiff = now.getDate() - start.getDate();
-
-            // ── 11 months + 3 days grace expired → Auto Ex-Tenant ─────────────────
-            // Either more than 11 months, or exactly 11 months and 3+ days past anniversary
-            const isGraceExpired = monthDiff > 11 || (monthDiff === 11 && dayInMonthDiff >= 3);
-
-            if (isGraceExpired && tenant.status === 'active') {
-                // Auto move to inactive (ex-tenant)
-                tenant.status = 'inactive';
-                await tenant.save();
-                exTenantCount++;
-
-                // Notify tenant
-                if (tenant.loginId) {
-                    await Notification.create({
-                        toLoginId: tenant.loginId,
-                        from: 'system',
-                        type: 'system',
-                        meta: { title: '⚠️ Agreement Expired — Account Suspended', message: 'Your 11-month agreement has expired and the 3-day grace period is over. Your account has been marked inactive. Please contact your property owner to renew.' },
-                        read: false
-                    });
-                }
-
-                // Notify owner
-                if (tenant.ownerLoginId) {
-                    await Notification.create({
-                        toLoginId: tenant.ownerLoginId,
-                        from: 'system',
-                        type: 'system',
-                        meta: { title: `🚨 Tenant ${tenant.name} — Agreement Expired`, message: `Tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) agreement has expired and grace period is over. They have been marked inactive. Please renew or process moveout.` },
-                        read: false
-                    });
-                }
-
-                // Send email to tenant
-                if (tenant.email) {
-                    await sendMail(
-                        tenant.email,
-                        '⚠️ Your Roomhy Agreement Has Expired',
-                        `Dear ${tenant.name}, your 11-month rental agreement has expired. Please contact your property owner to renew.`,
-                        `<h2>Agreement Expired</h2><p>Dear ${tenant.name},</p><p>Your 11-month rental agreement at <b>${tenant.propertyTitle || 'your property'}</b> has expired and the 3-day grace period is now over.</p><p>Your account has been marked inactive. Please contact your property owner immediately to renew your agreement.</p><br><p>— Roomhy Team</p>`
-                    ).catch(e => console.error('Email failed:', e.message));
-                }
-
-                console.log(`🚨 Auto ex-tenant: ${tenant.name} (${tenant.loginId}) — ${daysSince} days`);
-                notifsSent++;
-                continue; // Skip other checks for this tenant
-            }
-
-            // ── 11-month mark — Agreement Expired, 3-day grace starts ──────────────
-            // Fire on anniversary day OR within 2 days after (in case cron missed)
-            const isAt11Month = monthDiff === 11 && dayInMonthDiff >= 0 && dayInMonthDiff <= 2;
-
-            if (isAt11Month && tenant.status === 'active') {
-                // Check if we already sent this notification recently (dedup)
-                const recentNotif = await Notification.findOne({
-                    toLoginId: tenant.loginId,
-                    title: { $regex: 'ACTION REQUIRED', $options: 'i' },
-                    createdAt: { $gte: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) }
-                }).catch(() => null);
-
-                if (!recentNotif) {
-                    if (tenant.loginId) {
-                        await Notification.create({
-                            toLoginId: tenant.loginId,
-                            from: 'system',
-                            type: 'system',
-                            meta: { title: 'ACTION REQUIRED: Agreement Expired', message: 'Your 11-month rental agreement has expired. You have 3 days to renew. After 3 days, your account will be suspended.' },
-                            read: false
-                        });
-                    }
-                    if (tenant.ownerLoginId) {
-                        await Notification.create({
-                            toLoginId: tenant.ownerLoginId,
-                            from: 'system',
-                            type: 'system',
-                            meta: { title: `Tenant Agreement Expired — ${tenant.name}`, message: `The 11-month agreement for tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) has expired. They have 3 days to renew before being marked inactive.` },
-                            read: false
-                        });
-                    }
-
-                    // Email tenant
-                    if (tenant.email) {
-                        await sendMail(
-                            tenant.email,
-                            '⚠️ ACTION REQUIRED: Your Agreement Has Expired',
-                            `Dear ${tenant.name}, your 11-month agreement has expired. You have 3 days to renew.`,
-                            `<h2>Agreement Expired — Action Required</h2><p>Dear ${tenant.name},</p><p>Your 11-month rental agreement at <b>${tenant.propertyTitle || 'your property'}</b> has expired.</p><p><b>You have 3 days to renew your agreement.</b> After 3 days, your account will be automatically suspended.</p><p>Please contact your property owner immediately.</p><br><p>— Roomhy Team</p>`
-                        ).catch(e => console.error('Email failed:', e.message));
-                    }
-
-                    notifsSent++;
-                    console.log(`⚠️  11-month expiry notif sent: ${tenant.name} (${daysSince} days)`);
-                }
-                continue;
-            }
-
-            // ── 10-month mark — 1-month warning ────────────────────────────────────
-            // Fire on anniversary day OR within 2 days after (catch-up)
-            const isAt10Month = monthDiff === 10 && dayInMonthDiff >= 0 && dayInMonthDiff <= 2;
-
-            if (isAt10Month && tenant.status === 'active') {
-                // Dedup: check if already sent in last 3 days
-                const recentNotif = await Notification.findOne({
-                    toLoginId: tenant.loginId,
-                    title: { $regex: 'Agreement Renewal Upcoming', $options: 'i' },
-                    createdAt: { $gte: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) }
-                }).catch(() => null);
-
-                if (!recentNotif) {
-                    if (tenant.loginId) {
-                        await Notification.create({
-                            toLoginId: tenant.loginId,
-                            from: 'system',
-                            type: 'system',
-                            meta: { title: '🔔 Agreement Renewal Upcoming', message: 'Your 11-month rental agreement will expire in 1 month. Please prepare for renewal with your property owner.' },
-                            read: false
-                        });
-                    }
-                    if (tenant.ownerLoginId) {
-                        await Notification.create({
-                            toLoginId: tenant.ownerLoginId,
-                            from: 'system',
-                            type: 'system',
-                            meta: { title: `Tenant Agreement Expiring Soon — ${tenant.name}`, message: `The 11-month agreement for tenant ${tenant.name} (Room: ${tenant.roomNo || 'N/A'}) will expire in 1 month.` },
-                            read: false
-                        });
-                    }
-
-                    // Email tenant
-                    if (tenant.email) {
-                        await sendMail(
-                            tenant.email,
-                            '🔔 Your Agreement Expires in 1 Month',
-                            `Dear ${tenant.name}, your rental agreement expires in 1 month. Please contact your property owner to renew.`,
-                            `<h2>Agreement Renewal Reminder</h2><p>Dear ${tenant.name},</p><p>Your 11-month rental agreement at <b>${tenant.propertyTitle || 'your property'}</b> will expire in <b>1 month</b>.</p><p>Please contact your property owner to discuss renewal before it expires.</p><br><p>— Roomhy Team</p>`
-                        ).catch(e => console.error('Email failed:', e.message));
-                    }
-
-                    notifsSent++;
-                    console.log(`🔔 10-month warning sent: ${tenant.name} (${daysSince} days)`);
-                }
-            }
-        }
-
-        console.log(`✅ Agreement renewal job done: ${notifsSent} notifications, ${exTenantCount} auto ex-tenants`);
+        const { runAgreementExpiryJob } = require('./agreementExtensionService');
+        const stats = await runAgreementExpiryJob();
+        console.log(`✅ Agreement expiry job done: ${stats.reminders} reminders, ${stats.expiredRequests} requests expired, ${stats.exited} tenants exited`);
     } catch (err) {
-        console.error('❌ Agreement renewal job error:', err.message);
+        console.error('❌ Agreement expiry job error:', err.message);
     }
-});
+}, { timezone: 'Asia/Kolkata' });
 
 
 // Send rent reminder email
@@ -749,7 +583,7 @@ module.exports = {
         console.log('   - Rent reminders: Daily 10 AM (10-15th)');
         console.log('   - Delayed payment reminders: 9 AM, 2 PM, 6 PM (after 15th)');
         console.log('   - Auto reminders: Daily 10:30 AM (enabled manually per unpaid rent)');
-        console.log('   - Agreement renewals: Daily 9 AM (10 and 11 month checks)');
+        console.log('   - Agreement expiry/extension: Daily 9 AM IST (1-month reminder, expiry exit)');
         console.log('   - Move-out notice completion: Daily 1 AM');
     },
     stopCronJobs: () => {

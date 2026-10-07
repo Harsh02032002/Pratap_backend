@@ -18,6 +18,7 @@ const ALWAYS_EXCLUDED_PROJECTION =
     ' -kyc.otpVerifiedAt' +
     ' -digitalCheckin.kyc' +
     ' -digitalCheckin.agreement.signatureDataUrl' +
+    ' -agreementExtensions.tenantSignatureDataUrl' +
     ' -agreementRequestId' +
     ' -agreementESignName';
 

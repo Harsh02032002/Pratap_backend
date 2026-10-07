@@ -37,7 +37,7 @@ function resolvePaymentAppBase(frontendOrigin) {
     return appBase;
 }
 
-async function generateTenantAgreementPdfBuffer(tenant, record = {}) {
+async function generateTenantAgreementPdfBuffer(tenant, record = {}, overrides = {}) {
     const agreement = record?.tenantAgreement || {};
     const profile = tenant?.digitalCheckin?.profile || {};
     const details = tenant?.digitalCheckin?.agreementDetails || {};
@@ -92,7 +92,10 @@ async function generateTenantAgreementPdfBuffer(tenant, record = {}) {
         gstCharges: details.gstCharges || '0',
         signatureDataUrl: agreement.signatureDataUrl || tenant?.digitalCheckin?.agreement?.signatureDataUrl || '',
         eSignName: tenant.agreementESignName || agreement.eSignName || tenant.name || '',
-        signedDate: agreement.signedAt ? new Date(agreement.signedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)
+        signedDate: agreement.signedAt ? new Date(agreement.signedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
+        // Agreement extensions reuse the same document, overriding period,
+        // signature and header (see services/agreementExtensionService.js).
+        ...overrides
     });
 }
 

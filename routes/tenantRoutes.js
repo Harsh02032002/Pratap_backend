@@ -395,6 +395,90 @@ router.post(
     }
 );
 
+// ── Agreement expiry / extension (services/agreementExtensionService.js) ──────
+// Owner-facing status for every active tenant: end date, days left, phase and
+// extension status. Computed live so the countdown never goes stale.
+router.get(
+    '/agreement-expiry',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    async (req, res) => {
+        try {
+            const { buildCycleSummary } = require('../services/agreementExtensionService');
+            const ownerLoginId = req.user.role === 'owner'
+                ? callerLoginId(req)
+                : String(req.query.ownerLoginId || '').toUpperCase();
+            if (!ownerLoginId) return res.status(400).json({ success: false, message: 'ownerLoginId is required' });
+            const tenants = await Tenant.find({ ownerLoginId, status: 'active', isDeleted: { $ne: true } })
+                .select('name loginId roomNo propertyTitle status isDeleted moveInDate moveoutRequest digitalCheckin.agreementDetails agreementLifecycle agreementExtensions')
+                .lean();
+            const items = tenants.map((t) => {
+                const summary = buildCycleSummary(t);
+                return summary && { tenantId: String(t._id), loginId: t.loginId, name: t.name, ...summary };
+            }).filter(Boolean);
+            res.json({ success: true, items });
+        } catch (err) {
+            res.status(500).json({ success: false, message: err.message });
+        }
+    }
+);
+
+const loadOwnedTenantForExtension = async (req, res) => {
+    const tenant = await Tenant.findById(req.params.tenantId).select('ownerLoginId');
+    if (!tenant) { res.status(404).json({ success: false, message: 'Tenant not found' }); return null; }
+    if (req.user.role === 'owner' && String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
+        res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
+        return null;
+    }
+    return tenant;
+};
+
+router.post(
+    '/:tenantId/agreement-extension',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    async (req, res) => {
+        try {
+            if (!(await loadOwnedTenantForExtension(req, res))) return;
+            const { requestExtension, buildCycleSummary } = require('../services/agreementExtensionService');
+            const result = await requestExtension(req.params.tenantId, {
+                months: req.body?.months,
+                actorLoginId: callerLoginId(req),
+                actorRole: req.user.role,
+                origin: req.headers.origin
+            });
+            res.json({
+                success: true,
+                message: result.emailSent
+                    ? `Extension request emailed to ${result.tenant.email}`
+                    : 'Extension request saved, but the email could not be sent. Use Resend.',
+                emailSent: result.emailSent,
+                summary: buildCycleSummary(result.tenant)
+            });
+        } catch (err) {
+            res.status(err.status || 500).json({ success: false, message: err.message });
+        }
+    }
+);
+
+router.post(
+    '/:tenantId/agreement-extension/resend',
+    protect,
+    authorize('superadmin', 'areamanager', 'owner'),
+    auditTrail('tenants'),
+    async (req, res) => {
+        try {
+            if (!(await loadOwnedTenantForExtension(req, res))) return;
+            const { resendExtensionRequest } = require('../services/agreementExtensionService');
+            const result = await resendExtensionRequest(req.params.tenantId, { origin: req.headers.origin });
+            res.json({ success: true, emailSent: result.emailSent, message: result.emailSent ? 'Extension link re-sent' : 'Email could not be sent' });
+        } catch (err) {
+            res.status(err.status || 500).json({ success: false, message: err.message });
+        }
+    }
+);
+
 router.post(
     '/kyc/resend-link',
     protect,
