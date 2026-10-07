@@ -96,6 +96,96 @@ const rateLimitCounter = new promClient.Counter({
 });
 
 // ============================================================================
+// Redis / Cache
+// ============================================================================
+// Labels are bounded enums only: panel (owner|sa|staff), resource, op, reason,
+// limiter. Never a user/owner/employee id or a raw cache key — those are
+// unbounded and would blow up the series count.
+
+const cacheMetrics = {
+    hits: new promClient.Counter({
+        name: 'cache_hits_total',
+        help: 'Cache reads served from Redis',
+        labelNames: ['panel', 'resource'],
+        registers: [register]
+    }),
+    misses: new promClient.Counter({
+        name: 'cache_misses_total',
+        help: 'Cache reads not found in Redis (served from MongoDB)',
+        labelNames: ['panel', 'resource'],
+        registers: [register]
+    }),
+    errors: new promClient.Counter({
+        name: 'cache_errors_total',
+        help: 'Cache operations that failed and fell back to MongoDB',
+        labelNames: ['panel', 'op'],
+        registers: [register]
+    }),
+    bypass: new promClient.Counter({
+        name: 'cache_bypass_total',
+        help: 'Requests that skipped the cache (disabled, no_scope, redis_unavailable, too_large)',
+        labelNames: ['panel', 'resource', 'reason'],
+        registers: [register]
+    })
+};
+
+const redisMetrics = {
+    commandDuration: new promClient.Histogram({
+        name: 'redis_command_duration_seconds',
+        help: 'Redis command latency in seconds',
+        labelNames: ['op'],
+        buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+        registers: [register]
+    }),
+    connectionErrors: new promClient.Counter({
+        name: 'redis_connection_errors_total',
+        help: 'Redis client error events (connection refused, reset, timeout, auth)',
+        registers: [register]
+    }),
+    rateLimitFallback: new promClient.Counter({
+        name: 'rate_limit_store_fallback_total',
+        help: 'Rate-limit operations counted in process memory because Redis failed',
+        labelNames: ['limiter', 'op'],
+        registers: [register]
+    }),
+    up: new promClient.Gauge({
+        name: 'redis_up',
+        help: '1 when this process has a ready Redis connection',
+        registers: [register]
+    })
+};
+
+// Memory and evictions come from Redis INFO (cached 10s in redisClient), read
+// at scrape time. Lazy require: redisClient requires this module too.
+async function readRedisInfo() {
+    try {
+        return await require('./redisClient').getInfoSnapshot();
+    } catch (_) {
+        return null;
+    }
+}
+
+new promClient.Gauge({
+    name: 'redis_memory_used_bytes',
+    help: 'Redis used_memory as reported by INFO',
+    registers: [register],
+    async collect() {
+        const info = await readRedisInfo();
+        if (info) this.set(info.usedMemoryBytes);
+    }
+});
+
+new promClient.Gauge({
+    name: 'redis_evicted_keys',
+    help: 'Redis evicted_keys since the Redis server started (INFO); any rise means memory pressure',
+    registers: [register],
+    async collect() {
+        const info = await readRedisInfo();
+        if (info) this.set(info.evictedKeys);
+    }
+});
+
+// ============================================================================
 // Middleware
 // ============================================================================
 
@@ -223,9 +313,21 @@ function init(app) {
     app.use(metricsMiddleware);
     
     // Expose metrics endpoint
-    app.get('/metrics', (req, res) => {
+    // register.metrics() returns a Promise in prom-client 15 — without the
+    // await this endpoint served the literal text "[object Promise]".
+    // Now that it returns real data it must not be public: it needs
+    // METRICS_TOKEN as a bearer token (Prometheus `authorization` config), and
+    // is a 404 when METRICS_TOKEN is unset. A loopback check would not work —
+    // behind nginx every request arrives from 127.0.0.1.
+    app.get('/metrics', async (req, res) => {
+        const token = process.env.METRICS_TOKEN || '';
+        const given = Buffer.from(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+        const expected = Buffer.from(token);
+        const ok = token.length >= 16 && given.length === expected.length &&
+            require('crypto').timingSafeEqual(given, expected);
+        if (!ok) return res.status(404).send('Not Found');
         res.set('Content-Type', register.contentType);
-        res.end(register.metrics());
+        res.end(await register.metrics());
     });
     
     // Health endpoint with metrics
@@ -259,6 +361,8 @@ module.exports = {
         dbQuery: dbQueryDuration
     },
     db: dbMetrics,
+    cache: cacheMetrics,
+    redis: redisMetrics,
     health: healthCheckMetrics,
     track: {
         rateLimit: trackRateLimit

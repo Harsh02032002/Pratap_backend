@@ -16,8 +16,87 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+const mongoose  = require('mongoose');
 const Employee  = require('../models/Employee');
 const AuditLog  = require('../models/AuditLog');
+const cache     = require('../utils/cache');
+const { buildCacheKey } = require('../utils/cacheKeys');
+
+// Visit-derived scope only ever GROWS access as visits are added; the short
+// TTL bounds how long a removed visit/reassignment keeps granting access.
+const VISIT_SCOPE_RESOURCE = 'visit-scope';
+const VISIT_SCOPE_TTL_SECONDS = 60;
+
+const toObjectIds = (ids) => (ids || []).map((id) =>
+  id instanceof mongoose.Types.ObjectId || !/^[a-f0-9]{24}$/i.test(String(id))
+    ? id
+    : new mongoose.Types.ObjectId(String(id)));
+
+// Scope is visit-report based: employee → VisitData/VisitReport → property → owner.
+// Do NOT match ownerInfo.phone/email to the employee — empty strings match every
+// report with a blank owner phone, which leaked other employees' records.
+// Throws on any DB error so a partial/empty scope is never cached.
+async function resolveVisitScope(emp, staffValues) {
+  const VisitData = require('../models/VisitData');
+  const VisitReport = require('../models/VisitReport');
+  const Property = require('../models/Property');
+  const Owner = require('../models/Owner');
+
+  const visitStaffFilter = staffValues.length
+    ? {
+        $or: [
+          { staffId: { $in: staffValues } },
+          { submittedByLoginId: { $in: staffValues } },
+          { submittedBy: { $in: staffValues } },
+          { submittedById: { $in: staffValues } }
+        ]
+      }
+    : { _id: { $exists: false } };
+
+  const [myVisits, myVisitReports] = await Promise.all([
+    VisitData.find(visitStaffFilter)
+      .select('visitId propertyName ownerLoginId generatedCredentials')
+      .lean(),
+    VisitReport.find({ areaManager: emp._id })
+      .select('_id propertyInfo generatedCredentials property')
+      .lean()
+  ]);
+
+  const visitPropNames = [
+    ...myVisits.map(v => v.propertyName).filter(Boolean),
+    ...myVisitReports.map(vr => vr.propertyInfo?.name).filter(Boolean)
+  ];
+  let visitOwnerIds = [
+    ...myVisits.map(v => v.ownerLoginId || v.generatedCredentials?.loginId).filter(Boolean),
+    ...myVisitReports.map(vr => vr.generatedCredentials?.loginId).filter(Boolean)
+  ];
+  const visitIds = [
+    ...myVisits.map(v => v.visitId).filter(Boolean),
+    ...myVisitReports.map(vr => String(vr._id)).filter(Boolean)
+  ];
+  let visitPropObjectIds = myVisitReports.map(vr => vr.property).filter(Boolean);
+
+  if (visitIds.length > 0) {
+    const linkedProps = await Property.find({ visitId: { $in: visitIds } })
+      .select('_id ownerLoginId')
+      .lean();
+    visitPropObjectIds = [...visitPropObjectIds, ...linkedProps.map(p => p._id)];
+    visitOwnerIds = [
+      ...visitOwnerIds,
+      ...linkedProps.map(p => p.ownerLoginId).filter(Boolean)
+    ];
+  }
+
+  visitOwnerIds = [...new Set(visitOwnerIds.map(id => String(id).trim().toUpperCase()).filter(Boolean))];
+
+  let ownerObjectIds = [];
+  if (visitOwnerIds.length > 0) {
+    const ownerDocs = await Owner.find({ loginId: { $in: visitOwnerIds } }).select('_id').lean();
+    ownerObjectIds = ownerDocs.map(o => o._id);
+  }
+
+  return { visitPropNames, visitOwnerIds, visitIds, visitPropObjectIds, ownerObjectIds };
+}
 
 // ─── Internal: write access-denial audit log (non-blocking) ──────────────────
 async function _denyLog(req, { reason, moduleKey = '', subModuleKey = '' }) {
@@ -126,10 +205,6 @@ async function applyEmployeeScope(req, res, next) {
     let visitIds = [];
     let visitPropObjectIds = [];
     try {
-      const VisitData = require('../models/VisitData');
-      const VisitReport = require('../models/VisitReport');
-      const Property = require('../models/Property');
-      const Owner = require('../models/Owner');
       const empLoginId = String(emp.loginId || '').trim();
       const empIdStr = String(emp._id || '').trim();
       const staffValues = [...new Set([
@@ -140,56 +215,32 @@ async function applyEmployeeScope(req, res, next) {
         String(emp.employeeId || '').trim()
       ].filter(Boolean))];
 
-      const visitStaffFilter = staffValues.length
-        ? {
-            $or: [
-              { staffId: { $in: staffValues } },
-              { submittedByLoginId: { $in: staffValues } },
-              { submittedBy: { $in: staffValues } },
-              { submittedById: { $in: staffValues } }
-            ]
-          }
-        : { _id: { $exists: false } };
+      // Only the visit-derived part is cached (4 queries). The Employee doc
+      // above — permissions, restrictedModules, assignedProperties — is still
+      // read fresh on every request, so a permission change or deactivation
+      // takes effect immediately. Scope id is the DB employee _id, never a
+      // client value; a missing id yields a null key → no caching.
+      const visitScope = await cache.wrap(
+        buildCacheKey({
+          panel: 'staff',
+          scopeType: 'employee',
+          scopeId: emp._id,
+          resource: VISIT_SCOPE_RESOURCE,
+          params: { staffValues }
+        }),
+        VISIT_SCOPE_TTL_SECONDS,
+        () => resolveVisitScope(emp, staffValues),
+        { panel: 'staff', resource: VISIT_SCOPE_RESOURCE }
+      );
 
-      const [myVisits, myVisitReports] = await Promise.all([
-        VisitData.find(visitStaffFilter)
-          .select('visitId propertyName ownerLoginId generatedCredentials')
-          .lean(),
-        VisitReport.find({ areaManager: emp._id })
-          .select('_id propertyInfo generatedCredentials property')
-          .lean()
-      ]);
-
-      visitPropNames = [
-        ...myVisits.map(v => v.propertyName).filter(Boolean),
-        ...myVisitReports.map(vr => vr.propertyInfo?.name).filter(Boolean)
-      ];
-      visitOwnerIds = [
-        ...myVisits.map(v => v.ownerLoginId || v.generatedCredentials?.loginId).filter(Boolean),
-        ...myVisitReports.map(vr => vr.generatedCredentials?.loginId).filter(Boolean)
-      ];
-      visitIds = [
-        ...myVisits.map(v => v.visitId).filter(Boolean),
-        ...myVisitReports.map(vr => String(vr._id)).filter(Boolean)
-      ];
-      visitPropObjectIds = myVisitReports.map(vr => vr.property).filter(Boolean);
-
-      if (visitIds.length > 0) {
-        const linkedProps = await Property.find({ visitId: { $in: visitIds } })
-          .select('_id ownerLoginId')
-          .lean();
-        visitPropObjectIds = [...visitPropObjectIds, ...linkedProps.map(p => p._id)];
-        visitOwnerIds = [
-          ...visitOwnerIds,
-          ...linkedProps.map(p => p.ownerLoginId).filter(Boolean)
-        ];
-      }
-
-      visitOwnerIds = [...new Set(visitOwnerIds.map(id => String(id).trim().toUpperCase()).filter(Boolean))];
-
-      if (visitOwnerIds.length > 0) {
-        const ownerDocs = await Owner.find({ loginId: { $in: visitOwnerIds } }).select('_id').lean();
-        emp.assignedOwners = [...(emp.assignedOwners || []), ...ownerDocs.map(o => o._id)];
+      visitPropNames = visitScope.visitPropNames;
+      visitOwnerIds = visitScope.visitOwnerIds;
+      visitIds = visitScope.visitIds;
+      // JSON turns ObjectIds into strings; aggregate pipelines do not cast,
+      // so restore the original types.
+      visitPropObjectIds = toObjectIds(visitScope.visitPropObjectIds);
+      if (visitScope.ownerObjectIds.length > 0) {
+        emp.assignedOwners = [...(emp.assignedOwners || []), ...toObjectIds(visitScope.ownerObjectIds)];
       }
     } catch (vErr) {
       console.warn('[employeeScope] VisitData/VisitReport scope resolution warning:', vErr.message);

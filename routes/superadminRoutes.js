@@ -12,6 +12,33 @@ const Room = require('../models/Room');
 const Employee = require('../models/Employee');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { cacheJsonResponse } = require('../utils/cache');
+const { buildCacheKey } = require('../utils/cacheKeys');
+
+// Only a real superadmin/admin may read or fill the SA namespace. authorize('superadmin')
+// also admits staff roles, and for them these handlers would be scoped — so any
+// non-SA caller gets null (= bypass, straight to MongoDB). Role comes from the
+// DB-resolved req.user, never the request.
+const isPlatformAdmin = (req) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  return (role === 'superadmin' || role === 'admin') && req.employeeScope?.isEmployee !== true;
+};
+const saGlobalKey = (resource, params) => (req) =>
+  isPlatformAdmin(req) ? buildCacheKey({ panel: 'sa', scopeType: 'global', resource, params: params(req) }) : null;
+
+// Analytics only, invalidated by TTL (data changes from too many write paths
+// for exact invalidation); POST /api/admin/clear-cache drops them on demand.
+const saHomeOverviewCache = cacheJsonResponse({
+  panel: 'sa', resource: 'sa-home-overview', ttlSeconds: 60,
+  // ?city=A&city=B arrives as an array; String() would collide it with ?city=A,B.
+  keyFor: (req) => (req.query.city === undefined || typeof req.query.city === 'string'
+    ? saGlobalKey('sa-home-overview', () => ({ city: req.query.city || '' }))(req)
+    : null),
+});
+const saReportsOverviewCache = cacheJsonResponse({
+  panel: 'sa', resource: 'sa-reports-overview', ttlSeconds: 300,
+  keyFor: saGlobalKey('sa-reports-overview', () => null),
+});
 const {
   applyPropertyScope,
   applyOwnerScope,
@@ -318,7 +345,7 @@ router.get('/stats', protect, authorize('superadmin', 'areamanager', 'employee',
 });
 
 // Home Overview Stats (Scoped for employees)
-router.get('/home/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, async (req, res) => {
+router.get('/home/overview', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), applyEmployeeScope, saHomeOverviewCache, async (req, res) => {
   try {
     const Tenant = require('../models/Tenant');
     const { city } = req.query;
@@ -1949,7 +1976,7 @@ router.post('/revenue/payout/:id/transfer', protect, authorize('superadmin'), as
 });
 
 // Reports Overview
-router.get('/reports/overview', protect, authorize('superadmin'), async (req, res) => {
+router.get('/reports/overview', protect, authorize('superadmin'), saReportsOverviewCache, async (req, res) => {
   const fs = require('fs');
   const path = require('path');
   const logPath = path.join(__dirname, '../reports-debug.log');

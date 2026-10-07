@@ -1,5 +1,8 @@
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
+// Shared across processes when REDIS_STATE_ENABLED=true; otherwise (and
+// during any Redis failure) the same per-process memory counting as before.
+const { createRateLimitStore } = require('./rateLimitStore');
 
 function boolFromEnv(value, fallback = false) {
     if (value === undefined || value === null || value === '') return fallback;
@@ -85,6 +88,7 @@ console.log('🛡️  Rate limits in effect:', {
 });
 
 const globalApiLimiter = rateLimit({
+    store: createRateLimitStore('global'),
     windowMs: 15 * 60 * 1000,
     // `user:` keys only come from a verified JWT (see getRateLimitKey), so a
     // forged or expired token still falls into the anonymous budget.
@@ -100,6 +104,7 @@ const globalApiLimiter = rateLimit({
 
 // Login, register, password set/reset flows
 const authLimiter = rateLimit({
+    store: createRateLimitStore('auth'),
     windowMs: 15 * 60 * 1000,
     max: AUTH_MAX,
     standardHeaders: true,
@@ -113,6 +118,7 @@ const authLimiter = rateLimit({
 
 // OTP request and verify — applies across all roles (user, owner, tenant)
 const otpLimiter = rateLimit({
+    store: createRateLimitStore('otp'),
     windowMs: 10 * 60 * 1000,
     max: OTP_MAX,
     standardHeaders: true,
@@ -126,6 +132,7 @@ const otpLimiter = rateLimit({
 
 // General form submissions (enquiries, property add/edit, KYC submit, email)
 const formLimiter = rateLimit({
+    store: createRateLimitStore('form'),
     windowMs: 15 * 60 * 1000,
     max: FORM_MAX,
     standardHeaders: true,
@@ -139,6 +146,7 @@ const formLimiter = rateLimit({
 
 // Contact form — lower hourly cap to prevent spam
 const contactLimiter = rateLimit({
+    store: createRateLimitStore('contact'),
     windowMs: 60 * 60 * 1000,
     max: CONTACT_MAX,
     standardHeaders: true,
@@ -152,6 +160,7 @@ const contactLimiter = rateLimit({
 
 // Refund requests — strict hourly cap (financial endpoint)
 const refundLimiter = rateLimit({
+    store: createRateLimitStore('refund'),
     windowMs: 60 * 60 * 1000,
     max: REFUND_MAX,
     standardHeaders: true,
@@ -165,6 +174,7 @@ const refundLimiter = rateLimit({
 
 // Chat message REST endpoints — per-minute cap
 const chatLimiter = rateLimit({
+    store: createRateLimitStore('chat'),
     windowMs: 60 * 1000,
     max: CHAT_MAX,
     standardHeaders: true,
@@ -178,6 +188,7 @@ const chatLimiter = rateLimit({
 
 // Short IP-based limiter to protect login/auth endpoints from massive brute force attempts (infrastructure protection)
 const authIpLimiter = rateLimit({
+    store: createRateLimitStore('auth-ip'),
     windowMs: 1 * 60 * 1000, // 1 minute window
     max: 30, // max 30 attempts per minute per IP
     standardHeaders: true,
@@ -191,6 +202,7 @@ const authIpLimiter = rateLimit({
 
 // Short IP-based limiter to protect OTP endpoints from massive brute force attempts (infrastructure protection)
 const otpIpLimiter = rateLimit({
+    store: createRateLimitStore('otp-ip'),
     windowMs: 1 * 60 * 1000, // 1 minute window
     max: 10, // max 10 OTP requests/verifications per minute per IP
     standardHeaders: true,

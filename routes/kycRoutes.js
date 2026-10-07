@@ -12,9 +12,16 @@ const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyKycSignupScope } = require('../utils/scopeHelpers');
 const { maskAadhaar, maskPan } = require('../utils/maskIdNumbers');
 
-// Temporary OTP store (for production, move to Redis/database)
-const signupOtpStore = new Map();
-const loginOtpStore = new Map();
+// Shared across processes through Redis when REDIS_STATE_ENABLED=true,
+// otherwise in-process (see utils/otpStore.js).
+const crypto = require('crypto');
+const { createOtpStore } = require('../utils/otpStore');
+const signupOtpStore = createOtpStore('kyc-signup');
+const loginOtpStore = createOtpStore('kyc-login');
+// The pending signup is only ever compared against the resubmitted form, so
+// keep a hash rather than the plaintext password in the OTP store (which may
+// be Redis, outside this process).
+const hashPendingPassword = (password) => crypto.createHash('sha256').update(String(password ?? '')).digest('hex');
 
 function generateSignupOtp() {
     return String(Math.floor(100000 + Math.random() * 900000));
@@ -96,10 +103,10 @@ router.post('/signup/request-otp', otpIpLimiter, otpLimiter, captchaProtection({
         }
 
         const otp = generateSignupOtp();
-        signupOtpStore.set(email, {
+        await signupOtpStore.set(email, {
             otp,
             expiresAt: Date.now() + 10 * 60 * 1000,
-            payload: { firstName, lastName, email, phone, password }
+            payload: { firstName, lastName, email, phone, passwordHash: hashPendingPassword(password) }
         });
 
         if (existingSignup) {
@@ -185,12 +192,12 @@ router.post('/signup/verify-and-create', async (req, res) => {
             return res.status(400).json({ message: 'Missing required fields' });
         }
 
-        const otpEntry = signupOtpStore.get(email);
+        const otpEntry = await signupOtpStore.get(email);
         if (!otpEntry) {
             return res.status(401).json({ message: 'Verification code expired or not requested' });
         }
         if (Date.now() > otpEntry.expiresAt) {
-            signupOtpStore.delete(email);
+            await signupOtpStore.delete(email);
             return res.status(401).json({ message: 'Verification code has expired' });
         }
         if (otpEntry.otp !== otp) {
@@ -201,7 +208,7 @@ router.post('/signup/verify-and-create', async (req, res) => {
         if (
             pending.email !== email ||
             pending.phone !== phone ||
-            pending.password !== password ||
+            pending.passwordHash !== hashPendingPassword(password) ||
             pending.firstName !== firstName ||
             (pending.lastName || '') !== lastName
         ) {
@@ -210,7 +217,7 @@ router.post('/signup/verify-and-create', async (req, res) => {
 
         const existing = await User.findOne({ $or: [{ email }, { phone }] });
         if (existing) {
-            signupOtpStore.delete(email);
+            await signupOtpStore.delete(email);
             return res.status(400).json({ message: 'Email or phone already registered' });
         }
 
@@ -283,7 +290,7 @@ router.post('/signup/verify-and-create', async (req, res) => {
             credentialsHtml
         );
 
-        signupOtpStore.delete(email);
+        await signupOtpStore.delete(email);
 
         const token = generateToken(user);
         return res.status(201).json({
@@ -328,7 +335,7 @@ router.post('/login/request-otp', otpIpLimiter, otpLimiter, captchaProtection({ 
         }
 
         const otp = generateSignupOtp();
-        loginOtpStore.set(email, {
+        await loginOtpStore.set(email, {
             otp,
             expiresAt: Date.now() + 10 * 60 * 1000,
             email
@@ -398,12 +405,12 @@ router.post('/login/verify-otp', async (req, res) => {
             return res.status(400).json({ message: 'Email and verification code are required' });
         }
 
-        const otpEntry = loginOtpStore.get(email);
+        const otpEntry = await loginOtpStore.get(email);
         if (!otpEntry) {
             return res.status(401).json({ message: 'Verification code expired or not requested' });
         }
         if (Date.now() > otpEntry.expiresAt) {
-            loginOtpStore.delete(email);
+            await loginOtpStore.delete(email);
             return res.status(401).json({ message: 'Verification code has expired' });
         }
         if (otpEntry.otp !== otp) {
@@ -412,22 +419,22 @@ router.post('/login/verify-otp', async (req, res) => {
 
         const signup = await KYCVerification.findOne({ email });
         if (!signup) {
-            loginOtpStore.delete(email);
+            await loginOtpStore.delete(email);
             return res.status(404).json({ message: 'Signup record not found for this email' });
         }
 
         const user = await User.findOne({ email });
         if (!user) {
-            loginOtpStore.delete(email);
+            await loginOtpStore.delete(email);
             return res.status(404).json({ message: 'Account is not ready for login yet. Please contact support.' });
         }
 
         if (user.isActive === false) {
-            loginOtpStore.delete(email);
+            await loginOtpStore.delete(email);
             return res.status(403).json({ message: 'Account disabled' });
         }
 
-        loginOtpStore.delete(email);
+        await loginOtpStore.delete(email);
 
         const token = generateToken(user);
         return res.json({

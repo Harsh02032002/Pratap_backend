@@ -14,18 +14,11 @@ if (!process.env.JWT_SECRET) {
 const { sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const OWNER_LOGIN_ID_REGEX = /^(ROOMHY\d+|\d{10}|\d{3,6})$/i;
 
-// OTP storage (in-memory Map)
-const otpStore = new Map();
-
-// Auto-clean expired otpStore entries every 5 minutes to prevent memory leaks
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of otpStore.entries()) {
-        if (value.expiryTime && now > value.expiryTime) {
-            otpStore.delete(key);
-        }
-    }
-}, 5 * 60 * 1000).unref();
+// OTP + password-reset session storage. Shared across processes through
+// Redis when REDIS_STATE_ENABLED=true, otherwise in-process (see utils/otpStore.js).
+// Entries expire on their own expiryTime, so no sweeper is needed here.
+const { createOtpStore } = require('../utils/otpStore');
+const otpStore = createOtpStore('auth');
 
 function generateToken(user) {
     return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -132,7 +125,7 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         const expiryTime = Date.now() + 10 * 60 * 1000; // 10 minutes
 
         // Store OTP with email and expiry
-        otpStore.set(email, { otp, expiryTime });
+        await otpStore.set(email, { otp, expiryTime });
         console.log('[ForgotPassword] Generated OTP for:', email);
 
         // Send OTP email
@@ -204,24 +197,24 @@ exports.forgotPasswordVerifyOTP = async (req, res) => {
         }
 
         // Check OTP
-        const otpData = otpStore.get(email);
+        const otpData = await otpStore.get(email);
 
         if (!otpData) {
             return res.status(401).json({ message: 'OTP expired or not requested. Please request a new OTP.' });
         }
 
         if (Date.now() > otpData.expiryTime) {
-            otpStore.delete(email);
+            await otpStore.delete(email);
             return res.status(401).json({ message: 'OTP has expired. Please request a new OTP.' });
         }
 
         // Limit verification attempts to 5
-        otpData.attempts = (otpData.attempts || 0) + 1;
+        // Atomic across processes, so parallel guesses cannot share one count.
+        otpData.attempts = await otpStore.countAttempt(email, otpData);
         if (otpData.attempts > 5) {
-            otpStore.delete(email);
+            await otpStore.delete(email);
             return res.status(401).json({ message: 'Too many invalid attempts. Please request a new OTP.' });
         }
-        otpStore.set(email, otpData);
 
         if (otpData.otp !== otp) {
             return res.status(401).json({ message: `Invalid OTP. Attempts remaining: ${5 - otpData.attempts}` });
@@ -232,10 +225,10 @@ exports.forgotPasswordVerifyOTP = async (req, res) => {
         const resetToken = jwt.sign({ email, type: 'forgot-password', jti }, process.env.JWT_SECRET, { expiresIn: '15m' });
 
         // Save reset session state with secure token id and proper expiry
-        otpStore.set(`reset:email:${email}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
+        await otpStore.set(`reset:email:${email}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
 
         // Clear OTP after successful verification
-        otpStore.delete(email);
+        await otpStore.delete(email);
 
         res.json({
             success: true,
@@ -274,12 +267,12 @@ exports.forgotPasswordReset = async (req, res) => {
         }
 
         // Verify active reset session exists and matches the token
-        const resetData = otpStore.get(`reset:email:${email}`);
+        const resetData = await otpStore.get(`reset:email:${email}`);
         if (!resetData || resetData.jti !== decoded.jti) {
             return res.status(401).json({ message: 'Reset session expired or already consumed. Please request a new OTP.' });
         }
         if (Date.now() > resetData.expiryTime) {
-            otpStore.delete(`reset:email:${email}`);
+            await otpStore.delete(`reset:email:${email}`);
             return res.status(401).json({ message: 'Reset session expired. Please request a new OTP.' });
         }
 
@@ -315,7 +308,7 @@ exports.forgotPasswordReset = async (req, res) => {
         await user.save();
 
         // Invalidate the password reset session state immediately
-        otpStore.delete(`reset:email:${email}`);
+        await otpStore.delete(`reset:email:${email}`);
 
         console.log('[ForgotPassword] Password reset for', userType, 'email:', email);
 
@@ -374,7 +367,7 @@ exports.ownerForgotPasswordRequestOTP = async (req, res) => {
         const otp = generateOTP();
         const expiryTime = Date.now() + 10 * 60 * 1000;
         const otpKey = `owner:${loginId}`;
-        otpStore.set(otpKey, { otp, expiryTime, loginId, email });
+        await otpStore.set(otpKey, { otp, expiryTime, loginId, email });
 
         const emailHtml = `
             <html>
@@ -435,19 +428,19 @@ exports.ownerForgotPasswordVerifyOTP = async (req, res) => {
         if (!OWNER_LOGIN_ID_REGEX.test(loginId)) return res.status(400).json({ message: 'Invalid Owner Login ID format. Use ROOMHY1234' });
 
         const otpKey = `owner:${loginId}`;
-        const otpData = otpStore.get(otpKey);
+        const otpData = await otpStore.get(otpKey);
         if (!otpData) return res.status(401).json({ message: 'OTP expired or not requested' });
         if (Date.now() > otpData.expiryTime) {
-            otpStore.delete(otpKey);
+            await otpStore.delete(otpKey);
             return res.status(401).json({ message: 'OTP has expired' });
         }
         // Limit verification attempts to 5
-        otpData.attempts = (otpData.attempts || 0) + 1;
+        // Atomic across processes, so parallel guesses cannot share one count.
+        otpData.attempts = await otpStore.countAttempt(otpKey, otpData);
         if (otpData.attempts > 5) {
-            otpStore.delete(otpKey);
+            await otpStore.delete(otpKey);
             return res.status(401).json({ message: 'Too many invalid attempts. Please request a new OTP.' });
         }
-        otpStore.set(otpKey, otpData);
 
         if (otpData.otp !== otp) {
             return res.status(401).json({ message: `Invalid OTP. Attempts remaining: ${5 - otpData.attempts}` });
@@ -462,9 +455,9 @@ exports.ownerForgotPasswordVerifyOTP = async (req, res) => {
         );
 
         // Store secure reset session
-        otpStore.set(`reset:owner:${loginId}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
+        await otpStore.set(`reset:owner:${loginId}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
 
-        otpStore.delete(otpKey);
+        await otpStore.delete(otpKey);
         res.json({ success: true, token: resetToken, message: 'OTP verified' });
     } catch (err) {
         console.error('ownerForgotPasswordVerifyOTP error:', err);
@@ -498,12 +491,12 @@ exports.ownerForgotPasswordReset = async (req, res) => {
         }
 
         // Verify active reset session
-        const resetData = otpStore.get(`reset:owner:${loginId}`);
+        const resetData = await otpStore.get(`reset:owner:${loginId}`);
         if (!resetData || resetData.jti !== decoded.jti) {
             return res.status(401).json({ message: 'Reset session expired or already consumed. Please request a new OTP.' });
         }
         if (Date.now() > resetData.expiryTime) {
-            otpStore.delete(`reset:owner:${loginId}`);
+            await otpStore.delete(`reset:owner:${loginId}`);
             return res.status(401).json({ message: 'Reset session expired. Please request a new OTP.' });
         }
 
@@ -529,7 +522,7 @@ exports.ownerForgotPasswordReset = async (req, res) => {
         }
 
         // Invalidate the session
-        otpStore.delete(`reset:owner:${loginId}`);
+        await otpStore.delete(`reset:owner:${loginId}`);
 
         const email = (owner.profile && owner.profile.email) || owner.email || '';
         if (email) {
@@ -573,7 +566,7 @@ exports.tenantForgotPasswordRequestOTP = async (req, res) => {
         const otp = generateOTP();
         const expiryTime = Date.now() + 10 * 60 * 1000;
         const otpKey = `tenant:${loginId}`;
-        otpStore.set(otpKey, { otp, expiryTime, loginId, email });
+        await otpStore.set(otpKey, { otp, expiryTime, loginId, email });
 
         const emailHtml = `
             <html>
@@ -613,19 +606,19 @@ exports.tenantForgotPasswordVerifyOTP = async (req, res) => {
         if (!loginId || !otp) return res.status(400).json({ message: 'Login ID and OTP are required' });
 
         const otpKey = `tenant:${loginId}`;
-        const otpData = otpStore.get(otpKey);
+        const otpData = await otpStore.get(otpKey);
         if (!otpData) return res.status(401).json({ message: 'OTP expired or not requested' });
         if (Date.now() > otpData.expiryTime) {
-            otpStore.delete(otpKey);
+            await otpStore.delete(otpKey);
             return res.status(401).json({ message: 'OTP has expired' });
         }
         // Limit verification attempts to 5
-        otpData.attempts = (otpData.attempts || 0) + 1;
+        // Atomic across processes, so parallel guesses cannot share one count.
+        otpData.attempts = await otpStore.countAttempt(otpKey, otpData);
         if (otpData.attempts > 5) {
-            otpStore.delete(otpKey);
+            await otpStore.delete(otpKey);
             return res.status(401).json({ message: 'Too many invalid attempts. Please request a new OTP.' });
         }
-        otpStore.set(otpKey, otpData);
 
         if (otpData.otp !== otp) {
             return res.status(401).json({ message: `Invalid OTP. Attempts remaining: ${5 - otpData.attempts}` });
@@ -640,9 +633,9 @@ exports.tenantForgotPasswordVerifyOTP = async (req, res) => {
         );
 
         // Store secure reset session
-        otpStore.set(`reset:tenant:${loginId}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
+        await otpStore.set(`reset:tenant:${loginId}`, { jti, expiryTime: Date.now() + 15 * 60 * 1000 });
 
-        otpStore.delete(otpKey);
+        await otpStore.delete(otpKey);
         res.json({ success: true, token: resetToken, message: 'OTP verified' });
     } catch (err) {
         console.error('tenantForgotPasswordVerifyOTP error:', err);
@@ -675,12 +668,12 @@ exports.tenantForgotPasswordReset = async (req, res) => {
         }
 
         // Verify active reset session
-        const resetData = otpStore.get(`reset:tenant:${loginId}`);
+        const resetData = await otpStore.get(`reset:tenant:${loginId}`);
         if (!resetData || resetData.jti !== decoded.jti) {
             return res.status(401).json({ message: 'Reset session expired or already consumed. Please request a new OTP.' });
         }
         if (Date.now() > resetData.expiryTime) {
-            otpStore.delete(`reset:tenant:${loginId}`);
+            await otpStore.delete(`reset:tenant:${loginId}`);
             return res.status(401).json({ message: 'Reset session expired. Please request a new OTP.' });
         }
 
@@ -698,7 +691,7 @@ exports.tenantForgotPasswordReset = async (req, res) => {
         }
 
         // Invalidate session
-        otpStore.delete(`reset:tenant:${loginId}`);
+        await otpStore.delete(`reset:tenant:${loginId}`);
 
         const email = (tenant && tenant.email) || user.email || '';
         if (email) {

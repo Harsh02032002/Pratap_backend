@@ -7,6 +7,13 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const dns = require('dns');
+
+// Always load env from this folder, regardless of where the process was started.
+// Must run before any local require below: several modules (e.g. the rate
+// limiters in middleware/security.js) read process.env at load time, and used
+// to silently fall back to their defaults because .env wasn't loaded yet.
+dotenv.config({ path: path.join(__dirname, '.env') });
+
 const { startCronJobs } = require('./services/cronJobs');
 const { registerAllCronJobs } = require('./jobs/dailyRentEvaluator');
 const { registerAutoMarkAbsentJob } = require('./jobs/autoMarkAbsentJob');
@@ -17,6 +24,8 @@ let escalationJobStarted = false;
 const initChatSocket = require('./socket/chatSocket');
 const { globalApiLimiter } = require('./middleware/security');
 const { apiCache, getCacheStats, clearCache } = require('./middleware/apiCache');
+const { health: redisHealth, close: closeRedis } = require('./utils/redisClient');
+const redisCache = require('./utils/cache');
 const { MONGO, MONGOOSE_BUFFER_TIMEOUT_MS, HTTP } = require('./config/timeouts');
 const { installGlobalQueryDeadline } = require('./utils/queryDeadline');
 const { isAllowedOrigin } = require('./utils/corsOrigin');
@@ -59,9 +68,6 @@ try {
 } catch (dnsErr) {
     console.warn('⚠️ Could not override DNS servers:', dnsErr.message);
 }
-
-// Always load env from this folder, regardless of where the process was started.
-dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const server = http.createServer(app);
@@ -602,7 +608,7 @@ try {
 }
 
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
     const pool = getPoolStats();
     const saturated = isSaturated(mongoOptions.maxPoolSize);
     res.json({
@@ -612,6 +618,10 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
         cache: getCacheStats(),
+        // healthy | degraded | unavailable | disabled — a live PING, no host
+        // or error detail. Redis down never fails this endpoint: cache-only
+        // traffic keeps working from MongoDB.
+        redis: await redisHealth(),
         // Timeout + pool observability. Counters are per-process and reset on
         // restart; they exist to tell "too many requests" apart from "queries
         // too slow", which need opposite fixes.
@@ -745,13 +755,17 @@ app.get('/api/admin/cache-stats', requireSuperadmin, (req, res) => {
     });
 });
 
-app.post('/api/admin/clear-cache', requireSuperadmin, (req, res) => {
+app.post('/api/admin/clear-cache', requireSuperadmin, async (req, res) => {
     const { path } = req.body || {};
     clearCache(path);
+    // A full clear also drops the Redis SA and owner report namespaces (SCAN,
+    // never KEYS). Staff visit-scope entries are left alone: they expire within 60s.
+    const redisCleared = path ? 0 : (await redisCache.clearPanel('sa')) + (await redisCache.clearPanel('owner'));
     res.json({
         success: true,
         message: path ? `Cache cleared for: ${path}` : 'All cache cleared',
-        cache: getCacheStats()
+        cache: getCacheStats(),
+        redisCleared
     });
 });
 
@@ -795,6 +809,20 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
+
+// Close the Redis connection cleanly on PM2 stop/reload or Ctrl-C (bounded
+// to 1s inside closeRedis so a dead Redis can never hold up the exit), then
+// re-raise the signal so the exit code stays what supervisors expect
+// (143/130). Only installed when Redis is configured — otherwise signal
+// handling is untouched.
+if (require('./config/redis').getConfig().configured) {
+    for (const signal of ['SIGTERM', 'SIGINT']) {
+        process.once(signal, async () => {
+            await closeRedis();
+            process.kill(process.pid, signal);
+        });
+    }
+}
 
 // Database timeouts are classified into 503 + Retry-After before reaching the
 // generic handler, so pool exhaustion and query timeouts are distinguishable

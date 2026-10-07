@@ -19,6 +19,7 @@ const VisitData           = require('../models/VisitData');
 
 const ownerController = require('../controllers/ownercontroller');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { canAccessOwner } = require('../middleware/ownerAccess');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { applyPropertyScope, applyVisitScope, applyComplaintScope, applyBookingScope } = require('../utils/scopeHelpers');
 const { MODULE_KEYS } = require('../utils/permissionKeys');
@@ -197,6 +198,13 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
         const loginId = normalizeLoginId(String(req.params.ownerId || ''));
         if (!loginId) {
             return res.status(400).json({ success: false, message: 'ownerId is required' });
+        }
+        // authorize() above only proves the caller is *an* owner — without this,
+        // owner A's token could read owner B's tenants, revenue and chats by
+        // changing :ownerId. Superadmin passes; an owner only for their own id.
+        if (!(await canAccessOwner(req, loginId))) {
+            if (timeLogs) console.timeEnd(labelId);
+            return res.status(403).json({ success: false, message: 'Forbidden: you do not have access to this owner' });
         }
         // Optional property scope — same query-param contract as the other
         // owner-scoped endpoints (complaints, rooms, tenants).

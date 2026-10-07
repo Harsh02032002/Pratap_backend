@@ -32,7 +32,11 @@ const APP_URL = process.env.APP_URL || process.env.CLIENT_APP_URL || 'https://ap
 const DIGITAL_CHECKIN_URL = process.env.DIGITAL_CHECKIN_URL || process.env.FRONTEND_URL || 'https://roomhy.com';
 const BACKEND_URL = process.env.BACKEND_URL || process.env.API_BASE_URL || 'https://api.roomhy.com';
 
-const otpStore = new Map();
+// Shared across processes through Redis when REDIS_STATE_ENABLED=true,
+// otherwise in-process (see utils/otpStore.js). Keys contain Aadhaar
+// numbers; the store hashes them before they reach Redis.
+const { createOtpStore } = require('../utils/otpStore');
+const otpStore = createOtpStore('checkin');
 
 function keyFor(role, loginId, aadhaarNumber) {
     return `${role}:${String(loginId || '').toUpperCase()}:${String(aadhaarNumber || '')}`;
@@ -391,7 +395,7 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
 
         const otp = String(Math.floor(100000 + Math.random() * 900000));
         const k = keyFor('owner', loginId, aadhaarNumber);
-        otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
+        await otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
         console.log('[CHECKIN KYC] Owner OTP generated for', loginId);
 
         // Send OTP via Email directly
@@ -440,14 +444,14 @@ router.post('/owner/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res) 
     try {
         const { loginId, aadhaarNumber, otp } = req.body || {};
         const k = keyFor('owner', loginId, aadhaarNumber);
-        const entry = otpStore.get(k);
+        const entry = await otpStore.get(k);
         if (!entry || Date.now() > entry.expiresAt) {
             return res.status(400).json({ success: false, message: 'OTP expired or not found. Please request a new OTP.' });
         }
         if (!otp || String(otp).trim() !== String(entry.otp)) {
             return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
         }
-        otpStore.delete(k);
+        await otpStore.delete(k);
 
         const record = await upsertRecord(loginId, 'owner', { 'ownerKyc.otpVerified': true });
 
@@ -1500,7 +1504,7 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
 
         const otp = String(Math.floor(100000 + Math.random() * 900000));
         const k = keyFor('tenant', normalizedLoginId, aadhaarNumber);
-        otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
+        await otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
         console.log('[CHECKIN OTP] tenant', normalizedLoginId, aadhaarNumber, 'internal OTP generated');
 
         // Send OTP via Email directly
@@ -1572,14 +1576,14 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
         const { loginId, aadhaarNumber, otp, aadhaarFront, aadhaarBack, tenantPhoto, kycStatus, mismatchReasons: clientMismatch, extensionToken } = req.body || {};
         const normalizedLoginId = String(loginId || '').toUpperCase();
         const k = keyFor('tenant', normalizedLoginId, aadhaarNumber);
-        const entry = otpStore.get(k);
+        const entry = await otpStore.get(k);
         if (!entry || Date.now() > entry.expiresAt) {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
         }
         if (String(otp).trim() !== String(entry.otp).trim()) {
             return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
         }
-        otpStore.delete(k);
+        await otpStore.delete(k);
 
         const tenant = await Tenant.findOne({ loginId: normalizedLoginId });
         if (!tenant) {

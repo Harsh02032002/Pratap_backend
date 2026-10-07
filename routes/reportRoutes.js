@@ -13,6 +13,19 @@ const {
 
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { requireOwnerAccess } = require('../middleware/ownerAccess');
+const { cacheJsonResponse } = require('../utils/cache');
+const { ownerSelfCacheKey } = require('../utils/cacheKeys');
+
+// Owner demand analytics: the heaviest owner read (every enquiry, booking,
+// review, complaint and rent for all the owner's properties). Output is
+// advisory analytics that depends only on the owner, so 5 minutes of
+// staleness is acceptable — invalidation is TTL-only. Cached only when an
+// owner reads their own report; every other permitted caller bypasses.
+const ownerDemandCache = cacheJsonResponse({
+  panel: 'owner', resource: 'owner-demand', ttlSeconds: 300,
+  keyFor: (req) => ownerSelfCacheKey(req, req.params.ownerLoginId, 'owner-demand'),
+});
 
 /**
  * POST /api/reports/generate
@@ -227,7 +240,7 @@ router.post('/generate', protect, authorize('superadmin'), applyEmployeeScope, a
 /**
  * GET /api/reports/history/:ownerLoginId
  */
-router.get('/history/:ownerLoginId', async (req, res) => {
+router.get('/history/:ownerLoginId', ...requireOwnerAccess('ownerLoginId'), async (req, res) => {
     try {
         const Report = require('../models/Report');
         const reports = await Report.find({ ownerLoginId: req.params.ownerLoginId }).sort({ createdAt: -1 }).limit(50);
@@ -241,7 +254,7 @@ router.get('/history/:ownerLoginId', async (req, res) => {
  * GET /api/reports/summary/:ownerLoginId
  * KPI dashboard summary for reports page
  */
-router.get('/summary/:ownerLoginId', async (req, res) => {
+router.get('/summary/:ownerLoginId', ...requireOwnerAccess('ownerLoginId'), async (req, res) => {
     try {
         const Tenant = require('../models/Tenant');
         const Complaint = require('../models/Complaint');
@@ -292,92 +305,10 @@ router.get('/summary/:ownerLoginId', async (req, res) => {
 });
 
 /**
- * GET /api/reports/seed-test/:ownerLoginId
- * Insert test data for reports testing — uses existing server DB connection
- */
-router.get('/seed-test/:ownerLoginId', async (req, res) => {
-    try {
-        const { ownerLoginId } = req.params;
-        const Rent = require('../models/Rent');
-        const Tenant = require('../models/Tenant');
-        const Complaint = require('../models/Complaint');
-        const Room = require('../models/Room');
-        const mongoose = require('mongoose');
-
-        const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
-        const PROPERTY_ID = new mongoose.Types.ObjectId();
-        const PROPERTY_NAME = 'Sunshine PG';
-
-        // Clear old seed test data first
-        await Rent.deleteMany({ ownerLoginId, propertyName: { $in: [PROPERTY_NAME, 'Moonlight Hostel'] } });
-        await Tenant.deleteMany({ ownerLoginId, propertyName: { $in: [PROPERTY_NAME, 'Moonlight Hostel'] } });
-        await Complaint.deleteMany({ ownerLoginId, tenantId: { $in: ['SEED001','SEED002','SEED003','SEED004','SEED005'] } });
-        await Room.deleteMany({ title: { $in: ['Room 101','Room 102','Room 201','Room 202'] }, propertyName: PROPERTY_NAME });
-
-        // Rents
-        const rents = await Rent.insertMany([
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Rohit Sharma', roomNumber: '101', rentAmount: 8000, paidAmount: 8000, paymentStatus: 'paid', paymentMethod: 'other', collectionMonth: '2026-06', createdAt: daysAgo(2) },
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Priya Verma', roomNumber: '102', rentAmount: 7500, paidAmount: 7500, paymentStatus: 'paid', paymentMethod: 'cash', collectionMonth: '2026-06', createdAt: daysAgo(5) },
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Arjun Mehta', roomNumber: '103', rentAmount: 9000, paidAmount: 9000, paymentStatus: 'completed', paymentMethod: 'razorpay', collectionMonth: '2026-06', createdAt: daysAgo(8) },
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Sneha Patel', roomNumber: '201', rentAmount: 8500, paidAmount: 0, paymentStatus: 'pending', paymentMethod: 'other', collectionMonth: '2026-06', createdAt: daysAgo(3) },
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Karan Singh', roomNumber: '202', rentAmount: 7000, paidAmount: 7000, paymentStatus: 'paid', paymentMethod: 'other', collectionMonth: '2026-06', createdAt: daysAgo(12) },
-            { ownerLoginId, propertyName: PROPERTY_NAME, propertyId: PROPERTY_ID, tenantName: 'Aman Gupta', roomNumber: '203', rentAmount: 8200, paidAmount: 0, paymentStatus: 'overdue', paymentMethod: 'other', collectionMonth: '2026-05', createdAt: daysAgo(35) },
-            { ownerLoginId, propertyName: 'Moonlight Hostel', propertyId: PROPERTY_ID, tenantName: 'Divya Kumar', roomNumber: '301', rentAmount: 6500, paidAmount: 6500, paymentStatus: 'paid', paymentMethod: 'other', collectionMonth: '2026-06', createdAt: daysAgo(7) },
-            { ownerLoginId, propertyName: 'Moonlight Hostel', propertyId: PROPERTY_ID, tenantName: 'Ravi Yadav', roomNumber: '302', rentAmount: 7200, paidAmount: 7200, paymentStatus: 'paid', paymentMethod: 'cash', collectionMonth: '2026-06', createdAt: daysAgo(10) },
-            { ownerLoginId, propertyName: 'Moonlight Hostel', propertyId: PROPERTY_ID, tenantName: 'Pooja Nair', roomNumber: '303', rentAmount: 6800, paidAmount: 0, paymentStatus: 'pending', paymentMethod: 'other', collectionMonth: '2026-06', createdAt: daysAgo(4) },
-            { ownerLoginId, propertyName: 'Moonlight Hostel', propertyId: PROPERTY_ID, tenantName: 'Harsh Agarwal', roomNumber: '304', rentAmount: 7500, paidAmount: 7500, paymentStatus: 'paid', paymentMethod: 'bank_transfer', collectionMonth: '2026-06', createdAt: daysAgo(15) },
-        ]);
-
-        // Tenants
-        const tenants = await Tenant.insertMany([
-            { ownerLoginId, name: 'Rohit Sharma', phone: '9812345670', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '101', rentAmount: 8000, dueAmount: 0, status: 'active', kycStatus: 'verified', agreementStatus: 'signed', joiningDate: daysAgo(120) },
-            { ownerLoginId, name: 'Priya Verma', phone: '9823456781', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '102', rentAmount: 7500, dueAmount: 0, status: 'active', kycStatus: 'verified', agreementStatus: 'signed', joiningDate: daysAgo(90) },
-            { ownerLoginId, name: 'Arjun Mehta', phone: '9834567892', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '103', rentAmount: 9000, dueAmount: 0, status: 'active', kycStatus: 'pending', agreementStatus: 'pending', joiningDate: daysAgo(45) },
-            { ownerLoginId, name: 'Sneha Patel', phone: '9845678903', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '201', rentAmount: 8500, dueAmount: 8500, status: 'active', kycStatus: 'verified', agreementStatus: 'signed', joiningDate: daysAgo(200) },
-            { ownerLoginId, name: 'Karan Singh', phone: '9856789014', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '202', rentAmount: 7000, dueAmount: 0, status: 'active', kycStatus: 'pending', agreementStatus: 'not signed', joiningDate: daysAgo(30) },
-            { ownerLoginId, name: 'Aman Gupta', phone: '9867890125', property: PROPERTY_ID, propertyName: PROPERTY_NAME, roomNo: '203', rentAmount: 8200, dueAmount: 16400, status: 'active', kycStatus: 'rejected', agreementStatus: 'expired', joiningDate: daysAgo(365) },
-        ]);
-
-        // Complaints — all required fields provided
-        const complaints = await Complaint.insertMany([
-            { ownerLoginId, tenantId: 'SEED001', tenantName: 'Rohit Sharma', tenantPhone: '9812345670', property: String(PROPERTY_ID), propertyId: String(PROPERTY_ID), propertyName: PROPERTY_NAME, roomNo: '101', bedNo: 'B1', category: 'Maintenance', priority: 'High', assignedStaffName: 'Raju Kumar', status: 'Open', description: 'AC not working in room 101' },
-            { ownerLoginId, tenantId: 'SEED002', tenantName: 'Priya Verma', tenantPhone: '9823456781', property: String(PROPERTY_ID), propertyId: String(PROPERTY_ID), propertyName: PROPERTY_NAME, roomNo: '102', bedNo: 'B1', category: 'Cleanliness', priority: 'Medium', assignedStaffName: 'Rahul Singh', status: 'In Progress', description: 'Common area not cleaned' },
-            { ownerLoginId, tenantId: 'SEED003', tenantName: 'Sneha Patel', tenantPhone: '9845678903', property: String(PROPERTY_ID), propertyId: String(PROPERTY_ID), propertyName: PROPERTY_NAME, roomNo: '201', bedNo: 'B2', category: 'Water', priority: 'High', assignedStaffName: 'Raju Kumar', status: 'Taken', description: 'No water supply since morning' },
-            { ownerLoginId, tenantId: 'SEED004', tenantName: 'Karan Singh', tenantPhone: '9856789014', property: String(PROPERTY_ID), propertyId: String(PROPERTY_ID), propertyName: PROPERTY_NAME, roomNo: '202', bedNo: 'B1', category: 'Electricity', priority: 'High', assignedStaffName: 'Rahul Singh', status: 'Resolved', description: 'Switchboard sparking in room 202' },
-            { ownerLoginId, tenantId: 'SEED005', tenantName: 'Aman Gupta', tenantPhone: '9867890125', property: String(PROPERTY_ID), propertyId: String(PROPERTY_ID), propertyName: PROPERTY_NAME, roomNo: '203', bedNo: 'B1', category: 'Security', priority: 'Low', assignedStaffName: '', status: 'Open', description: 'CCTV camera not working' },
-        ]);
-
-        // Rooms — correct Room model fields
-        const rooms = await Room.insertMany([
-            { property: PROPERTY_ID, title: 'Room 101', type: 'AC', beds: 2, price: 8000, ownerLoginId, propertyName: PROPERTY_NAME, isAvailable: false, status: 'active' },
-            { property: PROPERTY_ID, title: 'Room 102', type: 'AC', beds: 3, price: 7500, ownerLoginId, propertyName: PROPERTY_NAME, isAvailable: true, status: 'active' },
-            { property: PROPERTY_ID, title: 'Room 201', type: 'Non-AC', beds: 4, price: 6500, ownerLoginId, propertyName: PROPERTY_NAME, isAvailable: false, status: 'active' },
-            { property: PROPERTY_ID, title: 'Room 202', type: 'Non-AC', beds: 2, price: 9000, ownerLoginId, propertyName: PROPERTY_NAME, isAvailable: true, status: 'active' },
-        ]);
-
-        const totalPaid = rents.filter(r => r.paymentStatus === 'paid' || r.paymentStatus === 'completed').reduce((s, r) => s + (r.rentAmount || 0), 0);
-
-        return res.json({
-            success: true,
-            message: `Test data seeded for ${ownerLoginId}`,
-            inserted: {
-                rents: rents.length,
-                tenants: tenants.length,
-                complaints: complaints.length,
-                rooms: rooms.length,
-                totalPaidRevenue: `₹${totalPaid.toLocaleString('en-IN')}`
-            }
-        });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-/**
  * GET /api/reports/demand/:ownerLoginId
  * Fetch demand analytics and price optimization suggestions for an owner's properties
  */
-router.get('/demand/:ownerLoginId', async (req, res) => {
+router.get('/demand/:ownerLoginId', ...requireOwnerAccess('ownerLoginId'), ownerDemandCache, async (req, res) => {
     try {
         const { ownerLoginId } = req.params;
         const Property = require('../models/Property');
