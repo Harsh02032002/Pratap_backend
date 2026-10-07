@@ -26,6 +26,7 @@ const { normalizeLoginId } = require('../utils/normalizeId');
 const { sumPaymentTransactions, sumRentPayments } = require('../services/paymentTotalsService');
 const { withReadDeadline } = require('../utils/queryDeadline');
 const { fetchOwnerBookingLeads } = require('../services/ownerLeads');
+const { TENANT_LIST_LITE_EXCLUDE, OWNER_DASHBOARD_EXCLUDE } = require('../utils/listProjections');
 
 // GET /:ownerId below is the Owner Dashboard's data source and is Owner/Admin-only
 // by requirement — staff have their own separate /employee endpoint above with
@@ -35,13 +36,18 @@ const { fetchOwnerBookingLeads } = require('../services/ownerLeads');
 // to an Employee (any staff role), regardless of that staff member's permissions.
 async function isStaffRequest(req) {
     try {
+        // Staff-panel guard: if protect() already resolved a staff identity,
+        // block straight away without re-verifying the token.
+        if (req.user) {
+            if (['employee', 'manager', 'staff'].includes(req.user.role) || req.user.isStaff) return true;
+        }
         const authHeader = req.headers.authorization || '';
         if (!authHeader.startsWith('Bearer ')) return false;
         const jwt = require('jsonwebtoken');
         if (!process.env.JWT_SECRET) return false;
         const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
         const Employee = require('../models/Employee');
-        const emp = await Employee.findById(decoded.id).select('_id');
+        const emp = await Employee.findById(decoded.id).select('_id').lean();
         return !!emp;
     } catch (_) {
         return false; // not a staff token (owner/website token, or none) — allow
@@ -182,7 +188,10 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
     }
 
     const labelId = `dashboard:${req.params.ownerId}:${Date.now()}`;
-    console.time(labelId);
+    // Per-request timing only when debugging — otherwise one log line per
+    // dashboard load per owner.
+    const timeLogs = process.env.DEBUG_REQUESTS === 'true';
+    if (timeLogs) console.time(labelId);
 
     try {
         const loginId = normalizeLoginId(String(req.params.ownerId || ''));
@@ -217,8 +226,9 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
             txTotal,
             websiteLeads,
         ] = await Promise.all([
-            // 1. Owner details (lean, no populate needed for dashboard)
-            withReadDeadline(Owner.findOne({ loginId })).lean(),
+            // 1. Owner details (lean, no populate needed for dashboard). KYC scans
+            //    excluded — admin.jsx (the only consumer) never renders them.
+            withReadDeadline(Owner.findOne({ loginId }).select(OWNER_DASHBOARD_EXCLUDE)).lean(),
 
             // 2. Properties (needed to derive property IDs for rooms/tenants/rent)
             withReadDeadline(Property.find({ ownerLoginId: loginId, isDeleted: { $ne: true } })
@@ -280,18 +290,19 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
                 .limit(200))
                 .lean(),
 
-            // 8. Tenants for all owner properties or matching ownerLoginId
+            // 8. Tenants for all owner properties or matching ownerLoginId.
+            //    Image blobs dropped: the dashboard reads rent/moveIn/property only.
             withReadDeadline(Tenant.find({
                 $or: [
                     { property: { $in: propertyIds } },
                     { ownerLoginId: loginId }
                 ],
                 isDeleted: { $ne: true }
-            }))
+            }).select(TENANT_LIST_LITE_EXCLUDE))
                 .lean(),
 
             // RentPayments require owner _id — re-use ownerDoc if available
-            ownerDoc ? Promise.resolve(ownerDoc) : Owner.findOne({ loginId }).lean(),
+            ownerDoc ? Promise.resolve(ownerDoc) : Owner.findOne({ loginId }).select(OWNER_DASHBOARD_EXCLUDE).lean(),
 
             // Also fetch complaint fallback via tenants
             Promise.resolve(null),
@@ -354,6 +365,8 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
                 })
                     .sort({ created_at: -1 })
                     .limit(200)
+                    // Only the fields the summary below reads.
+                    .select('room_id sender_login_id sender_name message created_at is_read')
                     .lean();
 
                 const summaryMap = new Map();
@@ -393,7 +406,7 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
             ).length;
         }
 
-        console.timeEnd(labelId);
+        if (timeLogs) console.timeEnd(labelId);
 
         return res.json({
             success: true,
@@ -410,7 +423,7 @@ router.get('/:ownerId', protect, authorize('owner', 'superadmin'), async (req, r
             complaints: allComplaints,
         });
     } catch (err) {
-        console.timeEnd(labelId);
+        if (timeLogs) console.timeEnd(labelId);
         console.error(`[dashboard] Error for ${req.params.ownerId}:`, err.message);
         return res.status(500).json({ success: false, message: err.message });
     }

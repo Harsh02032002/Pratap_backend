@@ -797,24 +797,37 @@ exports.getUnreadCount = async (req, res) => {
 };
 
 /**
- * Mark all notifications as read
+ * Mark all notifications as read — SCOPED to the caller's loginId.
+ * toLoginId MUST be provided; if missing the request is rejected with 400.
+ * Without this guard a single call with an empty body would mark EVERY
+ * notification in the entire database as read (N-6 critical bug fix).
  */
 exports.markAllRead = async (req, res) => {
     try {
-        const { toLoginId, toRole } = req.body;
-        
-        const filter = { read: false };
-        if (toLoginId) filter.toLoginId = toLoginId;
-        if (toRole) filter.toRole = toRole;
-        
-        await Notification.updateMany(filter, { read: true });
-        
+        const { toLoginId } = req.body;
+
+        // Require a specific loginId — refuse to bulk-clear without a scope.
+        if (!toLoginId || typeof toLoginId !== 'string' || !toLoginId.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: 'toLoginId is required to mark notifications as read'
+            });
+        }
+
+        const normalizedLoginId = toLoginId.trim();
+
+        await Notification.updateMany(
+            { toLoginId: normalizedLoginId, read: false },
+            { $set: { read: true } }
+        );
+
         res.json({ success: true, message: 'All notifications marked as read' });
     } catch (error) {
         console.error('Error marking all as read:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
 
 /**
  * Delete all read notifications

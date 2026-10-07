@@ -75,6 +75,12 @@ const chatMessageSchema = new mongoose.Schema({
 
 chatMessageSchema.index({ room_id: 1, created_at: -1 });
 
+// getInbox, getConversation and expandPartnerVariants all filter on
+// sender_login_id, usually as one branch of an $or with room_id. MongoDB can
+// only use indexes for an $or when EVERY branch is indexed — without this one
+// the whole query fell back to a collection scan on every inbox poll.
+chatMessageSchema.index({ sender_login_id: 1, created_at: -1 });
+
 // Serves the reminder job's selector: unread, not yet reminded, older than the
 // delay. Without it that query is a collection scan every two minutes.
 chatMessageSchema.index({ is_read: 1, reminder_email_sent_at: 1, created_at: 1 });

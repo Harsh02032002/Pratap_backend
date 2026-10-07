@@ -217,7 +217,7 @@ async function findTenantByRoom(propertyId, roomNo) {
  * does it fall back to today's live-occupancy lookup, which is exactly the
  * previous behavior.
  */
-async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
+async function findAllTenantsInRoom(propertyId, roomNo, billingMonth, options = {}) {
   if (!propertyId || !roomNo) return [];
   const baseSelect = '_id property room roomNo agreedRent ownerLoginId moveInDate createdAt';
 
@@ -225,7 +225,7 @@ async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
   const room = await Room.findOne({
     property: propertyId,
     title: { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') },
-  }).select('_id title').lean();
+  }, null, options).select('_id title').lean();
 
   if (room && billingMonth) {
     const historicalOccupantIds = await getOccupantsForRoomAndBillingMonth(room._id, billingMonth);
@@ -233,7 +233,7 @@ async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
       return Tenant.find({
         _id: { $in: historicalOccupantIds },
         isDeleted: { $ne: true },
-      }).select(baseSelect).lean();
+      }, null, options).select(baseSelect).lean();
     }
   }
 
@@ -243,7 +243,7 @@ async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
       property: propertyId,
       room: room._id,                    // must explicitly point to this room
       isDeleted: { $ne: true },          // not soft-deleted
-    }).select(baseSelect).lean();
+    }, null, options).select(baseSelect).lean();
 
     if (byRoomRef.length) return byRoomRef;
   }
@@ -255,7 +255,7 @@ async function findAllTenantsInRoom(propertyId, roomNo, billingMonth) {
     roomNo: { $regex: new RegExp(`^${escapeRegex(roomNo)}$`, 'i') },
     room: { $exists: true, $ne: null },  // must still have a room link
     isDeleted: { $ne: true },
-  }).select(baseSelect).lean();
+  }, null, options).select(baseSelect).lean();
 }
 
 /**
@@ -283,8 +283,8 @@ function isEligibleForBillingMonth(tenant, billingMonth) {
  * both the split and the count for that month — see isEligibleForBillingMonth.
  * They become eligible starting the month after they moved in.
  */
-async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord) {
-  const allTenants = await findAllTenantsInRoom(propertyId, roomNo, billingMonth);
+async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterRecord, options = {}) {
+  const allTenants = await findAllTenantsInRoom(propertyId, roomNo, billingMonth, options);
   if (!allTenants.length) return { synced: false, reason: 'no_tenant' };
 
   const eligibleTenants = allTenants.filter(t => isEligibleForBillingMonth(t, billingMonth));
@@ -299,7 +299,7 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
     let invoice = await RentInvoice.findOne({
       tenantId: tenant._id,
       billingMonth,
-    });
+    }, null, options);
 
     if (!invoice) {
       const ownerUserId = await resolveOwnerUserId(tenant);
@@ -318,7 +318,7 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
       invoice = await RentInvoice.findOne({
         tenantId: tenant._id,
         billingMonth,
-      });
+      }, null, options);
 
       if (!invoice) {
         results.push({ tenantId: tenant._id, synced: false, reason: 'invoice_create_failed' });
@@ -357,7 +357,7 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
 
     await RentInvoice.findByIdAndUpdate(invoice._id, {
       $set: { ...updates, ...electricityFields, ...statusUpdate },
-    });
+    }, options);
 
     results.push({ tenantId: tenant._id, invoiceId: invoice._id, synced: true, share: perTenantShare });
   }
@@ -375,6 +375,7 @@ async function syncElectricityToInvoice(propertyId, roomNo, billingMonth, meterR
 module.exports = {
   calcInvoiceOutstanding,
   enrichTenantsWithDues,
+  findAllTenantsInRoom,
   findTenantByRoom,
   isEligibleForBillingMonth,
   syncElectricityToInvoice,

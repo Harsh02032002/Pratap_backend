@@ -165,6 +165,8 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         // Try to send email
         await sendEmail(email, 'RoomHy - Password Reset OTP', emailHtml);
 
+        /*
+        // ─── WHATSAPP OTP (DISABLED - UNCOMMENT TO REACTIVATE) ───────────────────
         try {
             await sendTemplateToResolvedUser({
                 email,
@@ -175,11 +177,13 @@ exports.forgotPasswordRequestOTP = async (req, res) => {
         } catch (whatsAppErr) {
             console.warn('[ForgotPassword] WhatsApp OTP send failed:', whatsAppErr.message);
         }
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         // Always return success (email may fail in development)
         res.json({
             success: true,
-            message: 'OTP sent to your email and WhatsApp. Please check your inbox and spam folder.',
+            message: 'OTP sent to your email. Please check your inbox and spam folder.',
             // In development mode, return OTP for testing
             ...(process.env.NODE_ENV === 'development' && { demo_otp: otp })
         });
@@ -391,6 +395,8 @@ exports.ownerForgotPasswordRequestOTP = async (req, res) => {
 
         await sendEmail(email, 'RoomHy Owner Password Reset OTP', emailHtml);
 
+        /*
+        // ─── WHATSAPP OTP (DISABLED - UNCOMMENT TO REACTIVATE) ───────────────────
         try {
             const ownerPhone = owner.phone || owner.profile?.phone || owner.checkinPhone || '';
             console.log('[OwnerOTP] Resolved phone for WhatsApp:', ownerPhone || 'NOT FOUND');
@@ -405,10 +411,12 @@ exports.ownerForgotPasswordRequestOTP = async (req, res) => {
         } catch (whatsAppErr) {
             console.warn('[OwnerOTP] WhatsApp send failed:', whatsAppErr.message);
         }
+        // ──────────────────────────────────────────────────────────────────────────
+        */
 
         res.json({
             success: true,
-            message: 'OTP sent to your registered email and WhatsApp',
+            message: 'OTP sent to your registered email',
             email,
             ...(process.env.NODE_ENV === 'development' && { demo_otp: otp })
         });

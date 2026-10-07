@@ -428,8 +428,19 @@ async function runAgreementExpiryJob(now = new Date()) {
             if (!tenant.moveoutRequest.reason) tenant.moveoutRequest.reason = 'Agreement expired without extension';
             if (await completeMoveout(tenant)) {
                 stats.exited++;
-                await notify(tenant.ownerLoginId, `Agreement expired — ${tenant.name}`,
-                    `${tenant.name} (Room ${tenant.roomNo || 'N/A'}) — the agreement ended on ${formatDisplayDate(endDate)} without an extension. The tenant has been moved to ex-tenants and the bed is free.`);
+                const exitTitle = `Agreement expired — ${tenant.name}`;
+                const exitBody = `${tenant.name} (Room ${tenant.roomNo || 'N/A'}) — the agreement ended on ${formatDisplayDate(endDate)} without an extension. The tenant has been moved to ex-tenants and the bed is free.`;
+                await notify(tenant.ownerLoginId, exitTitle, exitBody);
+                if (tenant.ownerLoginId) {
+                    try {
+                        const fcmService = require('./fcmService');
+                        await fcmService.sendToUser(tenant.ownerLoginId, {
+                            title: exitTitle,
+                            body: exitBody,
+                            data: { type: 'agreement_expired', tenantId: String(tenant._id) }
+                        }).catch(() => {});
+                    } catch (_) { }
+                }
             }
         } catch (err) {
             console.error(`[AGREEMENT] job error for ${tenant.loginId}:`, err.message);

@@ -170,6 +170,16 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
       payoutDoc.completed_at = new Date();
       await payoutDoc.save();
 
+      // Dispatch FCM Push Notification to Owner
+      try {
+        const fcmService = require('../services/fcmService');
+        fcmService.sendToUser(loginId, {
+          title: '💸 Payout Credited!',
+          body: `₹${numAmount} rent payout has been credited to your bank account.`,
+          data: { type: 'payout_success', amount: String(numAmount) }
+        }).catch(() => {});
+      } catch (_) {}
+
       return res.json({
         success: true,
         message: `₹${numAmount} successfully transferred to your bank account!`,

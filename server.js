@@ -19,6 +19,7 @@ const { globalApiLimiter } = require('./middleware/security');
 const { apiCache, getCacheStats, clearCache } = require('./middleware/apiCache');
 const { MONGO, MONGOOSE_BUFFER_TIMEOUT_MS, HTTP } = require('./config/timeouts');
 const { installGlobalQueryDeadline } = require('./utils/queryDeadline');
+const { isAllowedOrigin } = require('./utils/corsOrigin');
 
 // Installed before any route or model require below, so every schema compiled
 // from here on carries a default operation deadline. Without it the request
@@ -68,13 +69,8 @@ const server = http.createServer(app);
 // 1. Robust CORS Middleware - Handles preflight and credentials for all our environments
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    const isAllowedOrigin = !origin ||
-        origin.includes('localhost') ||
-        origin.includes('127.0.0.1') ||
-        origin.includes('roomhy.com') ||
-        origin === 'https://roohmy-frontend-ux44.vercel.app';
 
-    if (isAllowedOrigin && origin) {
+    if (origin && isAllowedOrigin(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
@@ -92,12 +88,7 @@ app.use((req, res, next) => {
 const io = new Server(server, {
     cors: {
         origin: (origin, callback) => {
-            const allowed = !origin ||
-                origin.includes('localhost') ||
-                origin.includes('127.0.0.1') ||
-                origin.includes('roomhy.com') ||
-                origin === 'https://roohmy-frontend-ux44.vercel.app';
-            if (allowed) callback(null, true);
+            if (isAllowedOrigin(origin)) callback(null, true);
             else callback(new Error('Socket.io: origin not allowed'));
         },
         credentials: true,
@@ -135,12 +126,17 @@ app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
 }));
 
-// Additional Security Headers
+// Additional Security & Cache Control Headers
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (req.path.startsWith('/api')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+    }
     next();
 });
 
@@ -169,6 +165,22 @@ app.use('/api', dbTimeoutResponseNormalizer);
 // API Response Caching - Speeds up frequently accessed data
 app.use('/api', apiCache);
 
+// Cache-Control: no-store for authenticated API requests.
+// When a request carries an Authorization header it is user-specific and must
+// never be served from the browser HTTP disk cache. Without this, a normal F5
+// refresh can receive a stale 304 Not Modified response and display old data.
+// Public endpoints (no Authorization) retain whatever Cache-Control header
+// apiCache.js already set on them (public, max-age=N for static lists).
+app.use('/api', (req, res, next) => {
+    if (req.headers.authorization) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+    }
+    next();
+});
+
+
 // Connection Keep-Alive for better performance
 app.use((req, res, next) => {
     res.setHeader('Keep-Alive', 'timeout=5, max=1000');
@@ -183,7 +195,9 @@ console.log('✅ Middleware configured');
 
 // Request logging middleware
 app.use((req, res, next) => {
-    console.log(`📨 ${req.method} ${req.path}`);
+    if (process.env.DEBUG_REQUESTS === 'true') {
+        console.log(`📨 ${req.method} ${req.path}`);
+    }
     next();
 });
 
@@ -610,8 +624,19 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Strict superadmin gate for the maintenance/test endpoints below. These were
+// mounted with no auth at all, so anyone who knew a tenant loginId could flip
+// that tenant's status in production. authorize('superadmin') is NOT used
+// because it deliberately expands to employee/manager roles as well.
+const { protect: requireAuth } = require('./middleware/authMiddleware');
+const requireSuperadmin = [requireAuth, (req, res, next) => {
+    const role = String(req.user?.role || '').toLowerCase();
+    if (role === 'superadmin' || role === 'admin') return next();
+    return res.status(403).json({ success: false, message: 'Superadmin access required' });
+}];
+
 // ── TEST ENDPOINT: Trigger agreement expiry for a tenant (remove in production) ──
-app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
+app.get('/api/test/agreement-expiry/:loginId', requireSuperadmin, async (req, res) => {
     try {
         const Tenant = require('./models/Tenant');
         const Notification = require('./models/Notification');
@@ -678,7 +703,7 @@ app.get('/api/test/agreement-expiry/:loginId', async (req, res) => {
 });
 
 // ── TEST ENDPOINT: Reactivate move-out / inactive tenant for testing ──
-app.get('/api/test/reactivate-tenant/:loginId', async (req, res) => {
+app.get('/api/test/reactivate-tenant/:loginId', requireSuperadmin, async (req, res) => {
     try {
         const Tenant = require('./models/Tenant');
         const User = require('./models/user');
@@ -712,15 +737,15 @@ app.get('/api/test/reactivate-tenant/:loginId', async (req, res) => {
     }
 });
 
-// Cache management endpoints (admin only - add auth later)
-app.get('/api/admin/cache-stats', (req, res) => {
+// Cache management endpoints (superadmin only)
+app.get('/api/admin/cache-stats', requireSuperadmin, (req, res) => {
     res.json({
         success: true,
         cache: getCacheStats()
     });
 });
 
-app.post('/api/admin/clear-cache', (req, res) => {
+app.post('/api/admin/clear-cache', requireSuperadmin, (req, res) => {
     const { path } = req.body || {};
     clearCache(path);
     res.json({

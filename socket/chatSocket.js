@@ -165,6 +165,23 @@ module.exports = (io) => {
         // Confirm to sender
         socket.emit('message_sent', { success: true, id: msg._id });
 
+        // 📱 Send instant FCM Push Notification to recipient device (laptop/phone)
+        if (from_login_id !== 'system') {
+          try {
+            const fcmService = require('../services/fcmService');
+            fcmService.sendToUser(to_login_id, {
+              title: `💬 New message from ${senderName || 'Roomhy User'}`,
+              body: String(maskedText || '').substring(0, 150),
+              icon: '/pwa-192x192.png',
+              clickAction: '/website/chat',
+              data: {
+                type: 'chat_message',
+                senderId: from_login_id
+              }
+            }).catch(() => {});
+          } catch (_) {}
+        }
+
         // Run AI & Regex moderation on all non-system 1:1 messages
         if (from_login_id !== 'system') {
           const { moderateChatMessageAsync } = require('../utils/moderationHelper');

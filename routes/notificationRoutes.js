@@ -11,7 +11,7 @@ router.get('/me', protect, notificationController.getMyNotifications);
 // Existing routes
 router.get('/', notificationController.getNotifications);
 router.post('/', notificationController.createNotification);
-router.put('/:id/read', notificationController.markRead);
+router.put('/:id/read', protect, notificationController.markRead);
 router.post('/chat-message', notificationController.sendChatMessageNotification);
 
 // Website user notifications
@@ -42,10 +42,10 @@ router.post('/owner/new-chat', notificationController.sendOwnerNewChatNotificati
 router.post('/owner/new-bidding', notificationController.sendOwnerNewBiddingNotification);
 
 // ==================== UTILITY ROUTES ====================
-// Get unread count
-router.get('/unread-count', notificationController.getUnreadCount);
-// Mark all as read
-router.put('/mark-all-read', notificationController.markAllRead);
+// Get unread count — protected so callers can only check their own scope
+router.get('/unread-count', protect, notificationController.getUnreadCount);
+// Mark all as read — protected + requires toLoginId in body (see N-6 fix)
+router.put('/mark-all-read', protect, notificationController.markAllRead);
 // ==================== FCM PUSH NOTIFICATIONS ====================
 router.post('/register-fcm-token', notificationController.registerFcmToken);
 router.post('/send-fcm-push', notificationController.sendFcmPush);

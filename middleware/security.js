@@ -13,6 +13,17 @@ function getClientIp(req) {
     return req.socket.remoteAddress || '';
 }
 
+// Global-limiter-only memo: that limiter reads the key twice (keyGenerator and
+// the per-request max) and resolving it can mean a JWT verification. Kept
+// separate from getRateLimitKey so route-level limiters, which run later (after
+// protect or multer may have changed req.user / req.body), still compute their
+// key fresh exactly as before.
+function getGlobalLimitKey(req) {
+    if (req._globalRateLimitKey) return req._globalRateLimitKey;
+    req._globalRateLimitKey = getRateLimitKey(req);
+    return req._globalRateLimitKey;
+}
+
 function getRateLimitKey(req) {
     // 1. If req.user is already populated by auth middleware
     if (req.user && (req.user.id || req.user._id)) {
@@ -51,6 +62,12 @@ function getRateLimitKey(req) {
 // Read all limits from environment — never hardcode production values.
 // Override via .env: RATE_LIMIT_GLOBAL_MAX, RATE_LIMIT_AUTH_MAX, etc.
 const GLOBAL_MAX   = parseInt(process.env.RATE_LIMIT_GLOBAL_MAX,  10) || 300;
+// Budget for requests carrying a VERIFIED JWT. Panels fire 10-15 calls per page
+// load and keep live views fresh, so a signed-in user legitimately needs more
+// than an anonymous client. Anonymous/IP traffic keeps GLOBAL_MAX.
+// Never below GLOBAL_MAX: an environment that raised RATE_LIMIT_GLOBAL_MAX
+// (e.g. 15000) must not end up giving signed-in users LESS than anonymous ones.
+const GLOBAL_AUTH_MAX = parseInt(process.env.RATE_LIMIT_GLOBAL_AUTH_MAX, 10) || Math.max(1000, GLOBAL_MAX);
 const AUTH_MAX     = parseInt(process.env.RATE_LIMIT_AUTH_MAX,    10) || 10;
 const OTP_MAX      = parseInt(process.env.RATE_LIMIT_OTP_MAX,     10) || 5;
 const FORM_MAX     = parseInt(process.env.RATE_LIMIT_FORM_MAX,    10) || 20;
@@ -64,15 +81,17 @@ const CHAT_MAX     = parseInt(process.env.RATE_LIMIT_CHAT_MAX,    10) || 1000;
 // what happened before. Printing the effective limits at boot makes that
 // failure visible in one glance at the logs.
 console.log('🛡️  Rate limits in effect:', {
-    GLOBAL_MAX, AUTH_MAX, OTP_MAX, FORM_MAX, CONTACT_MAX, REFUND_MAX, CHAT_MAX
+    GLOBAL_MAX, GLOBAL_AUTH_MAX, AUTH_MAX, OTP_MAX, FORM_MAX, CONTACT_MAX, REFUND_MAX, CHAT_MAX
 });
 
 const globalApiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: GLOBAL_MAX,
+    // `user:` keys only come from a verified JWT (see getRateLimitKey), so a
+    // forged or expired token still falls into the anonymous budget.
+    max: (req) => (String(getGlobalLimitKey(req)).startsWith('user:') ? GLOBAL_AUTH_MAX : GLOBAL_MAX),
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => getRateLimitKey(req),
+    keyGenerator: (req) => getGlobalLimitKey(req),
     message: {
         success: false,
         message: 'Too many requests. Please try again later.'
