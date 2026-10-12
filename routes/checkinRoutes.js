@@ -10,9 +10,24 @@ const User = require('../models/user');
 const { sendMail } = require('../utils/mailer');
 const { sendDocumentToResolvedUser, sendTemplateToResolvedUser } = require('../utils/whatsappBot');
 const { otpLimiter, otpIpLimiter } = require('../middleware/security');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize, normalizeRole } = require('../middleware/authMiddleware');
+const { applyEmployeeScope } = require('../middleware/employeeScope');
+const { canAccessOwner } = require('../middleware/ownerAccess');
 const { requestAadhaarOtp, verifyAadhaarOtp, aadhaarOcr } = require('../services/cashfreeKycService');
 const { verhoeffCheck, extractAadhaarNumber } = require('../utils/aadhaarUtils');
+const crypto = require('crypto');
+const { maskAadhaar, redactAadhaarInText } = require('../utils/aadhaarMask');
+const { buildCheckinProfileView } = require('../utils/checkinProfileView');
+const {
+    issueCheckinAccess,
+    verifyCheckinAccess,
+    checkinAccessFromRequest
+} = require('../services/checkinAccessService');
+
+// OTPs gate Aadhaar KYC and now also issue the check-in access proof, so they
+// come from the CSPRNG rather than Math.random (whose output is predictable
+// from earlier outputs).
+const newOtp = () => String(crypto.randomInt(100000, 1000000));
 const cloudinary = require('../utils/cloudinary');
 const { generateOwnerAgreementPdfBuffer } = require('../utils/generateOwnerAgreementPdf');
 const {
@@ -341,7 +356,11 @@ router.post('/owner/profile', async (req, res) => {
 router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) => {
     try {
         const { loginId, aadhaarLinkedPhone, aadhaarNumber, email } = req.body || {};
-        console.log('[CHECKIN KYC] Received send-otp request:', { loginId, aadhaarLinkedPhone, aadhaarNumber, email });
+        // Used to log the full request — Aadhaar number, linked phone and email
+        // in plain text on every call. Presence flags only.
+        console.log('[CHECKIN KYC] Received owner send-otp request for', loginId, {
+            hasPhone: Boolean(aadhaarLinkedPhone), hasAadhaar: Boolean(aadhaarNumber), hasEmail: Boolean(email)
+        });
 
         if (!loginId || !aadhaarLinkedPhone || !aadhaarNumber) {
             console.log('[CHECKIN KYC] Missing fields - loginId:', !!loginId, 'phone:', !!aadhaarLinkedPhone, 'aadhaar:', !!aadhaarNumber);
@@ -350,7 +369,7 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
 
         // Validate Aadhaar format (12 digits)
         if (!/^\d{12}$/.test(aadhaarNumber)) {
-            console.log('[CHECKIN KYC] Invalid aadhaar format:', aadhaarNumber, 'length:', aadhaarNumber.length);
+            console.log('[CHECKIN KYC] Invalid aadhaar format, length:', String(aadhaarNumber).length);
             return res.status(400).json({ success: false, message: 'Aadhaar must be 12 digits' });
         }
 
@@ -393,7 +412,7 @@ router.post('/owner/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =>
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
-        const otp = String(Math.floor(100000 + Math.random() * 900000));
+        const otp = newOtp();
         const k = keyFor('owner', loginId, aadhaarNumber);
         await otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
         console.log('[CHECKIN KYC] Owner OTP generated for', loginId);
@@ -1342,14 +1361,38 @@ router.get('/tenant/profile/:loginId', async (req, res) => {
             }
         }
 
-        // Ensure idProofNumber & aadhaarNumber are populated on profile response
-        tenant.idProofNumber = tenant.idProofNumber || tenant.idProof?.number || tenant.aadhaarNumber || tenant.aadhar || tenant.kyc?.aadhaarNumber || tenant.kyc?.aadhar || '';
-        tenant.aadhaarNumber = tenant.aadhaarNumber || tenant.idProofNumber || tenant.idProof?.number || '';
+        // This route is anonymous by design (emailed ?loginId= links, no
+        // session) and loginIds are guessable, so its default answer must be
+        // safe to hand to anyone. It used to re-surface the Aadhaar number as
+        // idProofNumber/aadhaarNumber and return the card photos and
+        // signatures as well.
+        //
+        // buildCheckinProfileView strips every Aadhaar number, card image and
+        // signature and returns only "XXXX XXXX 1234". The tenant's own
+        // uploaded card images come back only with a valid check-in access
+        // proof, which is issued solely by a successful KYC OTP for THIS
+        // tenant. An absent, expired, revoked or other-tenant proof silently
+        // gets the public view — never an error, because the KYC step reads
+        // the linked phone from this response and must not be blocked.
+        const proof = checkinAccessFromRequest(req);
+        const access = proof ? await verifyCheckinAccess(proof, tenant) : { ok: false, reason: 'missing' };
 
-        return res.json({ success: true, tenant: { ...tenant, ownerName } });
+        const view = buildCheckinProfileView({ ...tenant, ownerName }, { sensitive: access.ok });
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({
+            success: true,
+            tenant: view,
+            // Tells the frontend to drop a stale stored proof.
+            ...(proof && !access.ok ? { checkinAccess: 'denied' } : {})
+        });
     } catch (err) {
-        console.error('tenant/profile GET error:', err);
-        return res.status(500).json({ success: false, message: err.message });
+        // err.message can carry a field value (e.g. a cast error); never let
+        // that put an Aadhaar number into a log or a response.
+        // Redacted rather than replaced, so dbTimeoutResponseNormalizer can
+        // still recognise a pool/DB timeout and turn it into a retryable 503.
+        const safeMessage = redactAadhaarInText(err && err.message);
+        console.error('tenant/profile GET error:', safeMessage);
+        return res.status(500).json({ success: false, message: safeMessage });
     }
 });
 
@@ -1502,10 +1545,11 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
         tenant.updatedAt = new Date();
         await tenant.save();
 
-        const otp = String(Math.floor(100000 + Math.random() * 900000));
+        const otp = newOtp();
         const k = keyFor('tenant', normalizedLoginId, aadhaarNumber);
         await otpStore.set(k, { otp, expiresAt: Date.now() + 10 * 60 * 1000 });
-        console.log('[CHECKIN OTP] tenant', normalizedLoginId, aadhaarNumber, 'internal OTP generated');
+        // Used to log the full Aadhaar number on every send.
+        console.log('[CHECKIN OTP] tenant', normalizedLoginId, 'OTP generated for Aadhaar', maskAadhaar(aadhaarNumber));
 
         // Send OTP via Email directly
         if (tenant.email) {
@@ -1566,8 +1610,9 @@ router.post('/tenant/kyc/send-otp', otpIpLimiter, otpLimiter, async (req, res) =
             provider: 'internal'
         });
     } catch (err) {
-        console.error('tenant/kyc/send-otp error:', err);
-        return res.status(500).json({ success: false, message: err.message });
+        const safeMessage = redactAadhaarInText(err && err.message);
+        console.error('tenant/kyc/send-otp error:', safeMessage);
+        return res.status(500).json({ success: false, message: safeMessage });
     }
 });
 
@@ -1579,6 +1624,14 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
         const entry = await otpStore.get(k);
         if (!entry || Date.now() > entry.expiresAt) {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+        }
+        // A correct OTP now also issues the check-in access proof, so the six
+        // digits must not be guessable by retrying: five tries per OTP, then it
+        // is burned (same rule and atomic counter as the password-reset OTPs).
+        const attempts = await otpStore.countAttempt(k, entry);
+        if (attempts > 5) {
+            await otpStore.delete(k);
+            return res.status(400).json({ success: false, message: 'Too many incorrect attempts. Please request a new OTP.' });
         }
         if (String(otp).trim() !== String(entry.otp).trim()) {
             return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
@@ -1616,13 +1669,19 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
             return false;
         };
 
+        // Mismatch reasons are shown to reviewers and written to the tenant
+        // and check-in records, so they carry masked numbers only. They used
+        // to embed BOTH full numbers — the owner-entered one and the tenant's.
         const mismatchReasons = [];
-        if (clientMismatch && !clientMismatch.includes('mismatch: Owner Record () vs') && !clientMismatch.includes('mismatch: Owner set () vs')) {
-            mismatchReasons.push(clientMismatch);
+        const clientText = typeof clientMismatch === 'string' ? clientMismatch : '';
+        if (clientText && !clientText.includes('mismatch: Owner Record () vs') && !clientText.includes('mismatch: Owner set () vs')) {
+            mismatchReasons.push(redactAadhaarInText(clientText));
         }
 
         if (ownerSetAadhaar && aadhaarNumber && !isAadhaarMatch(ownerSetAadhaar, aadhaarNumber)) {
-            mismatchReasons.push(`Aadhaar Number mismatch: Owner set (${ownerSetAadhaar}) vs Tenant uploaded (${aadhaarNumber})`);
+            mismatchReasons.push(
+                `Aadhaar Number mismatch: Owner set (${maskAadhaar(ownerSetAadhaar) || 'unreadable'}) vs Tenant uploaded (${maskAadhaar(aadhaarNumber) || 'unreadable'})`
+            );
         }
 
         const isMismatch = mismatchReasons.length > 0;
@@ -1684,10 +1743,33 @@ router.post('/tenant/kyc/verify-otp', otpIpLimiter, otpLimiter, async (req, res)
             console.warn('tenant kyc verified whatsapp failed:', whatsAppErr.message);
         }
 
-        return res.json({ success: true, record, tenant });
+        // The OTP just proved control of THIS tenant's registered email (the
+        // OTP is keyed by this loginId and mailed only to the address on
+        // file), so this is the one place a check-in access proof is issued.
+        // It is bound to the tenant loaded above, not to anything in the body.
+        // A failure here must not undo a KYC that has already been saved —
+        // the tenant simply continues without one.
+        let checkinAccess = null;
+        try {
+            checkinAccess = await issueCheckinAccess(tenant);
+        } catch (accessErr) {
+            console.warn('tenant kyc verify: check-in access proof not issued:', accessErr.message);
+        }
+
+        // Used to return the whole tenant document and check-in record —
+        // Aadhaar number, card images, everything. The KYC page never read
+        // them; it only checks `success`.
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({
+            success: true,
+            kycStatus: targetKycStatus,
+            otpVerified: Boolean(record?.tenantKyc?.otpVerified ?? true),
+            ...(checkinAccess ? { checkinAccess } : {})
+        });
     } catch (err) {
-        console.error('tenant/kyc/verify-otp error:', err);
-        return res.status(500).json({ success: false, message: err.message });
+        const safeMessage = redactAadhaarInText(err && err.message);
+        console.error('tenant/kyc/verify-otp error:', safeMessage);
+        return res.status(500).json({ success: false, message: safeMessage });
     }
 });
 
@@ -2371,41 +2453,83 @@ router.get('/tenant/agreement/pdf/:loginId', async (req, res) => {
     }
 });
 
-router.get('/:role/:loginId', protect, authorize('owner', 'tenant', 'superadmin', 'employee', 'areamanager', 'manager'), async (req, res) => {
+const normId = (v) => String(v ?? '').trim().toUpperCase();
+
+/**
+ * May the caller read the check-in record for (role, loginId)?
+ *   • a tenant — only their own record
+ *   • everyone else — canAccessOwner() against the owner the record belongs
+ *     to: superadmin/admin, that owner, the owner's own staff or property
+ *     manager, or a platform employee/area manager whose scope includes that
+ *     owner. The same rule every /api/owners/:loginId route uses.
+ *
+ * THE BYPASS THIS REPLACES: employee, manager and areamanager were "privileged"
+ * and skipped every check, so any of them could read ANY tenant's or owner's
+ * full check-in record, raw Aadhaar included. (Plain 'admin' was accidentally
+ * locked out by the same list.)
+ *
+ * Identity comes only from req.user (the verified session) and the owner
+ * relationship only from the database — never from the request.
+ */
+async function canReadCheckinRecord(req, role, targetLoginId) {
+    const callerRole = normalizeRole(req.user && req.user.role);
+    const isPlatformAdmin = callerRole === 'superadmin' || callerRole === 'admin';
+
+    if (role === 'tenant') {
+        if (callerRole === 'tenant') return normId(req.user.loginId) === targetLoginId;
+
+        const tenant = await Tenant.findOne({ loginId: targetLoginId }).select('ownerLoginId property').lean();
+        let ownerLoginId = normId(tenant && tenant.ownerLoginId);
+        if (tenant && !ownerLoginId && tenant.property) {
+            const prop = await Property.findById(tenant.property).select('ownerLoginId').lean();
+            ownerLoginId = normId(prop && prop.ownerLoginId);
+        }
+        // No owner on record → no owner-side party to authorise; admins only.
+        if (!ownerLoginId) return isPlatformAdmin;
+        return canAccessOwner(req, ownerLoginId);
+    }
+
+    // role === 'owner' (ensureRole has already rejected anything else)
+    if (callerRole === 'tenant') return false;
+    return canAccessOwner(req, targetLoginId);
+}
+
+/**
+ * Even an authorised caller gets masked Aadhaar numbers and no card images
+ * from this route: its callers use the KYC section for status only. The full
+ * number and images stay behind GET /api/tenants/:tenantId/kyc, which is the
+ * explicit, ownership-checked KYC review path.
+ */
+function maskCheckinRecord(record) {
+    if (!record) return null;
+    const out = JSON.parse(JSON.stringify(record));
+    for (const section of ['tenantKyc', 'ownerKyc']) {
+        const kyc = out[section];
+        if (!kyc || typeof kyc !== 'object') continue;
+        if ('aadhaarNumber' in kyc) kyc.aadhaarNumber = maskAadhaar(kyc.aadhaarNumber);
+        delete kyc.aadhaarFront;
+        delete kyc.aadhaarBack;
+    }
+    return out;
+}
+
+router.get('/:role/:loginId', protect, authorize('owner', 'tenant', 'superadmin', 'employee', 'areamanager', 'manager'), applyEmployeeScope, async (req, res) => {
     try {
         const { role, loginId } = req.params;
         if (!ensureRole(role)) return res.status(400).json({ success: false, message: 'Invalid role' });
-        const targetLoginId = String(loginId).toUpperCase();
-        const requesterRole = String(req.user.role || '').toLowerCase();
-        const requesterLoginId = String(req.user.loginId || '').toUpperCase();
+        const targetLoginId = normId(loginId);
 
-        const isPrivileged = ['superadmin', 'employee', 'areamanager', 'manager'].includes(requesterRole);
-        if (!isPrivileged) {
-            if (role === 'tenant') {
-                if (requesterRole === 'tenant' && requesterLoginId === targetLoginId) {
-                    // tenant fetching their own record: allowed
-                } else if (requesterRole === 'owner') {
-                    const tenant = await Tenant.findOne({ loginId: targetLoginId }).select('ownerLoginId').lean();
-                    if (!tenant || String(tenant.ownerLoginId || '').toUpperCase() !== requesterLoginId) {
-                        return res.status(403).json({ success: false, message: 'Forbidden' });
-                    }
-                } else {
-                    return res.status(403).json({ success: false, message: 'Forbidden' });
-                }
-            } else if (role === 'owner') {
-                if (!(requesterRole === 'owner' && requesterLoginId === targetLoginId)) {
-                    return res.status(403).json({ success: false, message: 'Forbidden' });
-                }
-            } else {
-                return res.status(403).json({ success: false, message: 'Forbidden' });
-            }
+        if (!(await canReadCheckinRecord(req, role, targetLoginId))) {
+            return res.status(403).json({ success: false, message: 'Forbidden' });
         }
 
         const record = await CheckinRecord.findOne({ loginId: targetLoginId, role }).lean();
-        return res.json({ success: true, record: record || null });
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ success: true, record: maskCheckinRecord(record) });
     } catch (err) {
-        console.error('checkin get error:', err);
-        return res.status(500).json({ success: false, message: err.message });
+        const safeMessage = redactAadhaarInText(err && err.message);
+        console.error('checkin get error:', safeMessage);
+        return res.status(500).json({ success: false, message: safeMessage });
     }
 });
 

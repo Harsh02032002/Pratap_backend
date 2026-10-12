@@ -1,10 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const ticketController = require('../controllers/ticketController');
-const { optionalProtect } = require('../middleware/authMiddleware');
+const { protect } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 
 // ─── TICKET ROUTES ─────────────────────────────────────────────────────────
+
+// Every route in this file was reachable with no token: anyone could read any
+// owner's or tenant's support tickets, resolve them, or bulk-delete them.
+// '/all' had optionalProtect, which authenticates only IF a header is present
+// — so an anonymous caller fell through to applyEmployeeScope with no
+// req.user, where isEmployee is false and therefore no scope filter is
+// applied, returning every ticket on the platform.
+//
+// All four frontend callers (owner panel, tenant support page, superadmin
+// tickets page) go through fetchJson and already send a token.
+router.use(protect);
 
 // Create new support ticket (Owner or Tenant)
 router.post('/create', ticketController.createTicket);
@@ -17,7 +28,7 @@ router.get('/search', ticketController.getTicketByRefId);
 router.get('/search/:ticketId', ticketController.getTicketByRefId);
 
 // Get all tickets for SuperAdmin / Employee (supports area, status, search filtering, scoped for employee)
-router.get('/all', optionalProtect, applyEmployeeScope, ticketController.getAllTickets);
+router.get('/all', applyEmployeeScope, ticketController.getAllTickets);
 
 // Resolve or complete ticket (Employee / Admin)
 router.post('/resolve', ticketController.resolveTicket);

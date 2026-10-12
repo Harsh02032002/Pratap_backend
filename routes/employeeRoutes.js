@@ -3,7 +3,9 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const Employee = require('../models/Employee');
 const jwt = require('jsonwebtoken');
-const { protect, authorize, protectPasswordReset } = require('../middleware/authMiddleware');
+const { signSessionToken } = require('../utils/sessionToken');
+const { revocationReason } = require('../utils/accountState');
+const { protect, authorize, authorizeAdminOnly, protectPasswordReset } = require('../middleware/authMiddleware');
 const { ROLES_REQUIRING_ASSIGNED_PROPERTIES, DEFAULT_RESTRICTED_MODULES } = require('../utils/permissionKeys');
 
 /**
@@ -76,11 +78,7 @@ router.post('/login', async (req, res) => {
             // Auth token for protect-guarded routes (e.g. /api/tenants/owner, /api/complaints/owner).
             // protect() looks up the user by decoded.id and derives role from the DB record,
             // so the payload only needs the employee's _id.
-            responsePayload.token = jwt.sign(
-                { id: emp._id },
-                process.env.JWT_SECRET,
-                { expiresIn: '7d' }
-            );
+            responsePayload.token = signSessionToken({ id: emp._id }, emp);
         }
 
         return res.json(responsePayload);
@@ -122,11 +120,20 @@ router.post('/:loginId/reset-password', protectPasswordReset, async (req, res) =
             return res.status(404).json({ success: false, error: 'Staff account not found' });
         }
 
+        // This route hands back a full session token, so it is an account-status
+        // gate in its own right. Without this a deactivated employee holding any
+        // still-signed token could reset their password here and walk away with a
+        // brand-new valid session, straight past the revocation gate in protect().
+        const resetBlocked = revocationReason(emp);
+        if (resetBlocked) {
+            return res.status(403).json({ success: false, error: 'This staff account is not active.' });
+        }
+
         emp.password = newPassword;
         emp.requirePasswordReset = false;
         await emp.save();
 
-        const token = jwt.sign({ id: emp._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const token = signSessionToken({ id: emp._id }, emp);
 
         return res.json({ success: true, message: 'Password reset successfully', token });
     } catch (err) {
@@ -597,7 +604,13 @@ router.post('/', protect, authorize('superadmin', 'areamanager', 'owner'), async
  * Update an employee
  * Body: { name, email, phone, password, role, area, areaCode, city, permissions, isActive }
  */
-router.patch('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+// authorizeAdminOnly, NOT authorize: the permissive gate expands 'superadmin'
+// to admit employee/manager/staff, and the scope check below only covers
+// 'areamanager' and 'owner'. So any field employee fell through to the `else`
+// branch and got COMMON_FIELDS — which includes 'password' and 'isActive' —
+// on ANY employee or manager account. That is an account takeover, so it
+// enforces regardless of AUTHZ_MODE.
+router.patch('/:loginId', protect, authorizeAdminOnly('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { loginId } = req.params;
 
@@ -712,7 +725,11 @@ router.post('/:loginId/deactivate', protect, authorize('superadmin', 'areamanage
  * DELETE /api/employees/:loginId
  * Delete an employee (Soft Delete in both Employee & User collections)
  */
-router.delete('/:loginId', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+// authorizeAdminOnly for the same reason as PATCH above, and this one has no
+// parentLoginId check at all — every sibling route in this file has one, the
+// DELETE is the single omission — so it soft-deletes the matched Employee AND
+// User records for any loginId, email or _id given.
+router.delete('/:loginId', protect, authorizeAdminOnly('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { loginId } = req.params;
         const targetStr = decodeURIComponent(loginId).trim();
@@ -772,7 +789,9 @@ router.post('/:loginId/reactivate', protect, authorize('superadmin', 'areamanage
 
         const employee = await Employee.findOneAndUpdate(
             { loginId },
-            { isActive: true, updatedAt: new Date() },
+            // deactivatedAt cleared only on a deliberate reactivation; tokenVersion
+            // is never rolled back, so old tokens remain revoked.
+            { isActive: true, deactivatedAt: null, updatedAt: new Date() },
             { new: true }
         );
 

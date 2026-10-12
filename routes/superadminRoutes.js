@@ -19,6 +19,61 @@ const { buildCacheKey } = require('../utils/cacheKeys');
 // also admits staff roles, and for them these handlers would be scoped — so any
 // non-SA caller gets null (= bypass, straight to MongoDB). Role comes from the
 // DB-resolved req.user, never the request.
+// ── Force logout ────────────────────────────────────────────────────────────
+// Ends every live session for one account WITHOUT changing whether it may log
+// back in, which deactivation has no way to express on its own.
+//
+// POLICY — all sessions, not one: the revocation unit here is the account's
+// token generation (`tokenVersion`), because this application has no server-side
+// session registry and its tokens carry no per-session identifier. There is
+// therefore no way to end one device's session and leave another's running, and
+// this endpoint deliberately does not pretend otherwise. Adding per-session
+// revocation would mean putting a session id in the token and storing a session
+// record — see the residual-risks note in the security report.
+const FORCE_LOGOUT_COLLECTIONS = {
+  user: () => require('../models/user'),
+  employee: () => require('../models/Employee'),
+  owner: () => require('../models/Owner'),
+  tenant: () => require('../models/Tenant'),
+  areamanager: () => require('../models/AreaManager'),
+  propertymanager: () => require('../models/PropertyManager'),
+};
+
+router.post('/accounts/:collection/:id/force-logout', protect, authorize('superadmin'), async (req, res) => {
+  try {
+    // authorize('superadmin') also admits staff roles, so re-assert a real
+    // platform admin before letting the caller end somebody's sessions.
+    if (!isPlatformAdmin(req)) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const key = String(req.params.collection || '').trim().toLowerCase();
+    const loader = FORCE_LOGOUT_COLLECTIONS[key];
+    if (!loader) {
+      return res.status(400).json({ success: false, error: 'Unknown account collection' });
+    }
+
+    const Model = loader();
+    const raw = String(req.params.id || '').trim();
+    const or = [{ loginId: raw.toUpperCase() }];
+    if (mongoose.Types.ObjectId.isValid(raw)) or.push({ _id: raw });
+
+    const account = await Model.findOne({ $or: or }).select('_id tokenVersion');
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+    // $inc in the database, not a read-modify-write, so concurrent force-logouts
+    // cannot lose an increment.
+    await Model.updateOne({ _id: account._id }, { $inc: { tokenVersion: 1 } });
+
+    // Never log the token, only who was revoked.
+    console.log(`[FORCE LOGOUT] ${key}:${account._id} by ${req.user?.loginId || req.user?._id}`);
+    return res.json({ success: true, message: 'All sessions for this account have been ended.' });
+  } catch (err) {
+    console.error('Force logout error:', err.message);
+    return res.status(500).json({ success: false, error: 'Force logout failed' });
+  }
+});
+
 const isPlatformAdmin = (req) => {
   const role = String(req.user?.role || '').toLowerCase();
   return (role === 'superadmin' || role === 'admin') && req.employeeScope?.isEmployee !== true;

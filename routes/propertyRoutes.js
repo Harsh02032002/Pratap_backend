@@ -203,11 +203,19 @@ router.post('/:id/click', async (req, res) => {
 // needs to compare req.user against the specific property being edited.
 router.put('/:id/owner-edit-request', protect, formLimiter, propertyController.ownerEditRequest);
 
-// Superadmin approves owner pending changes (applies to live property)
-router.put('/:id/approve-changes', formLimiter, auditTrail('properties'), propertyController.approveOwnerChanges);
-
-// Superadmin rejects owner pending changes
-router.put('/:id/reject-changes', formLimiter, auditTrail('properties'), propertyController.rejectOwnerChanges);
+// Superadmin approves / rejects owner pending changes (applies to live property).
+//
+// Both of these were unauthenticated, which defeated the entire review step:
+// the route above (`/:id/owner-edit-request`) deliberately parks an owner's
+// edits in pendingChanges so an admin can review them, and an owner could
+// then just call approve-changes themselves and push the edit live.
+//
+// The roles are listed out rather than relying on authorize('superadmin')
+// expanding to admit staff, because the point here is that 'owner' is NOT in
+// the set. Admin reviewers do this work from the superadmin pages.
+const PROPERTY_REVIEWER_ROLES = ['superadmin', 'admin', 'areamanager', 'employee', 'manager'];
+router.put('/:id/approve-changes', protect, authorize(...PROPERTY_REVIEWER_ROLES), formLimiter, auditTrail('properties'), propertyController.approveOwnerChanges);
+router.put('/:id/reject-changes', protect, authorize(...PROPERTY_REVIEWER_ROLES), formLimiter, auditTrail('properties'), propertyController.rejectOwnerChanges);
 
 // Superadmin assigns verification task to employee
 router.put('/:id/assign-verification', protect, authorize('superadmin'), propertyController.assignPropertyVerification);

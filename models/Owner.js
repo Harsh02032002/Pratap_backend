@@ -309,4 +309,8 @@ ownerSchema.pre('save', function(next) {
     }
 });
 
+// Adds tokenVersion/deactivatedAt and bumps the token generation on any
+// write that revokes this account. See models/plugins/sessionRevocation.js.
+ownerSchema.plugin(require('./plugins/sessionRevocation'));
+
 module.exports = mongoose.models.Owner || mongoose.model('Owner', ownerSchema);

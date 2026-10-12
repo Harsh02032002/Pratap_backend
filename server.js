@@ -108,6 +108,12 @@ const io = new Server(server, {
 // were saved but never pushed — the recipient had to refresh to see them.
 global.io = io;
 
+// Socket.IO authentication. This MUST be attached before initChatSocket below:
+// io.use() middleware only applies to connections established after it is
+// registered, and until this existed a socket's identity was whatever the client
+// claimed in its join_room payload. See socket/socketAuth.js.
+require('./socket/socketAuth').attachSocketAuth(io);
+
 initChatSocket(io);
 
 // 3. Security & Optimization Middlewares

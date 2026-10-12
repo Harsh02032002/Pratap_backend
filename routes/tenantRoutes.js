@@ -8,7 +8,8 @@ const TenantFeedback = require('../models/TenantFeedback');
 const Rent = require('../models/Rent');
 const Notification = require('../models/Notification');
 const { calcNoticeEndDate } = require('../services/moveoutService');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize, authorizeStrict, authorizeAdminOnly } = require('../middleware/authMiddleware');
+const { canAccessOwner } = require('../middleware/ownerAccess');
 const tenantController = require('../controllers/tenantController');
 const { auditTrail } = require('../middleware/auditTrail');
 const roomTransferService = require('../services/roomTransferService');
@@ -20,7 +21,7 @@ const { nextBillingMonth } = require('../utils/istDate');
 // structurally cannot appear in any response from this router.
 // Shared with controllers/tenantController.js and propertyManagerController.js
 // via utils/tenantProjections.js so all three can't drift apart.
-const { ALWAYS_EXCLUDED_PROJECTION: ALWAYS_EXCLUDED } = require('../utils/tenantProjections');
+const { ALWAYS_EXCLUDED_PROJECTION: ALWAYS_EXCLUDED, stripTenantSecrets } = require('../utils/tenantProjections');
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -257,7 +258,7 @@ router.post(
 
             tenant.status = 'active';
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -265,27 +266,57 @@ router.post(
 );
 
 // ══ 6.1 ADMIN/OWNER: VIEW TENANT KYC DOCUMENTS ═══════════════════════════
+//
+// This is THE explicit path to a tenant's raw KYC (Aadhaar number and card
+// images) — the owner panel's tenant edit, documents and KYC-review screens
+// need the real values. Every other tenant response strips them
+// (ALWAYS_EXCLUDED), so this route carries the whole authorization burden:
+//
+//   • authorizeStrict, not authorize: naming 'superadmin' no longer silently
+//     admits staff/field_executive/verification_officer as well.
+//   • record level: only `role === 'owner'` used to be checked, so ANY
+//     employee, manager or area manager could read ANY tenant's Aadhaar. Now
+//     canAccessOwner() decides against the tenant's actual owner (from the
+//     database): platform admin, that owner, that owner's own staff or
+//     property manager, or a platform employee/area manager whose scope
+//     includes that owner.
+//   • minimum data: the raw provider payload (kyc.aadhaarData) is not sent —
+//     no screen reads it — and the response is never cached.
 router.get(
     '/:tenantId/kyc',
     protect,
-    authorize('superadmin', 'areamanager', 'owner', 'employee', 'manager'),
+    authorizeStrict('superadmin', 'areamanager', 'owner', 'employee', 'manager'),
+    applyEmployeeScope,
     async (req, res) => {
         try {
             const { tenantId } = req.params;
-            const tenant = await Tenant.findById(tenantId);
+            const tenant = await Tenant.findById(tenantId)
+                .select('kyc kycStatus name loginId ownerLoginId property')
+                .lean();
             if (!tenant) {
                 return res.status(404).json({ success: false, message: 'Tenant not found' });
             }
 
-            if (req.user.role === 'owner') {
-                if (String(tenant.ownerLoginId || '').toUpperCase() !== callerLoginId(req)) {
-                    return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
-                }
+            let ownerLoginId = String(tenant.ownerLoginId || '').trim().toUpperCase();
+            if (!ownerLoginId && tenant.property) {
+                const prop = await Property.findById(tenant.property).select('ownerLoginId').lean();
+                ownerLoginId = String((prop && prop.ownerLoginId) || '').trim().toUpperCase();
+            }
+            const role = String(req.user.role || '').toLowerCase();
+            const isPlatformAdmin = role === 'superadmin' || role === 'admin';
+            // No owner on record → no owner-side party to authorise; admins only.
+            const allowed = ownerLoginId ? await canAccessOwner(req, ownerLoginId) : isPlatformAdmin;
+            if (!allowed) {
+                return res.status(403).json({ success: false, message: 'Forbidden: Not your tenant.' });
             }
 
+            const kyc = { ...(tenant.kyc || {}) };
+            delete kyc.aadhaarData;
+
+            res.setHeader('Cache-Control', 'no-store');
             res.json({
                 success: true,
-                kyc: tenant.kyc || {},
+                kyc,
                 kycStatus: tenant.kycStatus,
                 tenantName: tenant.name,
                 tenantLoginId: tenant.loginId
@@ -364,7 +395,7 @@ router.post(
             tenant.kycStatus = 'verified';
             tenant.status = 'active'; // Activate tenant on KYC approval
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -388,7 +419,7 @@ router.post(
             }
             tenant.kycStatus = 'rejected';
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -604,7 +635,7 @@ router.post(
             if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
             tenant.policeVerification.status = 'verified';
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -623,7 +654,7 @@ router.post(
             if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
             tenant.policeVerification.status = 'rejected';
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -734,7 +765,7 @@ router.post(
                 }).catch((e) => console.error('Moveout approval notification failed:', e.message));
             }
 
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -760,7 +791,7 @@ router.post(
 
             tenant.moveoutRequest.status = 'rejected';
             await tenant.save();
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -854,7 +885,7 @@ router.post(
                 ).catch((e) => console.error('Moveout cancel email failed:', e.message));
             }
 
-            res.json({ success: true, tenant });
+            res.json({ success: true, tenant: stripTenantSecrets(tenant) });
         } catch (err) {
             res.status(500).json({ message: err.message });
         }
@@ -1361,7 +1392,10 @@ router.patch('/:id', protect, authorize('superadmin', 'areamanager', 'owner'), a
         tenant.markModified('digitalCheckin');
 
         await tenant.save();
-        res.json(tenant);
+        // Write routes load the FULL tenant to modify it; echoing it back used
+        // to hand out the Aadhaar number, card images and signatures. Same
+        // rule as every read route: ALWAYS_EXCLUDED never leaves the server.
+        res.json(stripTenantSecrets(tenant));
     } catch (err) {
         res.status(400).json({ message: err.message });
     }
@@ -1414,7 +1448,7 @@ router.post('/:id/deactivate', protect, authorize('superadmin', 'areamanager', '
         if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isActive: false } });
         if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: false } });
 
-        return res.json({ success: true, message: 'Tenant account deactivated successfully', data: tenant });
+        return res.json({ success: true, message: 'Tenant account deactivated successfully', data: stripTenantSecrets(tenant) });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
@@ -1422,14 +1456,18 @@ router.post('/:id/deactivate', protect, authorize('superadmin', 'areamanager', '
 
 router.post('/:id/reactivate', protect, authorize('superadmin', 'areamanager', 'owner'), auditTrail('tenants'), async (req, res) => {
     try {
-        const tenant = await Tenant.findByIdAndUpdate(req.params.id, { $set: { status: 'active' } }, { new: true });
+        // deactivatedAt is cleared ONLY by a deliberate reactivation like this one,
+        // so an automatic isActive:true write elsewhere cannot undo an admin's
+        // deactivation. tokenVersion is never decremented, so pre-deactivation
+        // tokens stay dead regardless.
+        const tenant = await Tenant.findByIdAndUpdate(req.params.id, { $set: { status: 'active', deactivatedAt: null } }, { new: true });
         if (!tenant) return res.status(404).json({ message: 'Tenant not found' });
 
         const User = require('../models/user');
-        if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isActive: true } });
-        if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: true } });
+        if (tenant.user)    await User.findByIdAndUpdate(tenant.user, { $set: { isActive: true, deactivatedAt: null } });
+        if (tenant.loginId) await User.updateOne({ loginId: tenant.loginId, role: 'tenant' }, { $set: { isActive: true, deactivatedAt: null } });
 
-        return res.json({ success: true, message: 'Tenant account reactivated successfully', data: tenant });
+        return res.json({ success: true, message: 'Tenant account reactivated successfully', data: stripTenantSecrets(tenant) });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
@@ -1516,7 +1554,8 @@ router.post('/bulk-rent-reminder', protect, authorize('superadmin', 'areamanager
 });
 
 // ══ BULK: DELETE INACTIVE TENANTS ════════════════════════════════════════════
-router.delete('/bulk-delete-inactive', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+// Irreversible, same shape as /bulk-delete above.
+router.delete('/bulk-delete-inactive', protect, authorizeAdminOnly('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { tenantIds } = req.body;
         if (!Array.isArray(tenantIds) || tenantIds.length === 0) {
@@ -1585,7 +1624,14 @@ router.post('/kyc/bulk-reject', protect, authorize('superadmin', 'areamanager', 
 });
 
 // ══ KYC: POLICE VERIFICATION CSV EXPORT ══════════════════════════════════════
-router.get('/kyc/police-verification-export', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+// Mass PII: this returns name, phone, email, dateOfBirth and the whole kyc
+// sub-document (Aadhaar included) as a CSV. The ownerLoginId filter below is
+// applied only IF the query param is present, so omitting it exports every
+// tenant on the platform and passing another owner's id exports theirs.
+// authorizeAdminOnly because the permissive gate let any field employee in
+// via the superadmin expansion; the per-owner scoping is still missing and is
+// the object-scope guard's job.
+router.get('/kyc/police-verification-export', protect, authorizeAdminOnly('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { ownerLoginId } = req.query;
         const filter = { kycStatus: { $in: ['verified', 'submitted'] } };
@@ -1645,7 +1691,13 @@ router.post('/agreements/bulk-send', protect, authorize('superadmin', 'areamanag
 });
 
 // ══ TENANTS: BULK DELETE ══════════════════════════════════════════════════════
-router.post('/bulk-delete', protect, authorize('superadmin', 'areamanager', 'owner'), async (req, res) => {
+// Irreversible: Tenant.deleteMany({ _id: { $in: tenantIds } }) with no
+// ownership filter — any caller who reaches it can hard-delete any tenant on
+// the platform. authorizeAdminOnly keeps staff out regardless of AUTHZ_MODE;
+// restricting an owner to their OWN tenants still needs the object-scope
+// guard (and must reject the whole request if any one id is not theirs,
+// never delete the subset that is).
+router.post('/bulk-delete', protect, authorizeAdminOnly('superadmin', 'areamanager', 'owner'), async (req, res) => {
     try {
         const { tenantIds } = req.body;
         if (!Array.isArray(tenantIds) || tenantIds.length === 0) {

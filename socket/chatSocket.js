@@ -36,38 +36,53 @@ module.exports = (io) => {
      * EVENT: join_room
      * User joins their own room to receive messages
      */
-    socket.on('join_room', (data) => {
-      const { login_id, role, name, aliases } = data;
-
-      if (!login_id) {
-        socket.emit('error', { message: 'login_id required' });
+    socket.on('join_room', () => {
+      // THE PAYLOAD IS IGNORED. It used to supply login_id, role and name, which
+      // meant any client could join any user's room and then send messages as
+      // them with any role. Identity now comes from socket.data.auth, which
+      // socket/socketAuth.js derived from the account record during the
+      // authenticated handshake.
+      const auth = socket.data?.auth;
+      if (!auth || !auth.loginId) {
+        socket.emit('error', { message: 'Not authorized' });
+        socket.disconnect(true);
         return;
       }
 
-      // Join room with loginId
+      const login_id = auth.loginId;
+
       socket.join(login_id);
-      // Always also join the canonical form of this id. A website user whose
-      // stored loginId is their email joins "harsh@example.com" while every
-      // backend creation path addresses them as "roomhyweb541955" — joining
-      // both means neither side has to know which form the other used.
+      // Always also join the canonical form of this id, plus every other form
+      // this account is addressed by. A website user whose stored loginId is
+      // their email joins "harsh@example.com" while every backend creation path
+      // addresses them as "roomhyweb541955" — joining both means neither side
+      // has to know which form the other used. These are computed server-side
+      // from the account (socketAuth.identityFor), not accepted from the client.
       const aliasRooms = normalizeAliases(
-        [...(Array.isArray(aliases) ? aliases : []), canonicalChatId(login_id)],
+        [...(auth.rooms || []), auth.chatId, canonicalChatId(login_id)],
         login_id
       );
       aliasRooms.forEach((alias) => socket.join(alias));
       socket.userLogin = login_id;
-      socket.userRole = role;
-      socket.userName = name;
+      socket.userRole = auth.role;
+      socket.userName = auth.name;
       socket.userAliases = aliasRooms;
 
       // Track user connection
       userSockets.set(login_id, socket.id);
 
       console.log(
-        `✓ User joined: ${name} (${role}) - Room: ${login_id}` +
-        (aliasRooms.length ? ` | Aliases: ${aliasRooms.join(', ')}` : '')
+        `✓ User joined: ${auth.name} (${auth.role}) - Room: ${login_id}` +
+        (aliasRooms.length ? ` | Aliases: ${aliasRooms.length} alias room(s)` : '')
       );
-      socket.emit('joined', { message: 'Successfully joined chat' });
+      // Echo the authorized identity back so the client can reconcile whatever
+      // it thought it was.
+      socket.emit('joined', {
+        message: 'Successfully joined chat',
+        login_id,
+        role: auth.role,
+        name: auth.name
+      });
     });
 
     /**

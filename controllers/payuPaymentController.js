@@ -16,6 +16,13 @@
  */
 
 const mongoose = require('mongoose');
+
+// A published default secret would let anyone forge a token for any account,
+// so this throws instead; the caller's existing catch turns it into a denial.
+function requireJwtSecret() {
+    if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not set');
+    return process.env.JWT_SECRET;
+}
 const PaymentTransaction = require('../models/PaymentTransaction');
 const BookingRequest = require('../models/BookingRequest');
 const Owner = require('../models/Owner');
@@ -31,7 +38,7 @@ async function resolveBookingReference(bookingId) {
   const jwt = require('jsonwebtoken');
   let decoded;
   try {
-    decoded = jwt.verify(reference, process.env.JWT_SECRET || 'secret');
+    decoded = jwt.verify(reference, requireJwtSecret());
   } catch (err) {
     const error = new Error('Invalid or expired onboarding payment link');
     error.statusCode = err.name === 'TokenExpiredError' ? 410 : 401;
@@ -866,9 +873,62 @@ exports.initiateRefund = async (req, res) => {
 
     if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found' });
 
-    tx.status = 'REFUNDED';
+    // The schema enum is ['Created','PENDING','PAID','Verified','Settled',
+    // 'Refunded','Failed','FAILED','CANCELLED'] — note 'Refunded' in TITLE CASE.
+    // This handler wrote 'REFUNDED', which is not in the enum, so tx.save() threw
+    // a ValidationError on every single refund and the endpoint answered 500.
+    // The refund feature had therefore never actually worked. Comparisons here
+    // are case-insensitive so historical rows in either casing are recognised.
+    const statusOf = String(tx.status || '').toUpperCase();
+
+    // IDEMPOTENCY: this endpoint had none, so the same transaction could be
+    // refunded repeatedly — each call rewriting the reason and re-emitting a
+    // success response as though a fresh refund had happened.
+    if (statusOf === 'REFUNDED') {
+      return res.status(409).json({
+        success: false,
+        message: 'This transaction has already been refunded.',
+        transaction: tx
+      });
+    }
+
+    // Only money that was actually captured can be refunded. Without this, a
+    // PENDING or FAILED transaction could be flipped straight to Refunded.
+    // PAID / Verified / Settled all mean captured in this schema.
+    if (!['PAID', 'VERIFIED', 'SETTLED'].includes(statusOf)) {
+      return res.status(409).json({
+        success: false,
+        message: `Only a paid transaction can be refunded (this one is ${tx.status}).`
+      });
+    }
+
+    // `amount` was accepted and then never used. Validate it against the captured
+    // amount so a partial refund cannot exceed what was actually taken.
+    const paidAmount = Number(tx.amount) || 0;
+    let refundAmount = paidAmount;
+    if (amount !== undefined && amount !== null && amount !== '') {
+      refundAmount = Number(amount);
+      if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+        return res.status(400).json({ success: false, message: 'Refund amount must be a positive number.' });
+      }
+      if (refundAmount > paidAmount) {
+        return res.status(400).json({
+          success: false,
+          message: `Refund amount cannot exceed the ₹${paidAmount} captured for this transaction.`
+        });
+      }
+    }
+
+    tx.status = 'Refunded';          // the enum's exact value — see the note above
     tx.refund_reason = reason || 'Admin initiated refund';
+    tx.refund_amount = refundAmount;
+    tx.refund_date = new Date();   // the schema's field; refunded_at has no path
+    tx.refund_status = 'Refunded';
+    tx.refunded_by = req.user?.loginId || String(req.user?._id || '');
     await tx.save();
+
+    // Attribution for a money-moving action. No token or credential is logged.
+    console.log(`[REFUND] order=${orderId} amount=${refundAmount} by=${tx.refunded_by}`);
 
     return res.json({ success: true, message: 'Refund marked successfully', transaction: tx });
   } catch (err) {

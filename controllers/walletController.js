@@ -10,9 +10,14 @@ const { sumRentPayments, sumField, getAdminTransactionTotals } = require('../ser
  */
 exports.getOwnerWalletBalance = async (req, res) => {
   try {
-    const loginId = req.user?.loginId || req.query.ownerLoginId || req.query.loginId;
+    // IDENTITY COMES FROM THE SESSION, NEVER THE QUERY STRING.
+    // This used to fall back to req.query.ownerLoginId / req.query.loginId, so
+    // with the route unauthenticated anyone could read any owner's wallet by
+    // passing their loginId — and even once authenticated, an owner could read
+    // another owner's balance the same way.
+    const loginId = req.user?.loginId;
     if (!loginId) {
-      return res.status(400).json({ success: false, message: 'loginId is required' });
+      return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
 
     // First auto-release any eligible held funds (move-in date + 24 hours)
@@ -21,9 +26,10 @@ exports.getOwnerWalletBalance = async (req, res) => {
     const Rent = require('../models/Rent');
     const RentPayment = require('../models/RentPayment');
 
-    const owner = await Owner.findOne({
-      $or: [{ loginId }, { _id: req.user?._id }]
-    }).lean();
+    // Was `$or: [{ loginId }, { _id: req.user?._id }]`: the first clause matched
+    // on a caller-supplied loginId, which is an ownership bypass. Scope strictly
+    // to the authenticated account.
+    const owner = await Owner.findOne({ _id: req.user._id }).lean();
 
     if (!owner) {
       return res.status(404).json({ success: false, message: 'Owner account not found' });
@@ -92,38 +98,44 @@ exports.getOwnerWalletBalance = async (req, res) => {
  */
 exports.withdrawOwnerFundsInstant = async (req, res) => {
   try {
-    const loginId = req.user?.loginId || req.body.loginId;
-    const { amount, bankDetails } = req.body;
-
+    // IDENTITY FROM THE SESSION ONLY. This previously read
+    // `req.user?.loginId || req.body.loginId` on an UNAUTHENTICATED route, so a
+    // request body alone chose whose funds to withdraw.
+    const loginId = req.user?.loginId;
     if (!loginId) {
-      return res.status(400).json({ success: false, message: 'loginId is required' });
+      return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
+    const { amount } = req.body;
 
     const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount <= 0) {
+    if (!Number.isFinite(numAmount) || numAmount <= 0) {
       return res.status(400).json({ success: false, message: 'Please enter a valid withdrawal amount (> ₹0)' });
     }
 
-    // Run auto-release check first
-    // Held balance removed - funds go directly to wallet
-
-    const owner = await Owner.findOne({
-      $or: [{ loginId }, { _id: req.user?._id }]
-    });
+    // Scoped to the authenticated account; the old $or let a caller-supplied
+    // loginId select a different owner.
+    const owner = await Owner.findOne({ _id: req.user._id });
 
     if (!owner) {
       return res.status(404).json({ success: false, message: 'Owner account not found' });
     }
 
     const currentAvailable = owner.availableBalance || owner.walletBalance || 0;
-    if (numAmount > currentAvailable && currentAvailable > 0) {
+    // The old condition was `numAmount > currentAvailable && currentAvailable > 0`,
+    // which SKIPPED THE LIMIT ENTIRELY when the balance was 0 — any amount could
+    // be withdrawn from an empty wallet.
+    if (numAmount > currentAvailable) {
       return res.status(400).json({
         success: false,
         message: `Insufficient available balance. You have ₹${currentAvailable} available to withdraw.`
       });
     }
 
-    const targetBank = bankDetails || owner.bankDetails || {};
+    // PAYOUT DESTINATION IS NOT CALLER-SUPPLIED. req.body.bankDetails used to be
+    // accepted here, so a withdrawal could be redirected to an arbitrary account.
+    // Only the owner's saved bank details are used, which is what the error
+    // message below already assumed.
+    const targetBank = owner.bankDetails || {};
     if (!targetBank.accountNumber && !targetBank.upiId) {
       return res.status(400).json({
         success: false,
@@ -150,11 +162,38 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
       status: 'PROCESSING'
     });
 
-    // Deduct owner available balance immediately to prevent double withdrawal
-    owner.availableBalance = Math.max(0, (owner.availableBalance || 0) - numAmount);
-    owner.walletBalance    = Math.max(0, (owner.walletBalance || 0) - numAmount);
-    owner.withdrawnBalance = (owner.withdrawnBalance || 0) + numAmount;
-    await owner.save();
+    // Deduct immediately to prevent double withdrawal. This was a
+    // read-modify-write via owner.save(), so two withdrawals submitted at the
+    // same time both read the same starting balance and both succeeded. The
+    // condition is evaluated by MongoDB as part of the update, so exactly one of
+    // two concurrent withdrawals can win.
+    if (owner.availableBalance === undefined || owner.availableBalance === null) {
+      // Older owner documents only carry walletBalance; normalise once so the
+      // conditional guard below has a field to compare against.
+      await Owner.updateOne({ _id: owner._id }, { $set: { availableBalance: currentAvailable } });
+    }
+
+    const debited = await Owner.findOneAndUpdate(
+      { _id: owner._id, availableBalance: { $gte: numAmount } },
+      {
+        $inc: {
+          availableBalance: -numAmount,
+          walletBalance: -numAmount,
+          withdrawnBalance: numAmount
+        }
+      },
+      { new: true }
+    );
+
+    if (!debited) {
+      payoutDoc.status = 'FAILED';
+      payoutDoc.failure_reason = 'Balance changed before the debit could be applied';
+      await payoutDoc.save();
+      return res.status(409).json({
+        success: false,
+        message: 'Your balance changed while this withdrawal was being processed. Please check your balance and try again.'
+      });
+    }
 
     // Trigger Instant Cashfree Payout
     const payoutRes = await directBankTransfer({
@@ -188,11 +227,15 @@ exports.withdrawOwnerFundsInstant = async (req, res) => {
         payout: payoutDoc
       });
     } else {
-      // Revert owner balance if payout failed
-      owner.availableBalance = (owner.availableBalance || 0) + numAmount;
-      owner.walletBalance    = (owner.walletBalance || 0) + numAmount;
-      owner.withdrawnBalance = Math.max(0, (owner.withdrawnBalance || 0) - numAmount);
-      await owner.save();
+      // Revert with the exact inverse $inc, not a re-save of a now-stale
+      // in-memory document (which would clobber any concurrent balance change).
+      await Owner.updateOne({ _id: owner._id }, {
+        $inc: {
+          availableBalance: numAmount,
+          walletBalance: numAmount,
+          withdrawnBalance: -numAmount
+        }
+      });
 
       payoutDoc.status = 'FAILED';
       payoutDoc.failure_reason = payoutRes.error || 'Bank transfer failed';
@@ -282,10 +325,14 @@ exports.getAdminWalletBalance = async (req, res) => {
  */
 exports.withdrawAdminEarningsInstant = async (req, res) => {
   try {
-    const { amount, bankDetails } = req.body;
+    // bankDetails is deliberately NOT read from the body any more: it used to
+    // override the configured platform account, which turned this into a
+    // payout-redirect primitive. The destination is now always the configured
+    // merchant account.
+    const { amount } = req.body;
     const numAmount = parseFloat(amount);
 
-    if (isNaN(numAmount) || numAmount <= 0) {
+    if (!Number.isFinite(numAmount) || numAmount <= 0) {
       return res.status(400).json({ success: false, message: 'Please enter a valid withdrawal amount' });
     }
 
@@ -303,7 +350,7 @@ exports.withdrawAdminEarningsInstant = async (req, res) => {
     }
 
     const transferId = `PO_ADMIN_${Date.now()}_${Math.floor(Math.random()*1000)}`;
-    const adminBank = bankDetails || {
+    const adminBank = {
       accountNumber: process.env.ADMIN_BANK_ACCOUNT || 'ADMIN_CASHFREE_MERCHANT_ACC',
       ifsc:          process.env.ADMIN_BANK_IFSC    || 'UTIB0000000',
       bankName:      'Registered Merchant Account',

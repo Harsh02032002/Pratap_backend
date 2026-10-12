@@ -27,12 +27,10 @@ function generateSignupOtp() {
     return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+const { signSessionToken } = require('../utils/sessionToken');
+
 function generateToken(user) {
-    return jwt.sign(
-        { id: user._id, role: user.role },
-        process.env.JWT_SECRET || 'secret',
-        { expiresIn: '7d' }
-    );
+    return signSessionToken({ id: user._id, role: user.role }, user);
 }
 
 function renderOtpHtml(firstName, otp) {

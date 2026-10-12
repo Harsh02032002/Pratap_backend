@@ -85,6 +85,11 @@ const paymentTransactionSchema = new mongoose.Schema({
   refund_amount: { type: Number, default: null },
   refund_status: { type: String, default: null },
   refund_date:   { type: Date, default: null },
+  // refund_reason was written by the refund handler but had no schema path, so
+  // strict mode silently discarded it on every refund. refunded_by records who
+  // authorised a money-moving action.
+  refund_reason: { type: String, default: null },
+  refunded_by:   { type: String, default: null },
 
   // ─── METADATA ─────────────────────────────────────────────────────────────
   payment_method: { type: String, default: 'payu' },  // 'payu' | 'cash' | 'already_paid'

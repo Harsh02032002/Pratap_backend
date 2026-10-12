@@ -20,6 +20,7 @@ const mongoose  = require('mongoose');
 const Employee  = require('../models/Employee');
 const AuditLog  = require('../models/AuditLog');
 const cache     = require('../utils/cache');
+const { revocationReason, tokenVersionMatches } = require('../utils/accountState');
 const { buildCacheKey } = require('../utils/cacheKeys');
 
 // Visit-derived scope only ever GROWS access as visits are added; the short
@@ -169,7 +170,12 @@ async function applyEmployeeScope(req, res, next) {
           user = await Employee.findOne({ loginId: String(decoded.id).toUpperCase() }).select('-password');
         }
       }
-      if (user) {
+      // This block sets req.user, which makes it a full authentication entry
+      // point and not just a scope decorator — so it owes the same revocation
+      // check as protect(). Without it, a request that reaches a route guarded
+      // by optionalProtect + applyEmployeeScope could be authenticated here
+      // with a deactivated employee's token.
+      if (user && !revocationReason(user) && tokenVersionMatches(user, decoded)) {
         if (user.role === 'propertyowner') user.role = 'owner';
         req.user = user;
       }

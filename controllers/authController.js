@@ -20,8 +20,12 @@ const OWNER_LOGIN_ID_REGEX = /^(ROOMHY\d+|\d{10}|\d{3,6})$/i;
 const { createOtpStore } = require('../utils/otpStore');
 const otpStore = createOtpStore('auth');
 
+const { signSessionToken } = require('../utils/sessionToken');
+
 function generateToken(user) {
-    return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    // `tv` (the account's token generation) is added by signSessionToken — see
+    // utils/sessionToken.js. Without it a reactivated account could never log in.
+    return signSessionToken({ id: user._id, role: user.role }, user);
 }
 
 // Generate 6-digit OTP
@@ -926,8 +930,12 @@ exports.login = async (req, res) => {
                 user.status = 'active';
             }
 
-            // Auto-heal owner User model if user is an owner with valid credentials or KYC
-            if (user.role === 'owner' && user.isActive === false) {
+            // Auto-heal owner User model if user is an owner with valid credentials or KYC.
+            // `deactivatedAt` is the guard: this auto-heal exists to repair
+            // Owner/User mirror drift, but it was also silently undoing real
+            // administrative deactivations, which made POST /owners/:loginId/deactivate
+            // meaningless — the owner just logged in again and was re-enabled.
+            if (user.role === 'owner' && user.isActive === false && !user.deactivatedAt) {
                 user.isActive = true;
                 user.status = 'active';
                 User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => { });
@@ -956,14 +964,20 @@ exports.login = async (req, res) => {
                 }
             }
 
-            // Auto-heal tenant User model if user is a tenant with valid credentials
-            if (user.role === 'tenant' && user.isActive === false) {
+            // Auto-heal tenant User model if user is a tenant with valid credentials.
+            // Same `deactivatedAt` guard as the owner branch above: an explicitly
+            // deactivated or suspended tenant must stay out.
+            if (user.role === 'tenant' && user.isActive === false && !user.deactivatedAt) {
                 user.isActive = true;
                 user.status = 'active';
                 User.updateOne({ _id: user._id }, { $set: { isActive: true, status: 'active' } }).catch(() => { });
             }
 
-            if (!isDemoAccount && user.role !== 'owner' && user.role !== 'tenant' && user.isActive === false) {
+            // Owners and tenants are exempt from this gate only because of the
+            // auto-heal branches above. Once an account carries deactivatedAt the
+            // auto-heal no longer runs, so the exemption must not apply either.
+            if (!isDemoAccount && user.isActive === false
+                && (user.deactivatedAt || (user.role !== 'owner' && user.role !== 'tenant'))) {
                 return res.status(403).json({ message: 'Account disabled' });
             }
 

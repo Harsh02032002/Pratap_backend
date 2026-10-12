@@ -2,6 +2,7 @@ const PropertyManager = require('../models/PropertyManager');
 const Property = require('../models/Property');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { signSessionToken } = require('../utils/sessionToken');
 const { sendMail } = require('../utils/mailer');
 const { ALWAYS_EXCLUDED_PROJECTION } = require('../utils/tenantProjections');
 
@@ -88,14 +89,13 @@ exports.loginPropertyManager = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { 
-        managerId: manager._id, 
+    const token = signSessionToken(
+      {
+        managerId: manager._id,
         loginId: manager.loginId,
-        propertyId: manager.assignedProperty._id 
+        propertyId: manager.assignedProperty._id
       },
-      process.env.JWT_SECRET || 'roomhy-secret-key',
-      { expiresIn: '7d' }
+      manager
     );
 
     return res.json({
@@ -642,7 +642,7 @@ exports.deactivatePropertyManager = async (req, res) => {
 exports.reactivatePropertyManager = async (req, res) => {
   try {
     const { managerId } = req.params;
-    const manager = await PropertyManager.findByIdAndUpdate(managerId, { $set: { status: 'active' } }, { new: true });
+    const manager = await PropertyManager.findByIdAndUpdate(managerId, { $set: { status: 'active', deactivatedAt: null } }, { new: true });
     if (!manager) {
       return res.status(404).json({ success: false, message: 'Manager not found' });
     }

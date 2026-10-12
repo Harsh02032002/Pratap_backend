@@ -12,23 +12,31 @@ router.post('/bulk-status', protect, authorize('owner', 'propertyowner', 'manage
 router.post('/bulk-clear-tenants', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.bulkClearTenants);
 
 
-// Get rooms by property
+// DELIBERATELY PUBLIC — these two feed the public property pages. The website
+// renders room inventory for anonymous visitors (PropertyDetailsPage,
+// PropertyRoomsPage), and on a website route getScopedAuthToken() reads only
+// website_token, which an anonymous visitor does not have. Adding protect here
+// would blank out the main SEO property pages. If these ever need to stop
+// exposing a field, fix the projection, not the authentication.
 router.get('/property/:propertyId', roomController.getRoomsByProperty);
-
-// Add electricity reading to a room
-router.post('/:roomId/readings', roomController.addElectricityReading);
-
-// Get electricity readings for a room
-router.get('/:roomId/readings', roomController.getElectricityReadings);
-
-// Get all rooms for an owner
 router.get('/owner/:ownerLoginId', roomController.getRoomsByOwner);
+
+// Add electricity reading to a room.
+// Was unauthenticated — anyone could write a meter reading onto any room,
+// which is what the tenant's electricity bill is computed from. The owner
+// panel is the only caller and sends a token.
+router.post('/:roomId/readings', protect, authorize('owner', 'superadmin'), roomController.addElectricityReading);
+
+// Get electricity readings for a room. Was unauthenticated.
+router.get('/:roomId/readings', protect, authorize('owner', 'tenant', 'superadmin'), roomController.getElectricityReadings);
 
 // Get all rooms (Super Admin / Employee / Manager)
 router.get('/all', protect, authorize('superadmin', 'employee', 'manager'), applyEmployeeScope, roomController.getAllRooms);
 
-// Toggle promoted status
-router.put('/:roomId/toggle-promoted', roomController.togglePromoted);
+// Toggle promoted status. Was unauthenticated — anyone could promote or
+// demote any room in the public search results. Caller is the owner panel's
+// vacancy-promotion page, which sends a token.
+router.put('/:roomId/toggle-promoted', protect, authorize('owner', 'superadmin'), roomController.togglePromoted);
 
 // Update a room
 router.put('/:roomId', protect, authorize('owner', 'propertyowner', 'manager', 'superadmin'), roomController.updateRoom);

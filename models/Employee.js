@@ -101,4 +101,8 @@ employeeSchema.index({ assignedProperties: 1 });
 employeeSchema.index({ assignedOwners: 1 });
 employeeSchema.index({ isActive: 1 });
 
+// Adds tokenVersion/deactivatedAt and bumps the token generation on any
+// write that revokes this account. See models/plugins/sessionRevocation.js.
+employeeSchema.plugin(require('./plugins/sessionRevocation'));
+
 module.exports = mongoose.model('Employee', employeeSchema);

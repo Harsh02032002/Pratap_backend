@@ -93,4 +93,8 @@ userSchema.methods.comparePassword = async function (enteredPassword) {
     return await bcrypt.compare(enteredPassword, this.password);
 };
 
+// Adds tokenVersion/deactivatedAt and bumps the token generation on any
+// write that revokes this account. See models/plugins/sessionRevocation.js.
+userSchema.plugin(require('./plugins/sessionRevocation'));
+
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);

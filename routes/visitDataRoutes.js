@@ -1,4 +1,10 @@
 const express = require('express');
+// A published default secret would let anyone forge a token for any account,
+// so this throws instead; the caller's existing catch turns it into a denial.
+function requireJwtSecret() {
+    if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not set');
+    return process.env.JWT_SECRET;
+}
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const VisitData = require('../models/VisitData');
@@ -538,7 +544,7 @@ async function resolveRequestUser(req) {
         if (!authHeader.startsWith('Bearer ')) return null;
         const token = authHeader.slice(7).trim();
         if (!token) return null;
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jwt.verify(token, requireJwtSecret());
         
         if (decoded?.id) {
             const user = await User.findById(decoded.id).select('role loginId name').lean();
@@ -1646,7 +1652,10 @@ router.get('/:visitId', protect, applyEmployeeScope, requireVisitInScope('visitI
 // ============================================================
 // DELETE: Delete a visit report by visitId or _id
 // ============================================================
-router.delete('/:visitId', async (req, res) => {
+// Deleting a visit report is destructive and was reachable with NO auth at all,
+// in a file where every other route is guarded. Restricted to platform staff and
+// admins — narrower than the PUT sibling below, which also admits owner/tenant.
+router.delete('/:visitId', protect, authorize('superadmin', 'areamanager', 'employee', 'manager'), async (req, res) => {
     try {
         const { visitId } = req.params;
         const mongoose = require('mongoose');
@@ -1965,30 +1974,9 @@ router.post('/:visitId/reject', protect, authorize('employee', 'manager', 'aream
 // ============================================================
 // DELETE: Delete a visit
 // ============================================================
-router.delete('/:visitId', async (req, res) => {
-    try {
-        const visit = await VisitData.findOneAndDelete({ visitId: req.params.visitId });
-        
-        if (!visit) {
-            return res.status(404).json({
-                success: false,
-                message: 'Visit not found'
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Visit deleted successfully',
-            visit: visit
-        });
-    } catch (error) {
-        console.error('Error deleting visit:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error deleting visit',
-            error: error.message
-        });
-    }
-});
+// REMOVED: a second, byte-for-byte duplicate `router.delete('/:visitId')` used to
+// sit here. Express matches the FIRST registration, so it was unreachable dead
+// code — but it carried no auth, so any future reordering of this file would have
+// silently restored an unauthenticated delete. The guarded route above is the one.
 
 module.exports = router;

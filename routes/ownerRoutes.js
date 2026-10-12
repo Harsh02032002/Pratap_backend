@@ -1,5 +1,11 @@
 const express = require('express');
 const mongoose = require('mongoose');
+// A published default secret would let anyone forge a token for any account,
+// so this throws instead; the caller's existing catch turns it into a denial.
+function requireJwtSecret() {
+    if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not set');
+    return process.env.JWT_SECRET;
+}
 const router = express.Router();
 const enquiryController = require('../controllers/enquiryController');
 const { sseStream } = require('../controllers/ownercontroller');
@@ -9,10 +15,11 @@ const Property = require('../models/Property');
 const Room = require('../models/Room');
 const Enquiry = require('../models/Enquiry');
 const CheckinRecord = require('../models/CheckinRecord');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize, normalizeRole } = require('../middleware/authMiddleware');
 const { applyEmployeeScope } = require('../middleware/employeeScope');
 const { requireOwnerInScope } = require('../utils/scopeHelpers');
-const { requireOwnerAccess, sseTokenFromQuery } = require('../middleware/ownerAccess');
+const { requireOwnerAccess, canAccessOwner, sseTokenFromQuery } = require('../middleware/ownerAccess');
+const { evaluateOwnerUpdate, ownerResponse } = require('../utils/ownerUpdatePolicy');
 const { auditTrail } = require('../middleware/auditTrail');
 const { normalizeLoginId } = require('../utils/normalizeId');
 const { sumPaymentTransactions, sumRentPayments, sumEnquiryPaidAmounts } = require('../services/paymentTotalsService');
@@ -31,7 +38,7 @@ async function getStaffPropertyScope(req) {
         const authHeader = req.headers.authorization || '';
         if (!authHeader.startsWith('Bearer ')) return null;
         const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
+        const decoded = jwt.verify(authHeader.slice(7), requireJwtSecret());
         const Employee = require('../models/Employee');
         const emp = await Employee.findById(decoded.id).select('assignedProperties isDeleted');
         if (!emp || emp.isDeleted) return null;
@@ -48,7 +55,12 @@ router.get('/:loginId/stream', sseTokenFromQuery, ...requireOwnerAccess('loginId
 // Enquiry API: create, list for owner, update status
 router.post('/:ownerLoginId/enquiries', ...requireOwnerAccess('ownerLoginId'), enquiryController.createEnquiry); // create
 router.get('/:ownerLoginId/enquiries', ...requireOwnerAccess('ownerLoginId'), enquiryController.listEnquiries); // list for owner
-router.patch('/enquiries/:id', enquiryController.updateEnquiry); // update status
+// Update status. Was unauthenticated — `Enquiry.findByIdAndUpdate(id, req.body)`
+// on any enquiry id, from the open internet, while both siblings above require
+// owner access. All eight frontend callers are /propertyowner/* pages sending a
+// token. Which owner the enquiry belongs to is still unchecked here — that is
+// the object-scope guard's job.
+router.patch('/enquiries/:id', protect, authorize('owner', 'superadmin'), enquiryController.updateEnquiry);
 
 
 // 1. Create new owner (Preserved from original - used by enquiry approval/import)
@@ -317,28 +329,51 @@ router.post('/:loginId/approve', protect, authorize('superadmin', 'areamanager')
 router.put('/:loginId/approve', protect, authorize('superadmin', 'areamanager'), auditTrail('owners'), ownerController.approveOwner);
 
 // 5. Update owner by loginId
-router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 'staff', 'manager', 'areamanager', 'owner'), auditTrail('owners'), async (req, res) => {
+//
+// Two holes closed here:
+//  1. RECORD: the only identity check was `role === 'owner'`, so every
+//     employee, staff, manager and area manager — and field staff admitted by
+//     authorize('superadmin')'s expansion — could update ANY owner. Now the
+//     target owner is loaded first and canAccessOwner() decides, from the
+//     session and the database only (never the body or query).
+//  2. FIELDS: the body went straight into $set. A caller who may edit an owner
+//     on their behalf (their staff, a scoped platform employee) could set the
+//     owner's login password, payout bank account, or the email/phone that
+//     password-reset OTPs go to. Those now need the owner themself or a
+//     platform admin — see utils/ownerUpdatePolicy.js.
+router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 'staff', 'manager', 'areamanager', 'owner'), applyEmployeeScope, auditTrail('owners'), async (req, res) => {
     try {
         console.log('✏️ Owner PATCH request for:', req.params.loginId);
         const param = String(req.params.loginId || '').trim();
 
-        // Owners can only modify their own record
-        if (req.user.role === 'owner' && String(req.user.loginId || '').toUpperCase() !== param.toUpperCase()) {
-            return res.status(403).json({ error: 'Forbidden: You can only update your own record' });
+        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
+        const query = isObjId
+            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
+            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
+
+        // Resolve the real owner first, so the access decision is about the
+        // record being written — whether it was addressed by loginId or _id.
+        const current = await Owner.findOne(query).lean();
+        const targetLoginId = current ? current.loginId : param;
+        if (!(await canAccessOwner(req, targetLoginId))) {
+            return res.status(403).json({ error: 'Forbidden: you do not have access to this owner' });
+        }
+        if (!current) {
+            return res.status(404).json({ error: 'Owner not found' });
         }
 
-        let updatePayload = { ...req.body };
+        const callerRole = normalizeRole(req.user.role);
+        const isPlatformAdmin = callerRole === 'superadmin' || callerRole === 'admin';
+        const isSelf = callerRole === 'owner'
+            && String(req.user.loginId || '').trim().toUpperCase() === String(current.loginId || '').trim().toUpperCase();
 
-        // 🔒 SECURITY GUARD: Non-superadmin users cannot update sensitive system fields
-        const isSuperadmin = req.user?.role === 'superadmin' || req.user?.role === 'admin';
-        if (!isSuperadmin) {
-            delete updatePayload.role;
-            delete updatePayload.status;
-            delete updatePayload.isDeleted;
-            delete updatePayload.subscription;
-            delete updatePayload.isActive;
-            delete updatePayload.loginId;
-            delete updatePayload._id;
+        const { update: updatePayload, denied } = evaluateOwnerUpdate(req.body, current, { isPlatformAdmin, isSelf });
+        if (denied.length) {
+            // Category names only — never the submitted values.
+            return res.status(403).json({
+                error: 'Forbidden: only the owner or a platform admin can change login credentials, bank/payout details or account-recovery email/phone',
+                fields: denied
+            });
         }
 
         if (updatePayload.credentials && updatePayload.credentials.password) {
@@ -346,13 +381,8 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
             updatePayload.passwordSet = true;
         }
 
-        const isObjId = mongoose.Types.ObjectId.isValid(param) && param.match(/^[0-9a-fA-F]{24}$/);
-        const query = isObjId
-            ? { $or: [{ _id: param }, { loginId: param.toUpperCase() }, { loginId: param }] }
-            : { $or: [{ loginId: param.toUpperCase() }, { loginId: param }] };
-
         const owner = await Owner.findOneAndUpdate(
-            query,
+            { _id: current._id },
             { $set: updatePayload },
             { new: true }
         );
@@ -361,7 +391,8 @@ router.patch('/:loginId', protect, authorize('superadmin', 'admin', 'employee', 
             return res.status(404).json({ error: 'Owner not found' });
         }
 
-        res.json(owner);
+        // Used to send the stored password hash back to every caller.
+        res.json(ownerResponse(owner));
     } catch (err) {
         console.error('❌ Owner PATCH error:', err.message);
         res.status(500).json({ error: err.message });
@@ -930,11 +961,11 @@ router.post('/:loginId/deactivate', protect, authorize('superadmin'), auditTrail
 router.post('/:loginId/reactivate', protect, authorize('superadmin'), auditTrail('owners'), async (req, res) => {
     try {
         const loginId = String(req.params.loginId || '').toUpperCase();
-        const owner = await Owner.findOneAndUpdate({ loginId }, { $set: { isActive: true } }, { new: true });
+        const owner = await Owner.findOneAndUpdate({ loginId }, { $set: { isActive: true, deactivatedAt: null } }, { new: true });
         if (!owner) return res.status(404).json({ success: false, message: 'Owner not found' });
 
         const User = require('../models/user');
-        await User.updateOne({ loginId, role: 'owner' }, { $set: { isActive: true } });
+        await User.updateOne({ loginId, role: 'owner' }, { $set: { isActive: true, deactivatedAt: null } });
 
         return res.json({ success: true, message: 'Owner account reactivated successfully', data: owner });
     } catch (err) {

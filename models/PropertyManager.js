@@ -34,4 +34,8 @@ const PropertyManagerSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// Adds tokenVersion/deactivatedAt and bumps the token generation on any
+// write that revokes this account. See models/plugins/sessionRevocation.js.
+PropertyManagerSchema.plugin(require('./plugins/sessionRevocation'));
+
 module.exports = mongoose.model('PropertyManager', PropertyManagerSchema);

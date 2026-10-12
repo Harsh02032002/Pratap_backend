@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { revocationReason, tokenVersionMatches } = require('../utils/accountState');
 const ChatMessage = require('../models/ChatMessage');
 const ChatRoom = require('../models/ChatRoom');
 const WebsiteEnquiry = require('../models/WebsiteEnquiry');
@@ -97,12 +98,17 @@ async function isCallerSuperadmin(req) {
         token = req.headers.authorization.split(' ')[1];
     }
     if (!token) return false;
-    if (token === 'superadmin_token') return true;
+    // Removed: `if (token === 'superadmin_token') return true;` — the literal
+    // string granted superadmin before any signature check ran.
+    // Removed the hardcoded secret fallback too: a published default secret lets
+    // anyone forge a token for any account, which defeats revocation entirely.
+    if (!process.env.JWT_SECRET) return false;
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'roomhy_default_jwt_secret_key_2026');
-        const user = await User.findById(decoded.id).select('role').lean();
-        return user?.role === 'superadmin' || user?.role === 'admin';
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id).select('role isActive isDeleted status tokenVersion').lean();
+        if (!user || revocationReason(user) || !tokenVersionMatches(user, decoded)) return false;
+        return user.role === 'superadmin' || user.role === 'admin';
     } catch (err) {
         return false;
     }

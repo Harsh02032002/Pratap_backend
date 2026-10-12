@@ -262,4 +262,8 @@ TenantSchema.index({ 'moveoutRequest.status': 1, 'moveoutRequest.noticeEndDate':
 TenantSchema.index({ email: 1 });
 TenantSchema.index({ phone: 1 });
 
+// Adds tokenVersion/deactivatedAt and bumps the token generation on any
+// write that revokes this account. See models/plugins/sessionRevocation.js.
+TenantSchema.plugin(require('./plugins/sessionRevocation'));
+
 module.exports = mongoose.models.Tenant || mongoose.model('Tenant', TenantSchema);

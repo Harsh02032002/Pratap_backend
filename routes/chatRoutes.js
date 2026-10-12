@@ -44,7 +44,11 @@ async function ensureParticipantRoom(roomId, participants) {
     );
 }
 
-router.post('/create', async (req, res) => {
+// Was unauthenticated: anyone could create a chat room between any website
+// user and any owner, from body-supplied ids. Its one frontend reference is
+// the exported helper createOwnerChatRoom (src/utils/propertyowner.js), which
+// has no call sites, so requiring a token breaks nothing today.
+router.post('/create', protect, async (req, res) => {
     try {
         const {
             bookingId,
